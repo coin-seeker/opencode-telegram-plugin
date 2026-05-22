@@ -925,17 +925,14 @@ var TelegramRemote = async (input) => {
     );
     logger.info("server url", { url: input.serverUrl.toString(), href: input.serverUrl.href, origin: input.serverUrl.origin });
     const sessionTitleService = new SessionTitleService();
+    const client = input.client;
     const replyToQuestion = async (requestID, answers) => {
-      const url = new URL(`question/${requestID}/reply`, input.serverUrl);
-      const res = await fetch(url.toString(), {
-        method: "POST",
+      await client._client.post({
+        url: `/question/${encodeURIComponent(requestID)}/reply`,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answers })
+        body: { answers },
+        throwOnError: true
       });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`reply failed: HTTP ${res.status} ${res.statusText} - ${body.slice(0, 200)}`);
-      }
     };
     const bot = createTelegramBot({
       config,

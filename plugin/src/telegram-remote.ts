@@ -29,6 +29,19 @@ import type { EventHandlerContext } from "./events/types.js";
 
 const pluginDir = dirname(fileURLToPath(import.meta.url));
 
+interface InternalOpencodeHttpClient {
+  post(options: {
+    url: string;
+    body: { answers: QuestionAnswer[] };
+    headers: { "Content-Type": string };
+    throwOnError: true;
+  }): Promise<{ data?: boolean }>;
+}
+
+type OpencodeClientWithInternalHttp = PluginInput["client"] & {
+  _client: InternalOpencodeHttpClient;
+};
+
 export const TelegramRemote: Plugin = async (input: PluginInput) => {
   const logger = createLogger({ namespace: "telegram" });
   try {
@@ -52,17 +65,14 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     logger.info("server url", { url: input.serverUrl.toString(), href: input.serverUrl.href, origin: input.serverUrl.origin });
 
     const sessionTitleService = new SessionTitleService();
+    const client = input.client as OpencodeClientWithInternalHttp;
     const replyToQuestion = async (requestID: string, answers: QuestionAnswer[]): Promise<void> => {
-      const url = new URL(`question/${requestID}/reply`, input.serverUrl);
-      const res = await fetch(url.toString(), {
-        method: "POST",
+      await client._client.post({
+        url: `/question/${encodeURIComponent(requestID)}/reply`,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answers }),
+        body: { answers },
+        throwOnError: true,
       });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        throw new Error(`reply failed: HTTP ${res.status} ${res.statusText} - ${body.slice(0, 200)}`);
-      }
     };
     const bot = createTelegramBot({
       config,

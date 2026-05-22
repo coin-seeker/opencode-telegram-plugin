@@ -49,4 +49,46 @@ describe("SessionTitleService", () => {
     assert.equal(service.getSessionTitle("child"), "New");
     assert.equal(service.getParentID("child"), "parent");
   });
+
+  test("tracks unfinished children by parent", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent", "Parent"));
+    service.setSessionInfo(createSession("child", "Child", "parent"));
+
+    assert.equal(service.hasUnfinishedDescendants("parent"), true);
+
+    service.setSessionStatus("child", "idle");
+
+    assert.equal(service.hasUnfinishedDescendants("parent"), false);
+  });
+
+  test("tracks unfinished nested descendants by parent", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent", "Parent"));
+    service.setSessionInfo(createSession("child", "Child", "parent"));
+    service.setSessionInfo(createSession("grandchild", "Grandchild", "child"));
+    service.setSessionStatus("child", "idle");
+
+    assert.equal(service.hasUnfinishedDescendants("parent"), true);
+
+    service.setSessionStatus("grandchild", "idle");
+
+    assert.equal(service.hasUnfinishedDescendants("parent"), false);
+  });
+
+  test("preserves deferred parent idle notification state", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent", "Parent"));
+    service.deferIdleNotification("parent");
+
+    assert.equal(service.hasDeferredIdleNotification("parent"), true);
+
+    service.setSessionInfo(createSession("parent", "Updated parent"));
+
+    assert.equal(service.hasDeferredIdleNotification("parent"), true);
+
+    service.clearDeferredIdleNotification("parent");
+
+    assert.equal(service.hasDeferredIdleNotification("parent"), false);
+  });
 });

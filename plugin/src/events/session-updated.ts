@@ -6,7 +6,5 @@ export async function handleSessionUpdated(
   ctx: EventHandlerContext,
 ): Promise<void> {
   const info = event.properties.info;
-  if (info.title && info.id) {
-    ctx.sessionTitleService.setSessionTitle(info.id, info.title);
-  }
+  ctx.sessionTitleService.setSessionInfo(info);
 }

@@ -238,6 +238,7 @@ function parsePending(text) {
   if (!Array.isArray(parsed.questions)) throw new Error("Invalid pending question: questions");
   if (!Array.isArray(parsed.telegramMessageIds)) throw new Error("Invalid pending question: telegramMessageIds");
   if (!Array.isArray(parsed.answersInProgress)) throw new Error("Invalid pending question: answersInProgress");
+  parsed.answersInProgress = parsed.answersInProgress.map((answer) => answer ?? null);
   return parsed;
 }
 async function listPendingFiles(dir) {
@@ -323,7 +324,7 @@ function loadPluginEnv(opts) {
     join3(opts.pluginDir, "../../.env"),
     join3(opts.pluginDir, "..", ".env"),
     join3(opts.pluginDir, ".env"),
-    join3(homedir2(), ".config/opencode/telegram-remote/.env")
+    join3(opts.homeDir ?? homedir2(), ".config/opencode/telegram-remote/.env")
   ];
   const loadedFrom = [];
   const values = {};
@@ -842,7 +843,7 @@ async function editPromptForQuestion(ctx, pending, shortHash, questionIndex) {
   await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), { reply_markup: { inline_keyboard: inlineKeyboard } });
 }
 async function completeIfReady(ctx, pending, shortHash) {
-  const nextIndex = pending.answersInProgress.findIndex((answer) => answer === void 0);
+  const nextIndex = pending.answersInProgress.findIndex((answer) => answer === null);
   if (nextIndex >= 0) {
     pending.currentQuestionIndex = nextIndex;
     await ctx.pendingQuestions.savePending(shortHash, pending);
@@ -884,7 +885,7 @@ async function handleQuestionAsked(event, ctx) {
     expiresAt: sentAt + QUESTION_EXPIRY_MS,
     telegramMessageIds: [],
     currentQuestionIndex: 0,
-    answersInProgress: request.questions.map(() => void 0)
+    answersInProgress: request.questions.map(() => null)
   };
   try {
     const message = request.questions.length === 1 ? await ctx.bot.sendQuestionWithKeyboard(firstQuestion, callbackDataForQuestion(shortHash, 0, firstQuestion)) : await ctx.bot.sendMessage(questionPromptText(pending, 0), {

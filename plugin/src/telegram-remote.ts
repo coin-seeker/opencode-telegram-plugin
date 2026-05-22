@@ -19,6 +19,7 @@ import {
   handleSessionError,
   handleSessionCreated,
   handleSessionIdle,
+  handleSessionStatus,
   handleSessionUpdated,
   createQuestionDispatcher,
   isEventQuestionAsked,
@@ -137,10 +138,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
             return handleSessionIdle(event, ctx);
           case "session.status":
             logger.info("session.status received", { statusType: event.properties.status.type });
-            if (event.properties.status.type === "idle") {
-              return handleSessionIdle(event, ctx);
-            }
-            return;
+            return handleSessionStatus(event, ctx);
           case "session.created":
             return handleSessionCreated(event, ctx);
           case "session.updated":

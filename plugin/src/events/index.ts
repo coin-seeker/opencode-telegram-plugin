@@ -1,4 +1,4 @@
-export { handleSessionIdle } from "./session-idle.js";
+export { handleSessionIdle, handleSessionStatus } from "./session-idle.js";
 export { handleSessionError, isEventSessionError } from "./session-error.js";
 export { handleSessionCreated } from "./session-created.js";
 export { handleSessionUpdated } from "./session-updated.js";

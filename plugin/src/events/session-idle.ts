@@ -21,27 +21,7 @@ async function resolveParentID(sessionId: string, ctx: EventHandlerContext): Pro
   }
 }
 
-/**
- * Send an "agent finished" Telegram notification.
- *
- * opencode v1.15.x emits `session.status` with `status.type === "idle"`
- * rather than a dedicated `session.idle` event, so the dispatcher routes
- * both event shapes here. We accept either and extract the session id.
- */
-export async function handleSessionIdle(
-  event: EventSessionIdle | EventSessionStatus,
-  ctx: EventHandlerContext,
-): Promise<void> {
-  const sessionId = event.properties.sessionID;
-  const parentID = await resolveParentID(sessionId, ctx);
-  if (typeof parentID === "string") {
-    ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
-    return;
-  }
-  if (parentID === undefined) {
-    ctx.logger.warn("session parentID unknown; sending idle notification", { sessionId });
-  }
-
+async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext): Promise<void> {
   if (shouldSuppressIdle(sessionId)) {
     ctx.logger.info("idle suppressed - session was aborted", { sessionId });
     return;
@@ -54,8 +34,50 @@ export async function handleSessionIdle(
   const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
   try {
     await ctx.bot.sendMessage(message);
+    ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
     ctx.logger.info("idle notification sent", { sessionId, title });
   } catch (err) {
     ctx.logger.error("failed to send idle notification", { error: String(err) });
+  }
+}
+
+async function flushDeferredParentIfReady(parentID: string, ctx: EventHandlerContext): Promise<void> {
+  if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
+  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
+  await sendIdleNotification(parentID, ctx);
+}
+
+export async function handleSessionIdle(
+  event: EventSessionIdle | EventSessionStatus,
+  ctx: EventHandlerContext,
+): Promise<void> {
+  const sessionId = event.properties.sessionID;
+  ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
+  const parentID = await resolveParentID(sessionId, ctx);
+  if (typeof parentID === "string") {
+    ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
+    await flushDeferredParentIfReady(parentID, ctx);
+    return;
+  }
+  if (parentID === undefined) {
+    ctx.logger.warn("session parentID unknown; sending idle notification", { sessionId });
+  }
+
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) {
+    ctx.sessionTitleService.deferIdleNotification(sessionId);
+    ctx.logger.info("deferring parent idle notification - child sessions still running", { sessionId });
+    return;
+  }
+
+  await sendIdleNotification(sessionId, ctx);
+}
+
+export async function handleSessionStatus(event: EventSessionStatus, ctx: EventHandlerContext): Promise<void> {
+  const sessionId = event.properties.sessionID;
+  const statusType = event.properties.status.type;
+  ctx.sessionTitleService.setSessionStatus(sessionId, statusType);
+  if (statusType === "idle") {
+    await handleSessionIdle(event, ctx);
   }
 }

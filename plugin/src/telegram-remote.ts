@@ -18,6 +18,7 @@ import {
   handleQuestionReplied,
   handleQuestionAsked,
   handleSessionError,
+  handleSessionCreated,
   handleSessionIdle,
   handleSessionUpdated,
   createQuestionDispatcher,
@@ -122,6 +123,8 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
               return handleSessionIdle(event, ctx);
             }
             return;
+          case "session.created":
+            return handleSessionCreated(event, ctx);
           case "session.updated":
             return handleSessionUpdated(event, ctx);
           case "permission.updated":

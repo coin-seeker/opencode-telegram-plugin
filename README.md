@@ -67,7 +67,7 @@ Open `~/.config/opencode/opencode.json` and add the built file to the `plugin` a
 {
   "plugin": [
     "oh-my-openagent@latest",
-    "file:///Users/yourname/workspace/plugins/opencoder-telegram-plugin/plugin/dist/telegram-remote.js"
+    "file:///Users/yourname/workspace/opencode-plugins/opencode-telegram-plugin/plugin/dist/telegram-remote.js"
   ]
 }
 ```
@@ -169,7 +169,7 @@ For macOS with the default clone location:
 ```json
 {
   "plugin": [
-    "file:///Users/theseeker/workspace/plugins/opencoder-telegram-plugin/plugin/dist/telegram-remote.js"
+    "file:///Users/theseeker/workspace/opencode-plugins/opencode-telegram-plugin/plugin/dist/telegram-remote.js"
   ]
 }
 ```

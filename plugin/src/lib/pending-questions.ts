@@ -22,7 +22,7 @@ export interface PendingQuestionState {
   expiresAt: number;
   telegramMessageIds: number[];
   currentQuestionIndex: number;
-  answersInProgress: Array<QuestionAnswer | undefined>;
+  answersInProgress: Array<QuestionAnswer | null>;
   awaitingCustomFor?: AwaitingCustomAnswer;
 }
 
@@ -56,6 +56,7 @@ function parsePending(text: string): PendingQuestionState {
   if (!Array.isArray(parsed.questions)) throw new Error("Invalid pending question: questions");
   if (!Array.isArray(parsed.telegramMessageIds)) throw new Error("Invalid pending question: telegramMessageIds");
   if (!Array.isArray(parsed.answersInProgress)) throw new Error("Invalid pending question: answersInProgress");
+  parsed.answersInProgress = parsed.answersInProgress.map((answer) => answer ?? null);
   return parsed;
 }
 

@@ -1,6 +1,6 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -59,5 +59,29 @@ describe("pending question store", () => {
     const hash = createQuestionShortHash("request-id");
     assert.equal(hash.length, 10);
     assert.match(hash, /^[A-Za-z0-9_-]+$/);
+  });
+
+  test("preserves unanswered slots as null after JSON roundtrip", async () => {
+    const store = createPendingQuestionStore({ tokenHash: "tok", baseDir: join(dir, "null-slots") });
+    const pending = samplePending(Date.now() + 60_000);
+    pending.questions = [
+      { header: "First", question: "First?", options: [{ label: "A", description: "A" }] },
+      { header: "Second", question: "Second?", options: [{ label: "B", description: "B" }] },
+    ];
+    pending.answersInProgress = [["A"], null];
+    await store.savePending("abc", pending);
+    assert.deepEqual((await store.loadPending("abc"))?.answersInProgress, [["A"], null]);
+  });
+
+  test("normalizes legacy undefined JSON slots to null", async () => {
+    const store = createPendingQuestionStore({ tokenHash: "tok", baseDir: join(dir, "legacy-slots") });
+    const pending = samplePending(Date.now() + 60_000);
+    pending.questions = [
+      { header: "First", question: "First?", options: [{ label: "A", description: "A" }] },
+      { header: "Second", question: "Second?", options: [{ label: "B", description: "B" }] },
+    ];
+    await mkdir(store.dir, { recursive: true });
+    await writeFile(join(store.dir, "abc.json"), JSON.stringify({ ...pending, answersInProgress: [["A"], undefined] }), "utf8");
+    assert.deepEqual((await store.loadPending("abc"))?.answersInProgress, [["A"], null]);
   });
 });

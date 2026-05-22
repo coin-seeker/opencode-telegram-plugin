@@ -69,7 +69,7 @@ async function editPromptForQuestion(ctx: EventHandlerContext, pending: PendingQ
 }
 
 async function completeIfReady(ctx: EventHandlerContext, pending: PendingQuestionState, shortHash: string): Promise<void> {
-  const nextIndex = pending.answersInProgress.findIndex((answer) => answer === undefined);
+  const nextIndex = pending.answersInProgress.findIndex((answer) => answer === null);
   if (nextIndex >= 0) {
     pending.currentQuestionIndex = nextIndex;
     await ctx.pendingQuestions.savePending(shortHash, pending);
@@ -115,7 +115,7 @@ export async function handleQuestionAsked(event: EventQuestionAsked, ctx: EventH
     expiresAt: sentAt + QUESTION_EXPIRY_MS,
     telegramMessageIds: [],
     currentQuestionIndex: 0,
-    answersInProgress: request.questions.map(() => undefined),
+    answersInProgress: request.questions.map(() => null),
   };
 
   try {

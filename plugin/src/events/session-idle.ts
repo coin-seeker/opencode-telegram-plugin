@@ -1,5 +1,6 @@
 import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
 import { claimOnce } from "../lib/claim.js";
+import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import type { EventHandlerContext } from "./types.js";
 
 /**
@@ -14,6 +15,11 @@ export async function handleSessionIdle(
   ctx: EventHandlerContext,
 ): Promise<void> {
   const sessionId = event.properties.sessionID;
+  if (shouldSuppressIdle(sessionId)) {
+    ctx.logger.info("idle suppressed - session was aborted", { sessionId });
+    return;
+  }
+
   const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `session.idle:${sessionId}`, ttlMs: 5000 });
   if (!claimed) return;
 

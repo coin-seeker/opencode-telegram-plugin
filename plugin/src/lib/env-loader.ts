@@ -10,6 +10,7 @@ export interface EnvLoadResult {
 
 export interface EnvLoadOptions {
   pluginDir: string;
+  homeDir?: string;
 }
 
 export function loadPluginEnv(opts: EnvLoadOptions): EnvLoadResult {
@@ -17,7 +18,7 @@ export function loadPluginEnv(opts: EnvLoadOptions): EnvLoadResult {
     join(opts.pluginDir, "../../.env"),
     join(opts.pluginDir, "..", ".env"),
     join(opts.pluginDir, ".env"),
-    join(homedir(), ".config/opencode/telegram-remote/.env"),
+    join(opts.homeDir ?? homedir(), ".config/opencode/telegram-remote/.env"),
   ];
   const loadedFrom: string[] = [];
   const values: Record<string, string> = {};

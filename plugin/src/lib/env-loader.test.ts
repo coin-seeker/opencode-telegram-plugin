@@ -27,7 +27,7 @@ describe("loadPluginEnv", () => {
     await writeFile(join(dir, "repo", ".env"), "A=repo\nSHARED=first\n", "utf8");
     await writeFile(join(dir, "repo", "plugin", ".env"), "B=plugin\nSHARED=second\n", "utf8");
     await writeFile(join(pluginDir, ".env"), "C=dist\n", "utf8");
-    const result = loadPluginEnv({ pluginDir });
+    const result = loadPluginEnv({ pluginDir, homeDir: join(dir, "home") });
     assert.equal(result.loadedFrom.length, 3);
     assert.equal(result.values.A, "repo");
     assert.equal(result.values.B, "plugin");
@@ -37,7 +37,7 @@ describe("loadPluginEnv", () => {
 
   test("returns empty result for ENOENT paths", async () => {
     for (const key of ENV_KEYS) delete process.env[key];
-    const result = loadPluginEnv({ pluginDir: join(dir, "none") });
+    const result = loadPluginEnv({ pluginDir: join(dir, "none"), homeDir: join(dir, "home-none") });
     assert.deepEqual(result, { loadedFrom: [], values: {} });
   });
 
@@ -47,7 +47,7 @@ describe("loadPluginEnv", () => {
     const pluginDir = join(dir, "override");
     await mkdir(pluginDir, { recursive: true });
     await writeFile(join(pluginDir, ".env"), "D=file\n", "utf8");
-    const result = loadPluginEnv({ pluginDir });
+    const result = loadPluginEnv({ pluginDir, homeDir: join(dir, "home-override") });
     assert.equal(result.values.D, "file");
     assert.equal(process.env.D, "existing");
   });
@@ -56,7 +56,7 @@ describe("loadPluginEnv", () => {
     for (const key of ENV_KEYS) delete process.env[key];
     const pluginDir = dir;
     await writeFile(join(dir, ".env"), "A=same\n", "utf8");
-    const result = loadPluginEnv({ pluginDir });
+    const result = loadPluginEnv({ pluginDir, homeDir: join(dir, "home-duplicate") });
     assert.ok(result.loadedFrom.length >= 1);
     assert.equal(result.values.A, "same");
   });

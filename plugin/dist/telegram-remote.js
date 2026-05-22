@@ -552,6 +552,7 @@ var TelegramRemote = async (input) => {
     };
     return {
       event: async ({ event }) => {
+        logger.info("event received", { type: event.type });
         switch (event.type) {
           case "session.idle":
             return handleSessionIdle(event, ctx);

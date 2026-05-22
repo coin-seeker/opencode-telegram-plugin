@@ -517,12 +517,25 @@ ${question.question}`, { reply_markup: { inline_keyboard: inlineKeyboard } });
 
 // src/services/session-title-service.ts
 var SessionTitleService = class {
-  sessionTitles = /* @__PURE__ */ new Map();
+  sessions = /* @__PURE__ */ new Map();
+  setSessionInfo(info) {
+    this.sessions.set(info.id, {
+      title: info.title || null,
+      parentID: info.parentID ?? null
+    });
+  }
   setSessionTitle(sessionId, title) {
-    this.sessionTitles.set(sessionId, title);
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title,
+      parentID: existing?.parentID ?? null
+    });
   }
   getSessionTitle(sessionId) {
-    return this.sessionTitles.get(sessionId) ?? null;
+    return this.sessions.get(sessionId)?.title ?? null;
+  }
+  getParentID(sessionId) {
+    return this.sessions.get(sessionId)?.parentID;
   }
 };
 
@@ -617,8 +630,32 @@ function shouldSuppressIdle(sessionID) {
 }
 
 // src/events/session-idle.ts
+async function resolveParentID(sessionId, ctx) {
+  const cachedParentID = ctx.sessionTitleService.getParentID(sessionId);
+  if (cachedParentID !== void 0) return cachedParentID;
+  try {
+    const result = await ctx.client.session.get({ path: { id: sessionId } });
+    if (result.data) {
+      ctx.sessionTitleService.setSessionInfo(result.data);
+      return ctx.sessionTitleService.getParentID(sessionId);
+    }
+    ctx.logger.warn("session parentID cache miss fetch returned no data", { sessionId });
+    return void 0;
+  } catch (err) {
+    ctx.logger.warn("session parentID cache miss fetch failed", { sessionId, error: String(err) });
+    return void 0;
+  }
+}
 async function handleSessionIdle(event, ctx) {
   const sessionId = event.properties.sessionID;
+  const parentID = await resolveParentID(sessionId, ctx);
+  if (typeof parentID === "string") {
+    ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
+    return;
+  }
+  if (parentID === void 0) {
+    ctx.logger.warn("session parentID unknown; sending idle notification", { sessionId });
+  }
   if (shouldSuppressIdle(sessionId)) {
     ctx.logger.info("idle suppressed - session was aborted", { sessionId });
     return;
@@ -645,12 +682,15 @@ async function handleSessionError(event, ctx) {
   ctx.logger.info("session abort recorded", { sessionId: event.properties.sessionID ?? "global" });
 }
 
+// src/events/session-created.ts
+async function handleSessionCreated(event, ctx) {
+  ctx.sessionTitleService.setSessionInfo(event.properties.info);
+}
+
 // src/events/session-updated.ts
 async function handleSessionUpdated(event, ctx) {
   const info = event.properties.info;
-  if (info.title && info.id) {
-    ctx.sessionTitleService.setSessionTitle(info.id, info.title);
-  }
+  ctx.sessionTitleService.setSessionInfo(info);
 }
 
 // src/events/permission-updated.ts
@@ -949,6 +989,8 @@ var TelegramRemote = async (input) => {
               return handleSessionIdle(event, ctx);
             }
             return;
+          case "session.created":
+            return handleSessionCreated(event, ctx);
           case "session.updated":
             return handleSessionUpdated(event, ctx);
           case "permission.updated":

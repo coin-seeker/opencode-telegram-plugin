@@ -456,6 +456,7 @@ async function handleSessionIdle(event, ctx) {
   const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
   try {
     await ctx.bot.sendMessage(message);
+    ctx.logger.info("idle notification sent", { sessionId, title });
   } catch (err) {
     ctx.logger.error("failed to send idle notification", { error: String(err) });
   }
@@ -554,6 +555,11 @@ var TelegramRemote = async (input) => {
         switch (event.type) {
           case "session.idle":
             return handleSessionIdle(event, ctx);
+          case "session.status":
+            if (event.properties.status.type === "idle") {
+              return handleSessionIdle(event, ctx);
+            }
+            return;
           case "session.updated":
             return handleSessionUpdated(event, ctx);
           case "permission.updated":

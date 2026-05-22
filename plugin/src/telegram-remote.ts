@@ -88,6 +88,12 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
         switch (event.type) {
           case "session.idle":
             return handleSessionIdle(event, ctx);
+          case "session.status":
+            // opencode emits session.status with status.type === "idle" instead of session.idle
+            if (event.properties.status.type === "idle") {
+              return handleSessionIdle(event, ctx);
+            }
+            return;
           case "session.updated":
             return handleSessionUpdated(event, ctx);
           case "permission.updated":

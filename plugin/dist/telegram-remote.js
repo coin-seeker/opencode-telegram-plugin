@@ -518,16 +518,30 @@ ${question.question}`, { reply_markup: { inline_keyboard: inlineKeyboard } });
 var SessionTitleService = class {
   sessions = /* @__PURE__ */ new Map();
   setSessionInfo(info) {
+    const existing = this.sessions.get(info.id);
     this.sessions.set(info.id, {
       title: info.title || null,
-      parentID: info.parentID ?? null
+      parentID: info.parentID ?? null,
+      status: existing?.status,
+      idleNotificationPending: existing?.idleNotificationPending ?? false
     });
   }
   setSessionTitle(sessionId, title) {
     const existing = this.sessions.get(sessionId);
     this.sessions.set(sessionId, {
       title,
-      parentID: existing?.parentID ?? null
+      parentID: existing?.parentID ?? null,
+      status: existing?.status,
+      idleNotificationPending: existing?.idleNotificationPending ?? false
+    });
+  }
+  setSessionStatus(sessionId, status) {
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title: existing?.title ?? null,
+      parentID: existing?.parentID ?? null,
+      status,
+      idleNotificationPending: status === "idle" ? existing?.idleNotificationPending ?? false : false
     });
   }
   getSessionTitle(sessionId) {
@@ -535,6 +549,37 @@ var SessionTitleService = class {
   }
   getParentID(sessionId) {
     return this.sessions.get(sessionId)?.parentID;
+  }
+  getSessionStatus(sessionId) {
+    return this.sessions.get(sessionId)?.status;
+  }
+  hasUnfinishedDescendants(parentID) {
+    for (const [sessionID, session] of this.sessions.entries()) {
+      if (session.parentID !== parentID) continue;
+      if (session.status !== "idle") return true;
+      if (this.hasUnfinishedDescendants(sessionID)) return true;
+    }
+    return false;
+  }
+  deferIdleNotification(sessionId) {
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title: existing?.title ?? null,
+      parentID: existing?.parentID ?? null,
+      status: existing?.status ?? "idle",
+      idleNotificationPending: true
+    });
+  }
+  hasDeferredIdleNotification(sessionId) {
+    return this.sessions.get(sessionId)?.idleNotificationPending ?? false;
+  }
+  clearDeferredIdleNotification(sessionId) {
+    const existing = this.sessions.get(sessionId);
+    if (!existing) return;
+    this.sessions.set(sessionId, {
+      ...existing,
+      idleNotificationPending: false
+    });
   }
 };
 
@@ -645,16 +690,7 @@ async function resolveParentID(sessionId, ctx) {
     return void 0;
   }
 }
-async function handleSessionIdle(event, ctx) {
-  const sessionId = event.properties.sessionID;
-  const parentID = await resolveParentID(sessionId, ctx);
-  if (typeof parentID === "string") {
-    ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
-    return;
-  }
-  if (parentID === void 0) {
-    ctx.logger.warn("session parentID unknown; sending idle notification", { sessionId });
-  }
+async function sendIdleNotification(sessionId, ctx) {
   if (shouldSuppressIdle(sessionId)) {
     ctx.logger.info("idle suppressed - session was aborted", { sessionId });
     return;
@@ -665,9 +701,43 @@ async function handleSessionIdle(event, ctx) {
   const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
   try {
     await ctx.bot.sendMessage(message);
+    ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
     ctx.logger.info("idle notification sent", { sessionId, title });
   } catch (err) {
     ctx.logger.error("failed to send idle notification", { error: String(err) });
+  }
+}
+async function flushDeferredParentIfReady(parentID, ctx) {
+  if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
+  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
+  await sendIdleNotification(parentID, ctx);
+}
+async function handleSessionIdle(event, ctx) {
+  const sessionId = event.properties.sessionID;
+  ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
+  const parentID = await resolveParentID(sessionId, ctx);
+  if (typeof parentID === "string") {
+    ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
+    await flushDeferredParentIfReady(parentID, ctx);
+    return;
+  }
+  if (parentID === void 0) {
+    ctx.logger.warn("session parentID unknown; sending idle notification", { sessionId });
+  }
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) {
+    ctx.sessionTitleService.deferIdleNotification(sessionId);
+    ctx.logger.info("deferring parent idle notification - child sessions still running", { sessionId });
+    return;
+  }
+  await sendIdleNotification(sessionId, ctx);
+}
+async function handleSessionStatus(event, ctx) {
+  const sessionId = event.properties.sessionID;
+  const statusType = event.properties.status.type;
+  ctx.sessionTitleService.setSessionStatus(sessionId, statusType);
+  if (statusType === "idle") {
+    await handleSessionIdle(event, ctx);
   }
 }
 
@@ -990,10 +1060,7 @@ var TelegramRemote = async (input) => {
             return handleSessionIdle(event, ctx);
           case "session.status":
             logger.info("session.status received", { statusType: event.properties.status.type });
-            if (event.properties.status.type === "idle") {
-              return handleSessionIdle(event, ctx);
-            }
-            return;
+            return handleSessionStatus(event, ctx);
           case "session.created":
             return handleSessionCreated(event, ctx);
           case "session.updated":

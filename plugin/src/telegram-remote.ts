@@ -102,5 +102,6 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
   }
 };
 
+export const id = "opencoder-telegram-remote";
 export const server = TelegramRemote;
-export default { server: TelegramRemote };
+export default { id, server: TelegramRemote };

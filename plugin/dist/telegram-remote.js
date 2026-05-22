@@ -252,7 +252,7 @@ function parseAllowedUserIds(value) {
   if (!value || value.trim() === "") {
     return [];
   }
-  return value.split(",").map((id) => id.trim()).filter((id) => id !== "").map((id) => Number.parseInt(id, 10)).filter((id) => !Number.isNaN(id));
+  return value.split(",").map((id2) => id2.trim()).filter((id2) => id2 !== "").map((id2) => Number.parseInt(id2, 10)).filter((id2) => !Number.isNaN(id2));
 }
 function loadConfig(opts) {
   const { logger, env } = opts;
@@ -568,10 +568,12 @@ var TelegramRemote = async (input) => {
     } };
   }
 };
+var id = "opencoder-telegram-remote";
 var server = TelegramRemote;
-var telegram_remote_default = { server: TelegramRemote };
+var telegram_remote_default = { id, server: TelegramRemote };
 export {
   TelegramRemote,
   telegram_remote_default as default,
+  id,
   server
 };

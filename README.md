@@ -1,25 +1,32 @@
-# OpenCode Telegram Notification Plugin
+# OpenCode Telegram Plugin
 
-Get OpenCode notifications via Telegram when your agent finishes a task or needs your attention.
+Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin`, then configure your Telegram bot credentials in a private local env file.
 
 > **Disclaimer:** This project is not affiliated with, endorsed by, or sponsored by OpenCode, SST, or any of their affiliates. OpenCode is a trademark of SST.
 
 ## Features
 
-- 🔔 **Task Completion Notifications**: Get notified when the OpenCode agent goes idle (task done)
-- 🔐 **Permission Alerts**: Receive a ping when OpenCode is waiting on a permission decision
-- 🔒 **Multi-Session Safe**: File-lock leader/pass-through model prevents duplicate Telegram polling across concurrent OpenCode windows
-- 🔐 **Secure**: Whitelist-based user access control
-- 💬 **Simple Setup**: Automatic chat discovery and configuration
-- 🪵 **Clean Terminals**: All plugin logs go to a temp file, never to stdout
+- **Task completion notifications**: Receive Telegram messages when the root OpenCode session is truly finished.
+- **Subagent-aware completion**: Child/subagent idle events are suppressed, and parent completion is deferred until background subagents finish.
+- **Question replies from Telegram**: Answer OpenCode `question` prompts from inline Telegram buttons.
+- **Custom answers**: Use Telegram free-text replies for prompts that allow custom input.
+- **Permission alerts**: Receive a ping when OpenCode is waiting on a permission decision.
+- **Multi-session safe**: A file-lock leader/pass-through model prevents duplicate Telegram polling across concurrent OpenCode windows.
+- **Clean terminals**: Plugin logs go to a temp file instead of stdout, so OpenCode terminal output stays clean.
+- **Access control**: Only whitelisted Telegram user IDs can interact with the bot.
 
 ## Requirements
 
 - Node.js 18+
+- npm
 - OpenCode CLI installed
 - Telegram Bot (from [@BotFather](https://t.me/BotFather))
 
 ## Installation
+
+Install the plugin by adding the npm package name to your OpenCode config.
+
+For a step-by-step manual install guide and an AI-agent-friendly install prompt, see [`docs/installation.md`](docs/installation.md).
 
 ### 1. Create a Telegram Bot
 
@@ -38,41 +45,46 @@ Get OpenCode notifications via Telegram when your agent finishes a task or needs
 1. Send any message to [@userinfobot](https://t.me/userinfobot)
 2. Save your numeric user ID
 
-### 4. Clone and Build
+### 4. Configure Telegram Credentials
+
+Create `~/.config/opencode/telegram-remote/.env`:
 
 ```bash
-git clone https://github.com/coin-seeker/opencode-telegram-plugin.git
-cd opencode-telegram-plugin/plugin
-npm install
-npm run build
-```
-
-### 5. Create the `.env` File
-
-The `.env` file lives in the **repo root** (one level above `plugin/`). The plugin auto-discovers it via `import.meta.url` at runtime.
-
-```bash
-# opencode-telegram-plugin/.env
+mkdir -p ~/.config/opencode/telegram-remote
+chmod 700 ~/.config/opencode/telegram-remote
+cat > ~/.config/opencode/telegram-remote/.env <<'EOF'
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 # Optional: skip the first-message discovery step
 # TELEGRAM_CHAT_ID=your_chat_id_here
+EOF
+chmod 600 ~/.config/opencode/telegram-remote/.env
 ```
+
+Keep this file private. Never commit or share your Telegram bot token.
 
 ### 6. Register the Plugin with OpenCode
 
-Open `~/.config/opencode/opencode.json` and add the built file to the `plugin` array using a `file://` URL:
+Open `~/.config/opencode/opencode.json` and add the npm package name to the `plugin` array:
 
 ```json
 {
   "plugin": [
-    "oh-my-openagent@latest",
-    "file:///Users/yourname/workspace/opencode-plugins/opencode-telegram-plugin/plugin/dist/telegram-remote.js"
+    "@coinseeker/opencode-telegram-plugin"
   ]
 }
 ```
 
 The `plugin` key is a **singular string array**. Each entry is either an npm package name or a `file://` absolute path. There is no `plugins` (plural) key and no `{name, path}` object format.
+
+Restart OpenCode after changing this file.
+
+### 7. Connect Telegram
+
+1. Start OpenCode from any project where the global config is loaded.
+2. Send any message to your Telegram bot in a private chat.
+3. The bot should reply with a chat connection confirmation.
+4. Run an OpenCode task and confirm you receive notifications.
 
 ## Architecture: Multi-Session Safety
 
@@ -121,20 +133,38 @@ This lets pass-through processes send notifications even before the user has mes
 3. The bot replies with your chat ID and confirms the connection
 4. You're ready to receive notifications
 
-### Notification Triggers
+### Notification and Reply Triggers
 
-The plugin sends a Telegram message when these OpenCode events fire:
+The plugin reacts to these OpenCode events:
 
-| Event | When it fires | Message sent |
-|-------|--------------|--------------|
-| `session.idle` | Agent finishes a task | `Agent has finished: [Session Title]` |
-| `permission.updated` | OpenCode is waiting on a permission decision | `Permission needed: [Session Title]` |
+| Event | When it fires | Telegram behavior |
+|-------|---------------|-------------------|
+| `session.status` / `session.idle` | Root session finishes and no child/subagent is running | Sends `Agent has finished: [Session Title]` |
+| Child/subagent idle | A subagent finishes | Suppressed; no Telegram completion message |
+| Parent idle while background subagent is running | Parent appears idle before background work completes | Defers the parent completion message |
+| `permission.updated` | OpenCode is waiting on a permission decision | Sends `Permission needed: [Session Title]` |
+| `question.asked` | OpenCode asks an interactive question | Sends Telegram inline buttons and optional custom answer flow |
+| `question.replied` | The question was answered elsewhere | Cleans up pending Telegram question state |
 
-The `session.updated` event is also consumed internally to keep session titles up to date for the notification messages.
+The plugin also consumes `session.created` and `session.updated` internally to cache session titles and parent/child relationships.
+
+### Answering OpenCode Questions from Telegram
+
+When OpenCode asks a question, the bot sends the question with inline buttons.
+
+- Tap an option to answer with that option label.
+- Tap **Custom answer** when available, then reply to the Telegram force-reply prompt with free text.
+- Multi-question prompts are handled one question at a time.
+
+### Interrupts and Background Subagents
+
+- Interrupted sessions are not reported as successful completion notifications.
+- Subagent/child session completion notifications are suppressed.
+- If a parent session becomes idle while background subagents are still running, the plugin waits and sends one parent completion notification after the background work is actually done.
 
 ### Optional: Pre-configure Chat ID
 
-Add your chat ID to `.env` to skip the first-message discovery step:
+Add your chat ID to `~/.config/opencode/telegram-remote/.env` to skip the first-message discovery step:
 
 ```bash
 TELEGRAM_CHAT_ID=your_chat_id_here
@@ -158,13 +188,11 @@ The correct schema uses `"plugin"` (singular) with string entries:
 
 ```json
 {
-  "plugin": [
-    "file:///absolute/path/to/telegram-remote.js"
-  ]
+  "plugin": ["@coinseeker/opencode-telegram-plugin"]
 }
 ```
 
-Example for macOS (replace `<your-username>` and the clone path with your own):
+For local development from a clone, a `file://` absolute path is also supported:
 
 ```json
 {
@@ -174,14 +202,12 @@ Example for macOS (replace `<your-username>` and the clone path with your own):
 }
 ```
 
-> Find your absolute path with `pwd` from inside the cloned repo, then append `/plugin/dist/telegram-remote.js`.
-
 ## Security
 
 ### Access Control
 
 - Only whitelisted user IDs can interact with the bot
-- The whitelist is comma-separated in `.env`
+- The whitelist is comma-separated in `~/.config/opencode/telegram-remote/.env`
 - Non-whitelisted users are silently ignored
 
 ### Best Practices
@@ -189,13 +215,13 @@ Example for macOS (replace `<your-username>` and the clone path with your own):
 1. Use a **private** chat with the bot (not a group)
 2. Keep the bot token secret and out of version control
 3. Only add trusted users to the whitelist
-4. Check `.env` file permissions: `chmod 600 .env`
+4. Check env file permissions: `chmod 600 ~/.config/opencode/telegram-remote/.env`
 
 ## Troubleshooting
 
 ### Bot doesn't send notifications
 
-- Verify the bot token is correct in `.env`
+- Verify the bot token is correct in `~/.config/opencode/telegram-remote/.env`
 - Confirm your user ID is in `TELEGRAM_ALLOWED_USER_IDS`
 - Make sure you've sent at least one message to the bot to establish the chat
 - Check the plugin log file (see below)
@@ -204,11 +230,23 @@ Example for macOS (replace `<your-username>` and the clone path with your own):
 
 - This shouldn't happen with the leader/pass-through model, but if it does, check whether a stale lock file exists at `${os.tmpdir()}/opencoder-telegram-<hash>.lock` and delete it
 
+### Button says `Failed to send answer to opencode`
+
+- Confirm OpenCode is loading the current `@coinseeker/opencode-telegram-plugin` package.
+- Restart OpenCode after updating the package.
+- Check the log file for `failed to send question reply`.
+
+### Subagent completion messages still arrive
+
+- Update the package and restart OpenCode.
+- Check the log for `suppressing child session idle notification`.
+- For background subagents, check for `deferring parent idle notification - child sessions still running` followed by `sending deferred parent idle notification`.
+
 ### Chat not connecting
 
 - Make sure you're using a **private** chat (not a group)
 - Send any message to the bot to trigger chat discovery
-- If using `TELEGRAM_CHAT_ID` in `.env`, verify the ID is correct
+- If using `TELEGRAM_CHAT_ID` in the env file, verify the ID is correct
 
 ### Permission denied
 
@@ -247,11 +285,24 @@ node -e "const os=require('os'); console.log(os.tmpdir() + '/opencoder-telegram.
 
 ## Development
 
+### Local Clone Development
+
+```bash
+git clone https://github.com/coin-seeker/opencode-telegram-plugin.git
+cd opencode-telegram-plugin
+npm install
+cd plugin
+npm install
+npm run build
+```
+
+For local testing, add the built file to `~/.config/opencode/opencode.json` with a `file://` absolute path. Restart OpenCode after rebuilding. The `file://` path stays the same as long as the clone location does not change.
+
 ### Project Structure
 
 ```
 opencode-telegram-plugin/
-├── .env                              # Bot credentials (repo root, gitignored)
+├── .env                              # Optional dev credentials (repo root, gitignored)
 ├── .env.example                      # Template for .env
 ├── plugin/
 │   ├── src/
@@ -259,19 +310,24 @@ opencode-telegram-plugin/
 │   │   ├── bot.ts                    # Grammy bot setup and manager
 │   │   ├── config.ts                 # Config loading (via env-loader)
 │   │   ├── events/
-│   │   │   ├── session-idle.ts       # Handles session.idle → notification
-│   │   │   ├── session-updated.ts    # Tracks session titles
+│   │   │   ├── session-idle.ts       # Handles idle/status completion notifications
+│   │   │   ├── question-asked.ts     # Sends Telegram question prompts and replies
+│   │   │   ├── question-replied.ts   # Cleans up answered question prompts
+│   │   │   ├── session-created.ts    # Tracks session parent/title info
+│   │   │   ├── session-updated.ts    # Tracks session parent/title info
 │   │   │   ├── permission-updated.ts # Handles permission.updated → notification
 │   │   │   ├── types.ts              # Shared TypeScript types
 │   │   │   └── index.ts              # Re-exports all handlers
 │   │   ├── lib/
 │   │   │   ├── lock.ts               # File-lock leader election
 │   │   │   ├── claim.ts              # Per-event cross-process dedup
+│   │   │   ├── pending-questions.ts  # Persisted Telegram question state
+│   │   │   ├── abort-tracker.ts      # Interrupt notification suppression
 │   │   │   ├── state-store.ts        # Atomic JSON state persistence
 │   │   │   ├── logger.ts             # Buffered file logger
 │   │   │   └── env-loader.ts         # Multi-source .env loader
 │   │   └── services/
-│   │       └── session-title-service.ts  # In-memory session title cache
+│   │       └── session-title-service.ts  # Session title/parent/status cache
 │   ├── dist/                         # Built output (gitignored)
 │   ├── package.json
 │   ├── tsconfig.json
@@ -285,12 +341,13 @@ cd plugin
 npm run build      # Production build
 npm run dev        # Watch mode
 npm run typecheck  # Type checking only
+npm test           # Unit tests
 ```
 
 ### Testing Locally
 
 1. Build the plugin: `npm run build`
-2. Make sure `.env` exists in the repo root with valid credentials
+2. Make sure `.env` exists in the repo root, or `~/.config/opencode/telegram-remote/.env` exists, with valid credentials
 3. Add the `file://` path to your `~/.config/opencode/opencode.json`
 4. Start OpenCode and message the bot to establish the connection
 5. Run an OpenCode task and wait for the idle notification
@@ -302,7 +359,7 @@ Contributions welcome! Please:
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run `npm run lint` and `npm run build`
+4. Run `npm run typecheck`, `npm test`, and `npm run build`
 5. Submit a pull request
 
 ## License

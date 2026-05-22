@@ -164,15 +164,17 @@ The correct schema uses `"plugin"` (singular) with string entries:
 }
 ```
 
-For macOS with the default clone location:
+Example for macOS (replace `<your-username>` and the clone path with your own):
 
 ```json
 {
   "plugin": [
-    "file:///Users/theseeker/workspace/opencode-plugins/opencode-telegram-plugin/plugin/dist/telegram-remote.js"
+    "file:///Users/<your-username>/path/to/opencode-telegram-plugin/plugin/dist/telegram-remote.js"
   ]
 }
 ```
+
+> Find your absolute path with `pwd` from inside the cloned repo, then append `/plugin/dist/telegram-remote.js`.
 
 ## Security
 

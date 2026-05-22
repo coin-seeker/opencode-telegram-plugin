@@ -11,5 +11,4 @@ export default defineConfig({
  * https://github.com/YOUR_USERNAME/opencoder-telegram-remote-plugin
  */`,
   },
-  onSuccess: "node scripts/copy-build.js",
 });

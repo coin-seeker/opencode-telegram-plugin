@@ -3,152 +3,279 @@
  * https://github.com/YOUR_USERNAME/opencoder-telegram-remote-plugin
  */
 
-// src/bot.ts
-import { Bot } from "grammy";
-var botInstance = null;
-function isUserAllowed(ctx, allowedUserIds) {
-  const userId = ctx.from?.id;
-  if (!userId) return false;
-  return allowedUserIds.includes(userId);
-}
-function createTelegramBot(config, client, sessionTitleService) {
-  console.log("[Bot] createTelegramBot called");
-  if (botInstance) {
-    console.log("[Bot] Reusing existing bot instance");
-    return createBotManager(botInstance, sessionTitleService);
+// src/telegram-remote.ts
+import { fileURLToPath } from "url";
+import { dirname as dirname2, join as join4 } from "path";
+import { tmpdir as tmpdir2 } from "os";
+import { createHash as createHash2 } from "crypto";
+
+// src/lib/logger.ts
+import { appendFile } from "fs/promises";
+import { tmpdir } from "os";
+var DEFAULT_BUFFER_LIMIT = 4096;
+var DEFAULT_FLUSH_INTERVAL_MS = 2e3;
+function safeJson(data) {
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return '{"serialization":"failed"}';
   }
-  console.log("[Bot] Creating new Bot instance with token");
-  const bot = new Bot(config.botToken);
-  botInstance = bot;
-  console.log("[Bot] Bot instance created");
-  console.log("[Bot] Setting up middleware and handlers...");
-  bot.use(async (ctx, next) => {
-    if (!isUserAllowed(ctx, config.allowedUserIds)) {
-      console.log(`[Bot] Unauthorized access attempt from user ${ctx.from?.id}`);
-      return;
-    }
-    if (ctx.chat?.type !== "private") {
-      return;
-    }
-    if (ctx.chat?.id) {
-      const previousChatId = sessionTitleService.getActiveChatId();
-      const isNewChatId = previousChatId !== ctx.chat.id;
-      sessionTitleService.setActiveChatId(ctx.chat.id);
-      if (isNewChatId) {
-        console.log(`[Bot] New chat_id discovered: ${ctx.chat.id}`);
-        await ctx.reply(
-          `\u2705 Chat connected!
-
-Your chat_id: ${ctx.chat.id}
-
-This chat is now active for OpenCode notifications.`
-        );
+}
+function createLogger(opts = {}) {
+  const filePath = opts.filePath ?? `${tmpdir()}/opencoder-telegram.log`;
+  const namespace = opts.namespace ?? "default";
+  const bufferLimit = opts.bufferLimit ?? DEFAULT_BUFFER_LIMIT;
+  const flushIntervalMs = opts.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
+  let buffer = "";
+  let closed = false;
+  let flushing = Promise.resolve();
+  const timer = setInterval(() => {
+    void flushBuffer();
+  }, flushIntervalMs);
+  timer.unref();
+  async function flushBuffer() {
+    if (buffer.length === 0) return flushing;
+    const chunk = buffer;
+    buffer = "";
+    flushing = flushing.then(async () => {
+      try {
+        await appendFile(filePath, chunk, "utf8");
+      } catch {
       }
-    }
-    await next();
-  });
-  const manager = createBotManager(bot, sessionTitleService);
-  bot.catch((error) => {
-    console.error("[Bot] Bot error caught:", error);
-  });
-  console.log("[Bot] All handlers registered, returning bot manager");
-  return manager;
-}
-function requireActiveChatId(sessionTitleService, action) {
-  const chatId = sessionTitleService.getActiveChatId();
-  if (!chatId) {
-    const message = `No active chat available for ${action}. Ask an allowed user to message the bot first.`;
-    console.warn(message);
-    throw new Error(message);
+    });
+    return flushing;
   }
-  return chatId;
-}
-function createBotManager(bot, sessionTitleService) {
+  function write(level, msg, data) {
+    if (closed) return;
+    const json = data === void 0 ? "" : ` ${safeJson(data)}`;
+    buffer += `[${(/* @__PURE__ */ new Date()).toISOString()}] [${level}] [${process.pid}] [${namespace}] ${msg}${json}
+`;
+    if (level === "error" || buffer.length >= bufferLimit) {
+      void flushBuffer();
+    }
+  }
   return {
-    async start() {
-      console.log("[Bot] start() called - beginning long polling...");
-      await bot.start({
-        drop_pending_updates: true,
-        onStart: async () => {
-          console.log("[Bot] Telegram bot polling started successfully");
-          try {
-            const chatId = sessionTitleService.getActiveChatId();
-            if (!chatId) {
-              console.log("[Bot] No active chat yet; skipping startup message");
-              return;
-            }
-            await bot.api.sendMessage(chatId, "Messaging enabled");
-            console.log("[Bot] Startup message sent to active chat");
-          } catch (error) {
-            console.error("[Bot] Failed to send startup message:", error);
-          }
-        }
-      });
+    debug(msg, data) {
+      write("debug", msg, data);
     },
-    async stop() {
-      console.log("[Bot] stop() called");
-      await bot.stop();
-      botInstance = null;
-      console.log("[Bot] Bot stopped and instance cleared");
+    info(msg, data) {
+      write("info", msg, data);
     },
-    async sendMessage(text, options) {
-      console.log(`[Bot] sendMessage: "${text.slice(0, 50)}..."`);
-      const chatId = requireActiveChatId(sessionTitleService, "sendMessage");
-      const result = await bot.api.sendMessage(chatId, text, options);
-      return { message_id: result.message_id };
+    warn(msg, data) {
+      write("warn", msg, data);
     },
-    async editMessage(messageId, text) {
-      console.log(`[Bot] editMessage ${messageId}: "${text.slice(0, 50)}..."`);
-      const chatId = requireActiveChatId(sessionTitleService, "editMessage");
-      await bot.api.editMessageText(chatId, messageId, text);
+    error(msg, data) {
+      write("error", msg, data);
     },
-    async deleteMessage(messageId) {
-      console.log(`[Bot] deleteMessage ${messageId}`);
-      const chatId = requireActiveChatId(sessionTitleService, "deleteMessage");
-      await bot.api.deleteMessage(chatId, messageId);
+    async flush() {
+      await flushBuffer();
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      await flushBuffer();
     }
   };
 }
 
+// src/lib/lock.ts
+import { open, readFile, stat, unlink } from "fs/promises";
+import { hostname } from "os";
+var DEFAULT_TTL_MS = 5 * 60 * 1e3;
+function hasCode(err, code) {
+  return "code" in err && err.code === code;
+}
+function parseLockData(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed.pid === "number" && typeof parsed.hostname === "string" && typeof parsed.createdAt === "string") {
+      return { pid: parsed.pid, hostname: parsed.hostname, createdAt: parsed.createdAt };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err instanceof Error && hasCode(err, "ESRCH")) return false;
+    return true;
+  }
+}
+async function createLock(lockPath, pid) {
+  const file = await open(lockPath, "wx");
+  const acquiredAt = /* @__PURE__ */ new Date();
+  const data = { pid, hostname: hostname(), createdAt: acquiredAt.toISOString() };
+  try {
+    await file.writeFile(JSON.stringify(data), "utf8");
+  } finally {
+    await file.close();
+  }
+  let released = false;
+  return {
+    path: lockPath,
+    acquiredAt,
+    async release() {
+      if (released) return;
+      released = true;
+      try {
+        await unlink(lockPath);
+      } catch {
+      }
+    }
+  };
+}
+async function inspectExisting(lockPath, ttlMs) {
+  let ownerPid;
+  let dead = false;
+  try {
+    const text = await readFile(lockPath, "utf8");
+    const data = parseLockData(text);
+    if (data) {
+      ownerPid = data.pid;
+      dead = !isPidAlive(data.pid);
+    }
+  } catch {
+    return { stale: true, reason: "unreadable lock" };
+  }
+  try {
+    const fileStat = await stat(lockPath);
+    const expired = Date.now() - fileStat.mtimeMs > ttlMs;
+    if (dead) return { stale: true, ownerPid, reason: "dead owner" };
+    if (expired) return { stale: true, ownerPid, reason: "expired lock" };
+    return { stale: false, ownerPid, reason: "lock held" };
+  } catch {
+    return { stale: true, ownerPid, reason: "missing lock" };
+  }
+}
+async function acquireLock(opts) {
+  const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
+  const pid = opts.pid ?? process.pid;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return { acquired: true, handle: await createLock(opts.lockPath, pid) };
+    } catch (err) {
+      if (!(err instanceof Error) || !hasCode(err, "EEXIST")) {
+        return { acquired: false, reason: err instanceof Error ? err.message : String(err) };
+      }
+      const existing = await inspectExisting(opts.lockPath, ttlMs);
+      if (!existing.stale || attempt === 1) {
+        return { acquired: false, reason: existing.reason, ownerPid: existing.ownerPid };
+      }
+      try {
+        await unlink(opts.lockPath);
+      } catch {
+        return { acquired: false, reason: "failed to remove stale lock", ownerPid: existing.ownerPid };
+      }
+    }
+  }
+  return { acquired: false, reason: "lock acquisition failed" };
+}
+
+// src/lib/state-store.ts
+import { mkdir, readFile as readFile2, rename, writeFile } from "fs/promises";
+import { homedir } from "os";
+import { dirname, join } from "path";
+function hasCode2(err, code) {
+  return "code" in err && err.code === code;
+}
+function parseState(text) {
+  const parsed = JSON.parse(text);
+  const state = {};
+  if (typeof parsed.chatId === "number") state.chatId = parsed.chatId;
+  if (typeof parsed.updatedAt === "string") state.updatedAt = parsed.updatedAt;
+  if (typeof parsed.discoveredBy === "number") state.discoveredBy = parsed.discoveredBy;
+  return state;
+}
+function createStateStore(opts = {}) {
+  const filePath = opts.filePath ?? join(homedir(), ".config/opencode/telegram-remote/state.json");
+  return {
+    async read() {
+      try {
+        return parseState(await readFile2(filePath, "utf8"));
+      } catch (err) {
+        if (err instanceof Error && hasCode2(err, "ENOENT")) return {};
+        throw err;
+      }
+    },
+    async write(patch) {
+      const existing = await this.read();
+      const next = { ...existing, ...patch, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+      await mkdir(dirname(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp.${process.pid}`;
+      await writeFile(tmpPath, JSON.stringify(next, null, 2), "utf8");
+      try {
+        await rename(tmpPath, filePath);
+      } catch (err) {
+        if (!(err instanceof Error) || !hasCode2(err, "ENOENT")) throw err;
+        await writeFile(tmpPath, JSON.stringify(next, null, 2), "utf8");
+        await rename(tmpPath, filePath);
+      }
+      return next;
+    }
+  };
+}
+
+// src/lib/env-loader.ts
+import { existsSync } from "fs";
+import { homedir as homedir2 } from "os";
+import { join as join2 } from "path";
+import dotenv from "dotenv";
+function loadPluginEnv(opts) {
+  const paths = [
+    join2(opts.pluginDir, "../../.env"),
+    join2(opts.pluginDir, "..", ".env"),
+    join2(opts.pluginDir, ".env"),
+    join2(homedir2(), ".config/opencode/telegram-remote/.env")
+  ];
+  const loadedFrom = [];
+  const values = {};
+  for (const envPath of paths) {
+    if (!existsSync(envPath)) continue;
+    const result = dotenv.config({ path: envPath, override: false });
+    if (result.parsed) {
+      loadedFrom.push(envPath);
+      for (const [key, value] of Object.entries(result.parsed)) {
+        if (!(key in values)) values[key] = value;
+      }
+    }
+  }
+  return { loadedFrom, values };
+}
+
 // src/config.ts
-import { resolve } from "path";
-import { config as loadEnv } from "dotenv";
-loadEnv({ path: resolve(process.cwd(), ".env") });
 function parseAllowedUserIds(value) {
   if (!value || value.trim() === "") {
     return [];
   }
   return value.split(",").map((id) => id.trim()).filter((id) => id !== "").map((id) => Number.parseInt(id, 10)).filter((id) => !Number.isNaN(id));
 }
-function loadConfig() {
-  console.log("[Config] Loading environment configuration...");
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  const allowedUserIdsStr = process.env.TELEGRAM_ALLOWED_USER_IDS;
-  const chatIdStr = process.env.TELEGRAM_CHAT_ID;
+function loadConfig(opts) {
+  const { logger, env } = opts;
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  const allowedUserIdsStr = env.TELEGRAM_ALLOWED_USER_IDS;
+  const chatIdStr = env.TELEGRAM_CHAT_ID;
   if (!botToken || botToken.trim() === "") {
-    console.error("[Config] Missing TELEGRAM_BOT_TOKEN");
+    logger.error("missing TELEGRAM_BOT_TOKEN");
     throw new Error("Missing required environment variable: TELEGRAM_BOT_TOKEN");
   }
   const allowedUserIds = parseAllowedUserIds(allowedUserIdsStr);
   if (allowedUserIds.length === 0) {
-    console.error("[Config] Missing or invalid TELEGRAM_ALLOWED_USER_IDS");
-    throw new Error(
-      "Missing or invalid TELEGRAM_ALLOWED_USER_IDS (must be comma-separated numeric user IDs)"
-    );
+    logger.error("missing or invalid TELEGRAM_ALLOWED_USER_IDS");
+    throw new Error("Missing or invalid TELEGRAM_ALLOWED_USER_IDS");
   }
   let chatId;
   if (chatIdStr && chatIdStr.trim() !== "") {
     const parsed = Number.parseInt(chatIdStr.trim(), 10);
     if (!Number.isNaN(parsed)) {
       chatId = parsed;
-      console.log(`[Config] Chat ID configured: ${chatId}`);
-    } else {
-      console.warn(`[Config] Invalid TELEGRAM_CHAT_ID: ${chatIdStr}`);
     }
   }
-  console.log(
-    `[Config] Configuration loaded: allowedUsers=${allowedUserIds.length}`
-  );
+  logger.info("config loaded", { allowedUserCount: allowedUserIds.length, hasChatId: chatId !== void 0 });
   return {
     botToken,
     allowedUserIds,
@@ -156,176 +283,295 @@ function loadConfig() {
   };
 }
 
-// src/events/session-status.ts
-async function handleSessionStatus(event, context) {
-  const statusType = event?.properties?.status?.type;
-  if (statusType) {
-    if (statusType === "idle") {
-      console.log(`[TelegramRemote] Session is idle. Sending finished notification.`);
-      try {
-        const sessionId = event?.properties?.info?.id ?? event?.properties?.sessionID ?? event?.properties?.id;
-        console.log("[TelegramRemote] Extracted sessionId for idle event:", sessionId);
-        console.log("[TelegramRemote] Event structure:", JSON.stringify(event?.properties, null, 2));
-        let message = "Agent has finished.";
-        if (sessionId && context.sessionTitleService) {
-          const title = context.sessionTitleService.getSessionTitle(sessionId);
-          console.log("[TelegramRemote] Retrieved title from service:", title);
-          if (title) {
-            message = `Agent has finished: ${title}`;
-          }
-        } else {
-          console.log("[TelegramRemote] SessionId or sessionTitleService missing:", {
-            hasSessionId: !!sessionId,
-            hasService: !!context.sessionTitleService
-          });
-        }
-        await context.bot.sendMessage(message);
-      } catch (error) {
-        console.error("[TelegramRemote] Failed to send idle notification:");
+// src/bot.ts
+import { Bot, GrammyError } from "grammy";
+function createTelegramBot(opts) {
+  const { config, stateStore, logger, polling } = opts;
+  const bot = new Bot(config.botToken);
+  let activeChatId = opts.initialChatId;
+  if (polling) {
+    bot.use(async (ctx, next) => {
+      const userId = ctx.from?.id;
+      if (!userId || !config.allowedUserIds.includes(userId)) {
+        logger.warn("unauthorized access attempt", { userId });
+        return;
       }
-    }
-  }
-}
+      if (ctx.chat?.type !== "private") return;
+      if (ctx.chat?.id) {
+        const newChatId = ctx.chat.id;
+        if (activeChatId !== newChatId) {
+          activeChatId = newChatId;
+          await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
+          logger.info("chat_id discovered", { chatId: newChatId });
+          await ctx.reply(`\u2705 Chat connected!
 
-// src/events/session-updated.ts
-async function handleSessionUpdated(event, context) {
-  const title = event?.properties?.info?.title;
-  const sessionId = event?.properties?.info?.id ?? event?.properties?.sessionID ?? event?.properties?.id;
-  if (title && context.sessionTitleService) {
-    if (typeof sessionId === "string" && sessionId.trim()) {
-      context.sessionTitleService.setSessionTitle(sessionId, title);
-    }
-  }
-}
+Your chat_id: ${newChatId}
 
-// src/events/question-asked.ts
-async function handleQuestionAsked(event, context) {
-  console.log("[TelegramRemote] handleQuestionAsked called with event:", JSON.stringify(event, null, 2));
-  const sessionID = event?.properties?.sessionID;
-  const questions = event?.properties?.questions;
-  if (sessionID && questions && Array.isArray(questions) && questions.length > 0 && context.bot) {
-    const sessionTitle = context.sessionTitleService.getSessionTitle(sessionID);
-    const titleText = sessionTitle ? `\u{1F4CB} ${sessionTitle}` : `Session: ${sessionID}`;
-    const questionTexts = questions.map((q, index) => {
-      const header = q.header ? `${q.header}: ` : "";
-      return `${index + 1}. ${header}${q.question}`;
-    }).join("\n");
-    const message = `${titleText}
-
-\u2753 Questions:
-${questionTexts}`;
-    console.log(`[TelegramRemote] Sending questions for session ${sessionID}`);
-    try {
-      await context.bot.sendMessage(message);
-    } catch (error) {
-      console.error("[TelegramRemote] Failed to send question notification:", error);
-    }
+This chat is now active for OpenCode notifications.`);
+        }
+      }
+      await next();
+    });
+    bot.catch((err) => {
+      const e = err.error;
+      if (e instanceof GrammyError && e.error_code === 409) {
+        logger.info("polling conflict (409) - another process took over", { description: e.description });
+      } else {
+        logger.error("bot error", { error: String(e) });
+      }
+    });
   }
+  const requireChatId = async (action) => {
+    if (activeChatId) return activeChatId;
+    const state = await stateStore.read();
+    if (state.chatId) {
+      activeChatId = state.chatId;
+      return state.chatId;
+    }
+    throw new Error(`No active chat for ${action}. Send any message to the bot first.`);
+  };
+  return {
+    async start() {
+      if (!polling) {
+        logger.info("pass-through mode - skipping bot.start()");
+        return;
+      }
+      await bot.start({
+        drop_pending_updates: true,
+        onStart: () => {
+          logger.info("polling started");
+        }
+      });
+    },
+    async stop() {
+      if (polling) {
+        try {
+          await bot.stop();
+        } catch (err) {
+          logger.warn("bot.stop() error", { error: String(err) });
+        }
+      }
+    },
+    async sendMessage(text, options) {
+      const chatId = await requireChatId("sendMessage");
+      const result = await bot.api.sendMessage(chatId, text, options);
+      return { message_id: result.message_id };
+    },
+    async editMessage(messageId, text) {
+      const chatId = await requireChatId("editMessage");
+      await bot.api.editMessageText(chatId, messageId, text);
+    },
+    async deleteMessage(messageId) {
+      const chatId = await requireChatId("deleteMessage");
+      await bot.api.deleteMessage(chatId, messageId);
+    },
+    async getActiveChatId() {
+      if (activeChatId) return activeChatId;
+      const state = await stateStore.read();
+      return state.chatId;
+    }
+  };
 }
 
 // src/services/session-title-service.ts
 var SessionTitleService = class {
   sessionTitles = /* @__PURE__ */ new Map();
-  activeChatId = null;
   setSessionTitle(sessionId, title) {
     this.sessionTitles.set(sessionId, title);
   }
   getSessionTitle(sessionId) {
     return this.sessionTitles.get(sessionId) ?? null;
   }
-  setActiveChatId(chatId) {
-    this.activeChatId = chatId;
-  }
-  getActiveChatId() {
-    return this.activeChatId;
-  }
-  clearActiveChatId() {
-    this.activeChatId = null;
-  }
 };
 
-// src/telegram-remote.ts
-var TelegramRemote = async ({ client }) => {
-  console.log("[TelegramRemote] Plugin initialization started");
-  let config;
+// src/lib/claim.ts
+import { mkdir as mkdir2, open as open2, readdir, stat as stat2, unlink as unlink2 } from "fs/promises";
+import { join as join3 } from "path";
+import { createHash } from "crypto";
+var DEFAULT_TTL_MS2 = 6e4;
+var sweptDirs = /* @__PURE__ */ new Set();
+function hasCode3(err, code) {
+  return "code" in err && err.code === code;
+}
+function claimPath(claimsDir, key) {
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 16);
+  return join3(claimsDir, `${hash}.claim`);
+}
+async function sweep(claimsDir, ttlMs) {
+  if (sweptDirs.has(claimsDir)) return;
+  sweptDirs.add(claimsDir);
   try {
-    console.log("[TelegramRemote] Loading configuration...");
-    config = loadConfig();
-    console.log("[TelegramRemote] Configuration loaded successfully");
-  } catch (error) {
-    console.error("[TelegramRemote] Configuration error:", error);
+    const entries = await readdir(claimsDir, { withFileTypes: true });
+    await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith(".claim")).map(async (entry) => {
+      const filePath = join3(claimsDir, entry.name);
+      try {
+        const fileStat = await stat2(filePath);
+        if (Date.now() - fileStat.mtimeMs > ttlMs * 2) {
+          await unlink2(filePath);
+        }
+      } catch {
+      }
+    }));
+  } catch {
+  }
+}
+async function createClaim(filePath) {
+  const file = await open2(filePath, "wx");
+  try {
+    await file.writeFile((/* @__PURE__ */ new Date()).toISOString(), "utf8");
+  } finally {
+    await file.close();
+  }
+  return true;
+}
+async function claimOnce(opts) {
+  const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS2;
+  await mkdir2(opts.claimsDir, { recursive: true });
+  await sweep(opts.claimsDir, ttlMs);
+  const filePath = claimPath(opts.claimsDir, opts.key);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await createClaim(filePath);
+    } catch (err) {
+      if (!(err instanceof Error) || !hasCode3(err, "EEXIST")) throw err;
+      try {
+        const fileStat = await stat2(filePath);
+        if (Date.now() - fileStat.mtimeMs <= ttlMs || attempt === 1) return false;
+        await unlink2(filePath);
+      } catch (statErr) {
+        if (statErr instanceof Error && hasCode3(statErr, "ENOENT")) continue;
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+// src/events/session-idle.ts
+async function handleSessionIdle(event, ctx) {
+  const sessionId = event.properties.sessionID;
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `session.idle:${sessionId}` });
+  if (!claimed) return;
+  const title = ctx.sessionTitleService.getSessionTitle(sessionId);
+  const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
+  try {
+    await ctx.bot.sendMessage(message);
+  } catch (err) {
+    ctx.logger.error("failed to send idle notification", { error: String(err) });
+  }
+}
+
+// src/events/session-updated.ts
+async function handleSessionUpdated(event, ctx) {
+  const info = event.properties.info;
+  if (info.title && info.id) {
+    ctx.sessionTitleService.setSessionTitle(info.id, info.title);
+  }
+}
+
+// src/events/permission-updated.ts
+async function handlePermissionUpdated(event, ctx) {
+  const permission = event.properties;
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `permission.updated:${permission.id}` });
+  if (!claimed) return;
+  const sessionTitle = ctx.sessionTitleService.getSessionTitle(permission.sessionID);
+  const titleLine = sessionTitle ? `\u{1F4CB} ${sessionTitle}` : `Session: ${permission.sessionID}`;
+  const message = `\u2753 Permission requested
+
+${titleLine}
+
+Type: ${permission.type}
+Detail: ${permission.title}`;
+  try {
+    await ctx.bot.sendMessage(message);
+  } catch (err) {
+    ctx.logger.error("failed to send permission notification", { error: String(err) });
+  }
+}
+
+// src/telegram-remote.ts
+var pluginDir = dirname2(fileURLToPath(import.meta.url));
+var TelegramRemote = async (input) => {
+  const logger = createLogger({ namespace: "telegram" });
+  try {
+    const envResult = loadPluginEnv({ pluginDir });
+    logger.info("env loaded", { from: envResult.loadedFrom });
+    const config = loadConfig({ logger, env: process.env });
+    const stateStore = createStateStore();
+    const initialState = await stateStore.read();
+    const tokenHash = createHash2("sha256").update(config.botToken).digest("hex").slice(0, 16);
+    const lockPath = join4(tmpdir2(), `opencoder-telegram-${tokenHash}.lock`);
+    const claimsDir = join4(tmpdir2(), `opencoder-telegram-claims-${tokenHash}`);
+    const lockResult = await acquireLock({ lockPath });
+    const isLeader = lockResult.acquired;
+    logger.info(
+      `lock ${isLeader ? "acquired - leader mode" : "held by other - pass-through mode"}`,
+      isLeader ? {} : { reason: lockResult.reason }
+    );
+    const sessionTitleService = new SessionTitleService();
+    const bot = createTelegramBot({
+      config,
+      stateStore,
+      logger,
+      initialChatId: initialState.chatId ?? config.chatId,
+      polling: isLeader
+    });
+    if (isLeader) {
+      bot.start().catch((err) => {
+        logger.error("bot polling stopped", { error: String(err) });
+      });
+    }
+    const cleanup = async () => {
+      try {
+        await bot.stop();
+      } catch {
+      }
+      if (lockResult.acquired) {
+        await lockResult.handle.release();
+      }
+      await logger.close();
+    };
+    process.once("SIGINT", () => {
+      void cleanup().then(() => process.exit(0));
+    });
+    process.once("SIGTERM", () => {
+      void cleanup().then(() => process.exit(0));
+    });
+    process.once("beforeExit", () => {
+      void cleanup();
+    });
+    const ctx = {
+      client: input.client,
+      bot,
+      sessionTitleService,
+      stateStore,
+      config,
+      logger,
+      claimsDir
+    };
     return {
-      event: async () => {
+      event: async ({ event }) => {
+        switch (event.type) {
+          case "session.idle":
+            return handleSessionIdle(event, ctx);
+          case "session.updated":
+            return handleSessionUpdated(event, ctx);
+          case "permission.updated":
+            return handlePermissionUpdated(event, ctx);
+        }
       }
     };
+  } catch (err) {
+    logger.error("plugin initialization failed", { error: err instanceof Error ? err.message : String(err) });
+    await logger.close();
+    return { event: async () => {
+    } };
   }
-  console.log("[TelegramRemote] Creating session title service...");
-  const sessionTitleService = new SessionTitleService();
-  if (config.chatId) {
-    console.log(`[TelegramRemote] Setting active chat_id from config: ${config.chatId}`);
-    sessionTitleService.setActiveChatId(config.chatId);
-  }
-  console.log("[TelegramRemote] Creating Telegram bot...");
-  const bot = createTelegramBot(config, client, sessionTitleService);
-  console.log("[TelegramRemote] Bot created successfully");
-  console.log("[TelegramRemote] Starting Telegram bot polling...");
-  bot.start().catch((error) => {
-    console.error("[TelegramRemote] Failed to start bot:", error);
-  });
-  let isShuttingDown = false;
-  process.on("SIGINT", async () => {
-    if (isShuttingDown) {
-      console.log("[TelegramRemote] Force exit...");
-      process.exit(1);
-    }
-    isShuttingDown = true;
-    console.log("[TelegramRemote] Received SIGINT, stopping bot...");
-    try {
-      await bot.stop();
-      console.log("[TelegramRemote] Bot stopped successfully, exiting...");
-      process.exit(0);
-    } catch (error) {
-      console.error("[TelegramRemote] Error stopping bot:", error);
-      process.exit(1);
-    }
-  });
-  process.on("SIGTERM", async () => {
-    if (isShuttingDown) {
-      console.log("[TelegramRemote] Force exit...");
-      process.exit(1);
-    }
-    isShuttingDown = true;
-    console.log("[TelegramRemote] Received SIGTERM, stopping bot...");
-    try {
-      await bot.stop();
-      console.log("[TelegramRemote] Bot stopped successfully, exiting...");
-      process.exit(0);
-    } catch (error) {
-      console.error("[TelegramRemote] Error stopping bot:", error);
-      process.exit(1);
-    }
-  });
-  console.log("[TelegramRemote] Plugin initialization complete, returning event handler");
-  const eventContext = {
-    client,
-    bot,
-    sessionTitleService,
-    config
-  };
-  const eventHandlers = {
-    "session.updated": handleSessionUpdated,
-    "session.status": handleSessionStatus,
-    "question.asked": handleQuestionAsked
-  };
-  return {
-    event: async ({ event }) => {
-      const handler = eventHandlers[event.type];
-      if (handler) {
-        await handler(event, eventContext);
-      }
-    }
-  };
 };
+var server = TelegramRemote;
+var telegram_remote_default = { server: TelegramRemote };
 export {
-  TelegramRemote
+  TelegramRemote,
+  telegram_remote_default as default,
+  server
 };

@@ -1,5 +1,6 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import type { Event } from "@opencode-ai/sdk";
+import { createOpencodeClient, type QuestionAnswer } from "@opencode-ai/sdk/v2";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,16 +8,22 @@ import { createHash } from "node:crypto";
 import { createLogger } from "./lib/logger.js";
 import { acquireLock } from "./lib/lock.js";
 import { createStateStore } from "./lib/state-store.js";
+import { createPendingQuestionStore } from "./lib/pending-questions.js";
 import { loadPluginEnv } from "./lib/env-loader.js";
 import { loadConfig } from "./config.js";
 import { createTelegramBot } from "./bot.js";
 import { SessionTitleService } from "./services/session-title-service.js";
 import {
   handlePermissionUpdated,
+  handleQuestionReplied,
   handleQuestionAsked,
+  handleSessionError,
   handleSessionIdle,
   handleSessionUpdated,
+  createQuestionDispatcher,
   isEventQuestionAsked,
+  isEventQuestionReplied,
+  isEventSessionError,
 } from "./events/index.js";
 import type { EventHandlerContext } from "./events/types.js";
 
@@ -34,6 +41,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const tokenHash = createHash("sha256").update(config.botToken).digest("hex").slice(0, 16);
     const lockPath = join(tmpdir(), `opencoder-telegram-${tokenHash}.lock`);
     const claimsDir = join(tmpdir(), `opencoder-telegram-claims-${tokenHash}`);
+    const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const lockResult = await acquireLock({ lockPath });
     const isLeader = lockResult.acquired;
 
@@ -43,6 +51,10 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     );
 
     const sessionTitleService = new SessionTitleService();
+    const questionClient = createOpencodeClient({ baseUrl: input.serverUrl.toString(), directory: input.directory });
+    const replyToQuestion = async (requestID: string, answers: QuestionAnswer[]): Promise<void> => {
+      await questionClient.question.reply({ requestID, answers }, { throwOnError: true });
+    };
     const bot = createTelegramBot({
       config,
       stateStore,
@@ -87,10 +99,20 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       config,
       logger,
       claimsDir,
+      pluginDir,
+      serverUrl: input.serverUrl,
+      tokenHash,
+      pendingQuestions,
+      replyToQuestion,
     };
+
+    if (isLeader) {
+      bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
+    }
 
     return {
       event: async ({ event }: { event: Event }) => {
+        const extEvent = event as { type: string; properties?: Record<string, unknown> };
         switch (event.type) {
           case "session.idle":
             return handleSessionIdle(event, ctx);
@@ -105,9 +127,15 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
           default: {
-            const asUnknown: { type: string; properties?: unknown } = event;
-            if (isEventQuestionAsked(asUnknown)) {
-              return handleQuestionAsked(asUnknown, ctx);
+            if (isEventSessionError(extEvent)) {
+              return handleSessionError(extEvent, ctx);
+            }
+            if (isEventQuestionAsked(extEvent)) {
+              if (!isLeader) return;
+              return handleQuestionAsked(extEvent, ctx);
+            }
+            if (isEventQuestionReplied(extEvent)) {
+              return handleQuestionReplied(extEvent, ctx);
             }
             return;
           }

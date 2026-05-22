@@ -1,17 +1,29 @@
 import { Bot, GrammyError } from "grammy";
+import type { QuestionInfo } from "@opencode-ai/sdk/v2";
 import type { Config } from "./config.js";
 import type { Logger } from "./lib/logger.js";
 import type { StateStore } from "./lib/state-store.js";
 
 type SendMessageOptions = Parameters<Bot["api"]["sendMessage"]>[2];
+type EditMessageOptions = Parameters<Bot["api"]["editMessageText"]>[3];
+
+export interface TelegramQuestionDispatcher {
+  handleCallbackQuery(data: string, messageId: number, chatId: number, userId: number): Promise<void>;
+  handleTextReply(text: string, chatId: number, userId: number, replyToMessageId: number): Promise<void>;
+}
 
 export interface TelegramBotManager {
   start(): Promise<void>;
   stop(): Promise<void>;
   sendMessage(text: string, options?: SendMessageOptions): Promise<{ message_id: number }>;
+  sendQuestionWithKeyboard(question: QuestionInfo, callbackData: string[]): Promise<{ message_id: number }>;
   editMessage(messageId: number, text: string): Promise<void>;
+  editMessageText(messageId: number, text: string, options?: EditMessageOptions): Promise<void>;
+  editMessageRemoveKeyboard(messageId: number, finalText: string): Promise<void>;
+  replyWithForceReply(text: string, placeholder: string): Promise<{ message_id: number }>;
   deleteMessage(messageId: number): Promise<void>;
   getActiveChatId(): Promise<number | undefined>;
+  setQuestionDispatcher(dispatcher: TelegramQuestionDispatcher): void;
 }
 
 export interface CreateBotOptions {
@@ -26,6 +38,7 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
   const { config, stateStore, logger, polling } = opts;
   const bot = new Bot(config.botToken);
   let activeChatId: number | undefined = opts.initialChatId;
+  let questionDispatcher: TelegramQuestionDispatcher | undefined;
 
   if (polling) {
     bot.use(async (ctx, next) => {
@@ -54,6 +67,24 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       } else {
         logger.error("bot error", { error: String(e) });
       }
+    });
+
+    bot.callbackQuery(/^q:([^:]+):(\d+):(\d+|c)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const data = ctx.callbackQuery.data;
+      const messageId = ctx.callbackQuery.message?.message_id;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (!questionDispatcher || messageId === undefined || chatId === undefined || userId === undefined) return;
+      await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
+    });
+
+    bot.on("message:text", async (ctx) => {
+      const replyToMessageId = ctx.message.reply_to_message?.message_id;
+      const chatId = ctx.chat.id;
+      const userId = ctx.from?.id;
+      if (!questionDispatcher || replyToMessageId === undefined || userId === undefined) return;
+      await questionDispatcher.handleTextReply(ctx.message.text, chatId, userId, replyToMessageId);
     });
   }
 
@@ -94,9 +125,35 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       const result = await bot.api.sendMessage(chatId, text, options);
       return { message_id: result.message_id };
     },
+    async sendQuestionWithKeyboard(question, callbackData) {
+      const inlineKeyboard = question.options.map((option, index) => ([{
+        text: option.label,
+        callback_data: callbackData[index] ?? "",
+      }]));
+      if (callbackData[question.options.length]) {
+        inlineKeyboard.push([{ text: "✏️ Custom answer", callback_data: callbackData[question.options.length] }]);
+      }
+      const header = question.header ? `❓ ${question.header}` : "❓ Question";
+      return this.sendMessage(`${header}\n\n${question.question}`, { reply_markup: { inline_keyboard: inlineKeyboard } });
+    },
     async editMessage(messageId: number, text: string) {
       const chatId = await requireChatId("editMessage");
       await bot.api.editMessageText(chatId, messageId, text);
+    },
+    async editMessageText(messageId: number, text: string, options?: EditMessageOptions) {
+      const chatId = await requireChatId("editMessageText");
+      await bot.api.editMessageText(chatId, messageId, text, options);
+    },
+    async editMessageRemoveKeyboard(messageId: number, finalText: string) {
+      await this.editMessageText(messageId, finalText, { reply_markup: { inline_keyboard: [] } });
+    },
+    async replyWithForceReply(text: string, placeholder: string) {
+      return this.sendMessage(text, {
+        reply_markup: {
+          force_reply: true,
+          input_field_placeholder: placeholder,
+        },
+      });
     },
     async deleteMessage(messageId: number) {
       const chatId = await requireChatId("deleteMessage");
@@ -106,6 +163,9 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       if (activeChatId) return activeChatId;
       const state = await stateStore.read();
       return state.chatId;
+    },
+    setQuestionDispatcher(dispatcher) {
+      questionDispatcher = dispatcher;
     },
   };
 }

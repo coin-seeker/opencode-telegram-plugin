@@ -4,6 +4,8 @@ import type { Config } from "../config.js";
 import type { SessionTitleService } from "../services/session-title-service.js";
 import type { Logger } from "../lib/logger.js";
 import type { StateStore } from "../lib/state-store.js";
+import type { PendingQuestionStore } from "../lib/pending-questions.js";
+import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
 
 export type OpencodeClient = PluginInput["client"];
 
@@ -15,4 +17,9 @@ export interface EventHandlerContext {
   config: Config;
   logger: Logger;
   claimsDir: string;
+  pluginDir: string;
+  serverUrl: URL;
+  tokenHash: string;
+  pendingQuestions: PendingQuestionStore;
+  replyToQuestion(requestID: string, answers: QuestionAnswer[]): Promise<void>;
 }

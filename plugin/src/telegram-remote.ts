@@ -11,7 +11,13 @@ import { loadPluginEnv } from "./lib/env-loader.js";
 import { loadConfig } from "./config.js";
 import { createTelegramBot } from "./bot.js";
 import { SessionTitleService } from "./services/session-title-service.js";
-import { handlePermissionUpdated, handleSessionIdle, handleSessionUpdated } from "./events/index.js";
+import {
+  handlePermissionUpdated,
+  handleQuestionAsked,
+  handleSessionIdle,
+  handleSessionUpdated,
+  isEventQuestionAsked,
+} from "./events/index.js";
 import type { EventHandlerContext } from "./events/types.js";
 
 const pluginDir = dirname(fileURLToPath(import.meta.url));
@@ -85,11 +91,11 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
 
     return {
       event: async ({ event }: { event: Event }) => {
-        logger.info("event received", { type: event.type });
         switch (event.type) {
           case "session.idle":
             return handleSessionIdle(event, ctx);
           case "session.status":
+            logger.info("session.status received", { statusType: event.properties.status.type });
             if (event.properties.status.type === "idle") {
               return handleSessionIdle(event, ctx);
             }
@@ -98,6 +104,13 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
             return handleSessionUpdated(event, ctx);
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
+          default: {
+            const asUnknown: { type: string; properties?: unknown } = event;
+            if (isEventQuestionAsked(asUnknown)) {
+              return handleQuestionAsked(asUnknown, ctx);
+            }
+            return;
+          }
         }
       },
     };

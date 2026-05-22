@@ -14,7 +14,7 @@ export async function handleSessionIdle(
   ctx: EventHandlerContext,
 ): Promise<void> {
   const sessionId = event.properties.sessionID;
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `session.idle:${sessionId}` });
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `session.idle:${sessionId}`, ttlMs: 5000 });
   if (!claimed) return;
 
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);

@@ -450,7 +450,7 @@ async function claimOnce(opts) {
 // src/events/session-idle.ts
 async function handleSessionIdle(event, ctx) {
   const sessionId = event.properties.sessionID;
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `session.idle:${sessionId}` });
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `session.idle:${sessionId}`, ttlMs: 5e3 });
   if (!claimed) return;
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
   const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
@@ -487,6 +487,38 @@ Detail: ${permission.title}`;
     await ctx.bot.sendMessage(message);
   } catch (err) {
     ctx.logger.error("failed to send permission notification", { error: String(err) });
+  }
+}
+
+// src/events/question-asked.ts
+function isEventQuestionAsked(event) {
+  if (event.type !== "question.asked") return false;
+  const props = event.properties;
+  if (!props || typeof props.sessionID !== "string") return false;
+  if (!Array.isArray(props.questions)) return false;
+  return true;
+}
+async function handleQuestionAsked(event, ctx) {
+  const { sessionID, questions } = event.properties;
+  if (questions.length === 0) return;
+  const claimed = await claimOnce({
+    claimsDir: ctx.claimsDir,
+    key: `question.asked:${sessionID}:${questions.length}`,
+    ttlMs: 5e3
+  });
+  if (!claimed) return;
+  const title = ctx.sessionTitleService.getSessionTitle(sessionID);
+  const titleLine = title ? `\u{1F4CB} ${title}` : `Session: ${sessionID}`;
+  const questionLines = questions.map((q, i) => `${i + 1}. ${q.header ? `${q.header}: ` : ""}${q.question}`).join("\n");
+  const message = `${titleLine}
+
+\u2753 Questions:
+${questionLines}`;
+  try {
+    await ctx.bot.sendMessage(message);
+    ctx.logger.info("question notification sent", { sessionID, count: questions.length });
+  } catch (err) {
+    ctx.logger.error("failed to send question notification", { error: String(err) });
   }
 }
 
@@ -552,11 +584,11 @@ var TelegramRemote = async (input) => {
     };
     return {
       event: async ({ event }) => {
-        logger.info("event received", { type: event.type });
         switch (event.type) {
           case "session.idle":
             return handleSessionIdle(event, ctx);
           case "session.status":
+            logger.info("session.status received", { statusType: event.properties.status.type });
             if (event.properties.status.type === "idle") {
               return handleSessionIdle(event, ctx);
             }
@@ -565,6 +597,13 @@ var TelegramRemote = async (input) => {
             return handleSessionUpdated(event, ctx);
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
+          default: {
+            const asUnknown = event;
+            if (isEventQuestionAsked(asUnknown)) {
+              return handleQuestionAsked(asUnknown, ctx);
+            }
+            return;
+          }
         }
       }
     };

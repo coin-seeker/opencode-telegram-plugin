@@ -5,6 +5,7 @@ export default defineConfig({
   format: ["esm"],
   dts: true,
   clean: true,
+  external: ["@opencode-ai/plugin", "@opencode-ai/sdk", "@opencode-ai/sdk/v2", "grammy"],
   banner: {
     js: `/**
  * OpenCoder Telegram Remote Plugin

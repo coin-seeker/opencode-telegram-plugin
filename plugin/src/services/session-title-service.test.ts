@@ -1,0 +1,52 @@
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
+import type { Session } from "@opencode-ai/sdk";
+import { SessionTitleService } from "./session-title-service.js";
+
+function createSession(id: string, title: string, parentID?: string): Session {
+  return {
+    id,
+    projectID: "project-1",
+    directory: "/tmp/project",
+    parentID,
+    title,
+    version: "1",
+    time: {
+      created: 1,
+      updated: 2,
+    },
+  };
+}
+
+describe("SessionTitleService", () => {
+  test("stores title and child parentID from full session info", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("child", "Child title", "parent"));
+
+    assert.equal(service.getSessionTitle("child"), "Child title");
+    assert.equal(service.getParentID("child"), "parent");
+  });
+
+  test("stores null parentID when session has no parent", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("main", "Main title"));
+
+    assert.equal(service.getParentID("main"), null);
+  });
+
+  test("returns undefined parentID for cache misses", () => {
+    const service = new SessionTitleService();
+
+    assert.equal(service.getParentID("missing"), undefined);
+    assert.equal(service.getSessionTitle("missing"), null);
+  });
+
+  test("setSessionTitle preserves existing parentID", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("child", "Old", "parent"));
+    service.setSessionTitle("child", "New");
+
+    assert.equal(service.getSessionTitle("child"), "New");
+    assert.equal(service.getParentID("child"), "parent");
+  });
+});

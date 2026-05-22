@@ -1,11 +1,33 @@
+import type { Session } from "@opencode-ai/sdk";
+
+interface SessionInfoCacheEntry {
+  title: string | null;
+  parentID: string | null;
+}
+
 export class SessionTitleService {
-  private sessionTitles: Map<string, string> = new Map();
+  private sessions: Map<string, SessionInfoCacheEntry> = new Map();
+
+  setSessionInfo(info: Session): void {
+    this.sessions.set(info.id, {
+      title: info.title || null,
+      parentID: info.parentID ?? null,
+    });
+  }
 
   setSessionTitle(sessionId: string, title: string): void {
-    this.sessionTitles.set(sessionId, title);
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title,
+      parentID: existing?.parentID ?? null,
+    });
   }
 
   getSessionTitle(sessionId: string): string | null {
-    return this.sessionTitles.get(sessionId) ?? null;
+    return this.sessions.get(sessionId)?.title ?? null;
+  }
+
+  getParentID(sessionId: string): string | null | undefined {
+    return this.sessions.get(sessionId)?.parentID;
   }
 }

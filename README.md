@@ -249,26 +249,28 @@ node -e "const os=require('os'); console.log(os.tmpdir() + '/opencoder-telegram.
 
 ```
 opencoder-telegram-plugin/
-├── .env                         # Bot credentials (repo root, gitignored)
-├── .env.example                 # Template for .env
+├── .env                              # Bot credentials (repo root, gitignored)
+├── .env.example                      # Template for .env
 ├── plugin/
 │   ├── src/
-│   │   ├── telegram-remote.ts   # Plugin entry point, event routing
-│   │   ├── bot.ts               # Grammy bot setup and manager
-│   │   ├── config.ts            # .env loading via import.meta.url
+│   │   ├── telegram-remote.ts        # Plugin entry point, event routing
+│   │   ├── bot.ts                    # Grammy bot setup and manager
+│   │   ├── config.ts                 # Config loading (via env-loader)
 │   │   ├── events/
-│   │   │   ├── session-status.ts    # Handles session.idle -> notification
-│   │   │   ├── session-updated.ts   # Tracks session titles
-│   │   │   ├── question-asked.ts    # Handles permission.updated
-│   │   │   ├── types.ts             # Shared TypeScript types
-│   │   │   └── index.ts             # Re-exports all handlers
+│   │   │   ├── session-idle.ts       # Handles session.idle → notification
+│   │   │   ├── session-updated.ts    # Tracks session titles
+│   │   │   ├── permission-updated.ts # Handles permission.updated → notification
+│   │   │   ├── types.ts              # Shared TypeScript types
+│   │   │   └── index.ts              # Re-exports all handlers
 │   │   ├── lib/
-│   │   │   ├── lock.ts              # File-lock leader election
-│   │   │   ├── state.ts             # Shared state (chat ID) persistence
-│   │   │   └── logger.ts            # Buffered file logger
+│   │   │   ├── lock.ts               # File-lock leader election
+│   │   │   ├── claim.ts              # Per-event cross-process dedup
+│   │   │   ├── state-store.ts        # Atomic JSON state persistence
+│   │   │   ├── logger.ts             # Buffered file logger
+│   │   │   └── env-loader.ts         # Multi-source .env loader
 │   │   └── services/
 │   │       └── session-title-service.ts  # In-memory session title cache
-│   ├── dist/                    # Built output (gitignored)
+│   ├── dist/                         # Built output (gitignored)
 │   ├── package.json
 │   ├── tsconfig.json
 │   └── tsup.config.ts

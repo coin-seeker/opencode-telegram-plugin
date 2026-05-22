@@ -1,15 +1,46 @@
 {
-  "name": "opencoder-telegram-remote-plugin",
-  "version": "1.0.0",
+  "name": "@coinseeker/opencode-telegram-plugin",
+  "version": "1.0.1",
+  "description": "Control and monitor OpenCode from Telegram with notifications, question replies, and subagent-aware completion.",
   "type": "module",
   "main": "dist/telegram-remote.js",
+  "types": "dist/telegram-remote.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/telegram-remote.js",
+      "types": "./dist/telegram-remote.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && tsup",
     "dev": "tsup --watch",
     "predev": "npm run build",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test",
     "test": "tsx --test \"src/**/*.test.ts\""
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coin-seeker/opencode-telegram-plugin.git",
+    "directory": "plugin"
+  },
+  "homepage": "https://github.com/coin-seeker/opencode-telegram-plugin#readme",
+  "bugs": {
+    "url": "https://github.com/coin-seeker/opencode-telegram-plugin/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "telegram",
+    "notifications",
+    "remote-control"
+  ],
+  "license": "MIT",
   "dependencies": {
     "dotenv": "^16.4.7",
     "grammy": "^1.34.0"

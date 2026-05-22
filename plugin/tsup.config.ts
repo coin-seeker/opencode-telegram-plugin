@@ -9,7 +9,7 @@ export default defineConfig({
   banner: {
     js: `/**
  * OpenCoder Telegram Remote Plugin
- * https://github.com/YOUR_USERNAME/opencoder-telegram-remote-plugin
+ * https://github.com/coin-seeker/opencode-telegram-plugin
  */`,
   },
 });

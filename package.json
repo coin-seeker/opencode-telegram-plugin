@@ -1,6 +1,6 @@
 {
-  "name": "opencoder-telegram-remote-plugin",
-  "version": "1.0.0",
+  "name": "opencode-telegram-plugin-workspace",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "scripts": {

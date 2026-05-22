@@ -41,8 +41,8 @@ Get OpenCode notifications via Telegram when your agent finishes a task or needs
 ### 4. Clone and Build
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/opencoder-telegram-plugin.git
-cd opencoder-telegram-plugin/plugin
+git clone https://github.com/coin-seeker/opencode-telegram-plugin.git
+cd opencode-telegram-plugin/plugin
 npm install
 npm run build
 ```
@@ -52,7 +52,7 @@ npm run build
 The `.env` file lives in the **repo root** (one level above `plugin/`). The plugin auto-discovers it via `import.meta.url` at runtime.
 
 ```bash
-# opencoder-telegram-plugin/.env
+# opencode-telegram-plugin/.env
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 # Optional: skip the first-message discovery step
@@ -250,7 +250,7 @@ node -e "const os=require('os'); console.log(os.tmpdir() + '/opencoder-telegram.
 ### Project Structure
 
 ```
-opencoder-telegram-plugin/
+opencode-telegram-plugin/
 ├── .env                              # Bot credentials (repo root, gitignored)
 ├── .env.example                      # Template for .env
 ├── plugin/

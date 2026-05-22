@@ -1,7 +1,4 @@
-import { resolve } from "node:path";
-import { config as loadEnv } from "dotenv";
-
-loadEnv({ path: resolve(process.cwd(), ".env") });
+import type { Logger } from "./lib/logger.js";
 
 export const SERVICE_NAME = "TelegramRemote";
 
@@ -9,6 +6,11 @@ export interface Config {
   botToken: string;
   allowedUserIds: number[];
   chatId?: number;
+}
+
+export interface LoadConfigOptions {
+  logger: Logger;
+  env: NodeJS.ProcessEnv;
 }
 
 function parseAllowedUserIds(value: string | undefined): number[] {
@@ -23,40 +25,32 @@ function parseAllowedUserIds(value: string | undefined): number[] {
     .filter((id) => !Number.isNaN(id));
 }
 
-export function loadConfig(): Config {
-  console.log("[Config] Loading environment configuration...");
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  const allowedUserIdsStr = process.env.TELEGRAM_ALLOWED_USER_IDS;
-  const chatIdStr = process.env.TELEGRAM_CHAT_ID;
+export function loadConfig(opts: LoadConfigOptions): Config {
+  const { logger, env } = opts;
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  const allowedUserIdsStr = env.TELEGRAM_ALLOWED_USER_IDS;
+  const chatIdStr = env.TELEGRAM_CHAT_ID;
 
   if (!botToken || botToken.trim() === "") {
-    console.error("[Config] Missing TELEGRAM_BOT_TOKEN");
+    logger.error("missing TELEGRAM_BOT_TOKEN");
     throw new Error("Missing required environment variable: TELEGRAM_BOT_TOKEN");
   }
 
   const allowedUserIds = parseAllowedUserIds(allowedUserIdsStr);
   if (allowedUserIds.length === 0) {
-    console.error("[Config] Missing or invalid TELEGRAM_ALLOWED_USER_IDS");
-    throw new Error(
-      "Missing or invalid TELEGRAM_ALLOWED_USER_IDS (must be comma-separated numeric user IDs)",
-    );
+    logger.error("missing or invalid TELEGRAM_ALLOWED_USER_IDS");
+    throw new Error("Missing or invalid TELEGRAM_ALLOWED_USER_IDS");
   }
 
-  // Parse optional chat_id
   let chatId: number | undefined;
   if (chatIdStr && chatIdStr.trim() !== "") {
     const parsed = Number.parseInt(chatIdStr.trim(), 10);
     if (!Number.isNaN(parsed)) {
       chatId = parsed;
-      console.log(`[Config] Chat ID configured: ${chatId}`);
-    } else {
-      console.warn(`[Config] Invalid TELEGRAM_CHAT_ID: ${chatIdStr}`);
     }
   }
 
-  console.log(
-    `[Config] Configuration loaded: allowedUsers=${allowedUserIds.length}`,
-  );
+  logger.info("config loaded", { allowedUserCount: allowedUserIds.length, hasChatId: chatId !== undefined });
 
   return {
     botToken,

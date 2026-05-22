@@ -1,4 +1,4 @@
-export { handleSessionStatus } from "./session-status.js";
+export { handleSessionIdle } from "./session-idle.js";
 export { handleSessionUpdated } from "./session-updated.js";
-export { handleQuestionAsked } from "./question-asked.js";
-export type { EventHandlerContext } from "./types.js";
+export { handlePermissionUpdated } from "./permission-updated.js";
+export type { EventHandlerContext, OpencodeClient } from "./types.js";

@@ -1,141 +1,111 @@
-import { Bot, type Context } from "grammy";
+import { Bot, GrammyError } from "grammy";
 import type { Config } from "./config.js";
-import type { SessionTitleService } from "./services/session-title-service.js";
-import type { OpencodeClient } from "./events/types.js";
+import type { Logger } from "./lib/logger.js";
+import type { StateStore } from "./lib/state-store.js";
+
+type SendMessageOptions = Parameters<Bot["api"]["sendMessage"]>[2];
 
 export interface TelegramBotManager {
   start(): Promise<void>;
   stop(): Promise<void>;
-  sendMessage(text: string, options?: any): Promise<{ message_id: number }>;
+  sendMessage(text: string, options?: SendMessageOptions): Promise<{ message_id: number }>;
   editMessage(messageId: number, text: string): Promise<void>;
   deleteMessage(messageId: number): Promise<void>;
+  getActiveChatId(): Promise<number | undefined>;
 }
 
-let botInstance: Bot | null = null;
-
-function isUserAllowed(ctx: Context, allowedUserIds: number[]): boolean {
-  const userId = ctx.from?.id;
-  if (!userId) return false;
-  return allowedUserIds.includes(userId);
+export interface CreateBotOptions {
+  config: Config;
+  stateStore: StateStore;
+  logger: Logger;
+  initialChatId?: number;
+  polling: boolean;
 }
 
-export function createTelegramBot(
-  config: Config,
-  client: OpencodeClient,
-  sessionTitleService: SessionTitleService,
-): TelegramBotManager {
-  console.log("[Bot] createTelegramBot called");
-
-  if (botInstance) {
-    console.log("[Bot] Reusing existing bot instance");
-    return createBotManager(botInstance, sessionTitleService);
-  }
-
-  console.log("[Bot] Creating new Bot instance with token");
+export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
+  const { config, stateStore, logger, polling } = opts;
   const bot = new Bot(config.botToken);
-  botInstance = bot;
-  console.log("[Bot] Bot instance created");
+  let activeChatId: number | undefined = opts.initialChatId;
 
-  console.log("[Bot] Setting up middleware and handlers...");
-  bot.use(async (ctx, next) => {
-    if (!isUserAllowed(ctx, config.allowedUserIds)) {
-      console.log(`[Bot] Unauthorized access attempt from user ${ctx.from?.id}`);
-      return;
-    }
-    if (ctx.chat?.type !== "private") {
-      return;
-    }
-    if (ctx.chat?.id) {
-      const previousChatId = sessionTitleService.getActiveChatId();
-      const isNewChatId = previousChatId !== ctx.chat.id;
-
-      sessionTitleService.setActiveChatId(ctx.chat.id);
-
-      // Notify user of their chat_id when first discovered
-      if (isNewChatId) {
-        console.log(`[Bot] New chat_id discovered: ${ctx.chat.id}`);
-        await ctx.reply(
-          `✅ Chat connected!\n\nYour chat_id: ${ctx.chat.id}\n\nThis chat is now active for OpenCode notifications.`
-        );
+  if (polling) {
+    bot.use(async (ctx, next) => {
+      const userId = ctx.from?.id;
+      if (!userId || !config.allowedUserIds.includes(userId)) {
+        logger.warn("unauthorized access attempt", { userId });
+        return;
       }
-    }
-    await next();
-  });
+      if (ctx.chat?.type !== "private") return;
+      if (ctx.chat?.id) {
+        const newChatId = ctx.chat.id;
+        if (activeChatId !== newChatId) {
+          activeChatId = newChatId;
+          await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
+          logger.info("chat_id discovered", { chatId: newChatId });
+          await ctx.reply(`✅ Chat connected!\n\nYour chat_id: ${newChatId}\n\nThis chat is now active for OpenCode notifications.`);
+        }
+      }
+      await next();
+    });
 
-  // Create the manager
-  const manager = createBotManager(bot, sessionTitleService);
-
-  bot.catch((error) => {
-    console.error("[Bot] Bot error caught:", error);
-  });
-
-  console.log("[Bot] All handlers registered, returning bot manager");
-  return manager;
-}
-
-function requireActiveChatId(
-  sessionTitleService: SessionTitleService,
-  action: string,
-): number {
-  const chatId = sessionTitleService.getActiveChatId();
-  if (!chatId) {
-    const message = `No active chat available for ${action}. Ask an allowed user to message the bot first.`;
-    console.warn(message);
-    throw new Error(message);
+    bot.catch((err) => {
+      const e = err.error;
+      if (e instanceof GrammyError && e.error_code === 409) {
+        logger.info("polling conflict (409) - another process took over", { description: e.description });
+      } else {
+        logger.error("bot error", { error: String(e) });
+      }
+    });
   }
-  return chatId;
-}
 
-function createBotManager(
-  bot: Bot,
-  sessionTitleService: SessionTitleService,
-): TelegramBotManager {
+  const requireChatId = async (action: string): Promise<number> => {
+    if (activeChatId) return activeChatId;
+    const state = await stateStore.read();
+    if (state.chatId) {
+      activeChatId = state.chatId;
+      return state.chatId;
+    }
+    throw new Error(`No active chat for ${action}. Send any message to the bot first.`);
+  };
+
   return {
     async start() {
-      console.log("[Bot] start() called - beginning long polling...");
+      if (!polling) {
+        logger.info("pass-through mode - skipping bot.start()");
+        return;
+      }
       await bot.start({
         drop_pending_updates: true,
-        onStart: async () => {
-          console.log("[Bot] Telegram bot polling started successfully");
-          try {
-            const chatId = sessionTitleService.getActiveChatId();
-            if (!chatId) {
-              console.log("[Bot] No active chat yet; skipping startup message");
-              return;
-            }
-            await bot.api.sendMessage(chatId, "Messaging enabled");
-            console.log("[Bot] Startup message sent to active chat");
-          } catch (error) {
-            console.error("[Bot] Failed to send startup message:", error);
-          }
+        onStart: () => {
+          logger.info("polling started");
         },
       });
     },
-
     async stop() {
-      console.log("[Bot] stop() called");
-      await bot.stop();
-      botInstance = null;
-      console.log("[Bot] Bot stopped and instance cleared");
+      if (polling) {
+        try {
+          await bot.stop();
+        } catch (err) {
+          logger.warn("bot.stop() error", { error: String(err) });
+        }
+      }
     },
-
-    async sendMessage(text: string, options?: any) {
-      console.log(`[Bot] sendMessage: "${text.slice(0, 50)}..."`);
-      const chatId = requireActiveChatId(sessionTitleService, "sendMessage");
+    async sendMessage(text, options) {
+      const chatId = await requireChatId("sendMessage");
       const result = await bot.api.sendMessage(chatId, text, options);
       return { message_id: result.message_id };
     },
-
     async editMessage(messageId: number, text: string) {
-      console.log(`[Bot] editMessage ${messageId}: "${text.slice(0, 50)}..."`);
-      const chatId = requireActiveChatId(sessionTitleService, "editMessage");
+      const chatId = await requireChatId("editMessage");
       await bot.api.editMessageText(chatId, messageId, text);
     },
-
     async deleteMessage(messageId: number) {
-      console.log(`[Bot] deleteMessage ${messageId}`);
-      const chatId = requireActiveChatId(sessionTitleService, "deleteMessage");
+      const chatId = await requireChatId("deleteMessage");
       await bot.api.deleteMessage(chatId, messageId);
+    },
+    async getActiveChatId() {
+      if (activeChatId) return activeChatId;
+      const state = await stateStore.read();
+      return state.chatId;
     },
   };
 }

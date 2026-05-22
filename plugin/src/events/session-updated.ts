@@ -1,15 +1,12 @@
+import type { EventSessionUpdated } from "@opencode-ai/sdk";
 import type { EventHandlerContext } from "./types.js";
 
 export async function handleSessionUpdated(
-  event: any,
-  context: EventHandlerContext,
+  event: EventSessionUpdated,
+  ctx: EventHandlerContext,
 ): Promise<void> {
-  const title = event?.properties?.info?.title;
-  const sessionId = event?.properties?.info?.id ?? event?.properties?.sessionID ?? event?.properties?.id;
-
-  if (title && context.sessionTitleService) {
-    if (typeof sessionId === "string" && sessionId.trim()) {
-      context.sessionTitleService.setSessionTitle(sessionId, title);
-    }
+  const info = event.properties.info;
+  if (info.title && info.id) {
+    ctx.sessionTitleService.setSessionTitle(info.id, info.title);
   }
 }

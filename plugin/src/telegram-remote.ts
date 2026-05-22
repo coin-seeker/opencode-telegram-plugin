@@ -1,108 +1,106 @@
-import type { Plugin } from "@opencode-ai/plugin";
+import type { Plugin, PluginInput } from "@opencode-ai/plugin";
+import type { Event } from "@opencode-ai/sdk";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { createLogger } from "./lib/logger.js";
+import { acquireLock } from "./lib/lock.js";
+import { createStateStore } from "./lib/state-store.js";
+import { loadPluginEnv } from "./lib/env-loader.js";
+import { loadConfig } from "./config.js";
 import { createTelegramBot } from "./bot.js";
-import { type Config, loadConfig } from "./config.js";
-import {
-  type EventHandlerContext,
-  handleQuestionAsked,
-  handleSessionStatus,
-  handleSessionUpdated,
-} from "./events/index.js";
-
 import { SessionTitleService } from "./services/session-title-service.js";
+import { handlePermissionUpdated, handleSessionIdle, handleSessionUpdated } from "./events/index.js";
+import type { EventHandlerContext } from "./events/types.js";
 
-export const TelegramRemote: Plugin = async ({ client }) => {
-  console.log("[TelegramRemote] Plugin initialization started");
+const pluginDir = dirname(fileURLToPath(import.meta.url));
 
-  let config: Config;
+export const TelegramRemote: Plugin = async (input: PluginInput) => {
+  const logger = createLogger({ namespace: "telegram" });
   try {
-    console.log("[TelegramRemote] Loading configuration...");
-    config = loadConfig();
-    console.log("[TelegramRemote] Configuration loaded successfully");
-  } catch (error) {
-    console.error("[TelegramRemote] Configuration error:", error);
-    return {
-      event: async () => { },
-    };
-  }
+    const envResult = loadPluginEnv({ pluginDir });
+    logger.info("env loaded", { from: envResult.loadedFrom });
 
-  console.log("[TelegramRemote] Creating session title service...");
-  const sessionTitleService = new SessionTitleService();
+    const config = loadConfig({ logger, env: process.env });
+    const stateStore = createStateStore();
+    const initialState = await stateStore.read();
+    const tokenHash = createHash("sha256").update(config.botToken).digest("hex").slice(0, 16);
+    const lockPath = join(tmpdir(), `opencoder-telegram-${tokenHash}.lock`);
+    const claimsDir = join(tmpdir(), `opencoder-telegram-claims-${tokenHash}`);
+    const lockResult = await acquireLock({ lockPath });
+    const isLeader = lockResult.acquired;
 
-  // Set active chat_id from config if available
-  if (config.chatId) {
-    console.log(`[TelegramRemote] Setting active chat_id from config: ${config.chatId}`);
-    sessionTitleService.setActiveChatId(config.chatId);
-  }
+    logger.info(
+      `lock ${isLeader ? "acquired - leader mode" : "held by other - pass-through mode"}`,
+      isLeader ? {} : { reason: lockResult.reason },
+    );
 
-  console.log("[TelegramRemote] Creating Telegram bot...");
+    const sessionTitleService = new SessionTitleService();
+    const bot = createTelegramBot({
+      config,
+      stateStore,
+      logger,
+      initialChatId: initialState.chatId ?? config.chatId,
+      polling: isLeader,
+    });
 
-  const bot = createTelegramBot(config, client, sessionTitleService);
-  console.log("[TelegramRemote] Bot created successfully");
-
-  console.log("[TelegramRemote] Starting Telegram bot polling...");
-  bot.start().catch((error) => {
-    console.error("[TelegramRemote] Failed to start bot:", error);
-  });
-
-  let isShuttingDown = false;
-
-  process.on("SIGINT", async () => {
-    if (isShuttingDown) {
-      console.log("[TelegramRemote] Force exit...");
-      process.exit(1);
+    if (isLeader) {
+      bot.start().catch((err) => {
+        logger.error("bot polling stopped", { error: String(err) });
+      });
     }
-    isShuttingDown = true;
-    console.log("[TelegramRemote] Received SIGINT, stopping bot...");
-    try {
-      await bot.stop();
-      console.log("[TelegramRemote] Bot stopped successfully, exiting...");
-      process.exit(0);
-    } catch (error) {
-      console.error("[TelegramRemote] Error stopping bot:", error);
-      process.exit(1);
-    }
-  });
 
-  process.on("SIGTERM", async () => {
-    if (isShuttingDown) {
-      console.log("[TelegramRemote] Force exit...");
-      process.exit(1);
-    }
-    isShuttingDown = true;
-    console.log("[TelegramRemote] Received SIGTERM, stopping bot...");
-    try {
-      await bot.stop();
-      console.log("[TelegramRemote] Bot stopped successfully, exiting...");
-      process.exit(0);
-    } catch (error) {
-      console.error("[TelegramRemote] Error stopping bot:", error);
-      process.exit(1);
-    }
-  });
-
-  console.log("[TelegramRemote] Plugin initialization complete, returning event handler");
-
-  // Create event handler context
-  const eventContext: EventHandlerContext = {
-    client,
-    bot,
-    sessionTitleService,
-    config,
-  };
-
-  // Event type to handler mapping
-  const eventHandlers = {
-    "session.updated": handleSessionUpdated,
-    "session.status": handleSessionStatus,
-    "question.asked": handleQuestionAsked,
-  } as const;
-
-  return {
-    event: async ({ event }) => {
-      const handler = eventHandlers[event.type as keyof typeof eventHandlers];
-      if (handler) {
-        await handler(event as any, eventContext);
+    const cleanup = async (): Promise<void> => {
+      try {
+        await bot.stop();
+      } catch {
+        // best-effort shutdown
       }
-    },
-  };
+      if (lockResult.acquired) {
+        await lockResult.handle.release();
+      }
+      await logger.close();
+    };
+
+    process.once("SIGINT", () => {
+      void cleanup().then(() => process.exit(0));
+    });
+    process.once("SIGTERM", () => {
+      void cleanup().then(() => process.exit(0));
+    });
+    process.once("beforeExit", () => {
+      void cleanup();
+    });
+
+    const ctx: EventHandlerContext = {
+      client: input.client,
+      bot,
+      sessionTitleService,
+      stateStore,
+      config,
+      logger,
+      claimsDir,
+    };
+
+    return {
+      event: async ({ event }: { event: Event }) => {
+        switch (event.type) {
+          case "session.idle":
+            return handleSessionIdle(event, ctx);
+          case "session.updated":
+            return handleSessionUpdated(event, ctx);
+          case "permission.updated":
+            return handlePermissionUpdated(event, ctx);
+        }
+      },
+    };
+  } catch (err) {
+    logger.error("plugin initialization failed", { error: err instanceof Error ? err.message : String(err) });
+    await logger.close();
+    return { event: async () => {} };
+  }
 };
+
+export const server = TelegramRemote;
+export default { server: TelegramRemote };

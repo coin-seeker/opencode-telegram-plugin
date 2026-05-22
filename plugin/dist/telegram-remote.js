@@ -4,7 +4,6 @@
  */
 
 // src/telegram-remote.ts
-import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { fileURLToPath } from "url";
 import { dirname as dirname3, join as join5 } from "path";
 import { tmpdir as tmpdir3 } from "os";
@@ -924,10 +923,19 @@ var TelegramRemote = async (input) => {
       `lock ${isLeader ? "acquired - leader mode" : "held by other - pass-through mode"}`,
       isLeader ? {} : { reason: lockResult.reason }
     );
+    logger.info("server url", { url: input.serverUrl.toString(), href: input.serverUrl.href, origin: input.serverUrl.origin });
     const sessionTitleService = new SessionTitleService();
-    const questionClient = createOpencodeClient({ baseUrl: input.serverUrl.toString(), directory: input.directory });
     const replyToQuestion = async (requestID, answers) => {
-      await questionClient.question.reply({ requestID, answers }, { throwOnError: true });
+      const url = new URL(`question/${requestID}/reply`, input.serverUrl);
+      const res = await fetch(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers })
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`reply failed: HTTP ${res.status} ${res.statusText} - ${body.slice(0, 200)}`);
+      }
     };
     const bot = createTelegramBot({
       config,

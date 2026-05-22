@@ -1,8 +1,8 @@
-import type { EventQuestionAsked, QuestionAnswer, QuestionInfo } from "@opencode-ai/sdk/v2";
+import type { EventQuestionAsked, QuestionInfo } from "@opencode-ai/sdk/v2";
 import { claimOnce } from "../lib/claim.js";
 import { createQuestionShortHash, type PendingQuestionState } from "../lib/pending-questions.js";
 import type { TelegramQuestionDispatcher } from "../bot.js";
-import type { EventHandlerContext } from "./types.js";
+import type { EventHandlerContext, QuestionAnswer } from "./types.js";
 
 const QUESTION_EXPIRY_MS = 5 * 60_000;
 const CALLBACK_RE = /^q:([^:]+):(\d+):(\d+|c)$/;

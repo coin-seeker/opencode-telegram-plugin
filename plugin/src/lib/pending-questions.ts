@@ -1,8 +1,10 @@
-import type { QuestionAnswer, QuestionInfo } from "@opencode-ai/sdk/v2";
+import type { QuestionInfo } from "@opencode-ai/sdk/v2";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+
+export type QuestionAnswer = string[];
 
 export interface AwaitingCustomAnswer {
   shortHash: string;

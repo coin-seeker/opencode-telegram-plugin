@@ -5,7 +5,8 @@ import type { SessionTitleService } from "../services/session-title-service.js";
 import type { Logger } from "../lib/logger.js";
 import type { StateStore } from "../lib/state-store.js";
 import type { PendingQuestionStore } from "../lib/pending-questions.js";
-import type { QuestionAnswer } from "@opencode-ai/sdk/v2";
+import type { QuestionAnswer } from "../lib/pending-questions.js";
+export type { QuestionAnswer } from "../lib/pending-questions.js";
 
 export type OpencodeClient = PluginInput["client"];
 

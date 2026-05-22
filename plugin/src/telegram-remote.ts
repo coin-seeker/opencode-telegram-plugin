@@ -1,6 +1,5 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import type { Event } from "@opencode-ai/sdk";
-import { createOpencodeClient, type QuestionAnswer } from "@opencode-ai/sdk/v2";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -8,7 +7,7 @@ import { createHash } from "node:crypto";
 import { createLogger } from "./lib/logger.js";
 import { acquireLock } from "./lib/lock.js";
 import { createStateStore } from "./lib/state-store.js";
-import { createPendingQuestionStore } from "./lib/pending-questions.js";
+import { createPendingQuestionStore, type QuestionAnswer } from "./lib/pending-questions.js";
 import { loadPluginEnv } from "./lib/env-loader.js";
 import { loadConfig } from "./config.js";
 import { createTelegramBot } from "./bot.js";
@@ -50,11 +49,20 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       `lock ${isLeader ? "acquired - leader mode" : "held by other - pass-through mode"}`,
       isLeader ? {} : { reason: lockResult.reason },
     );
+    logger.info("server url", { url: input.serverUrl.toString(), href: input.serverUrl.href, origin: input.serverUrl.origin });
 
     const sessionTitleService = new SessionTitleService();
-    const questionClient = createOpencodeClient({ baseUrl: input.serverUrl.toString(), directory: input.directory });
     const replyToQuestion = async (requestID: string, answers: QuestionAnswer[]): Promise<void> => {
-      await questionClient.question.reply({ requestID, answers }, { throwOnError: true });
+      const url = new URL(`question/${requestID}/reply`, input.serverUrl);
+      const res = await fetch(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`reply failed: HTTP ${res.status} ${res.statusText} - ${body.slice(0, 200)}`);
+      }
     };
     const bot = createTelegramBot({
       config,

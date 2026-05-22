@@ -4,6 +4,13 @@ Control and monitor OpenCode from Telegram.
 
 ## Install
 
+Paste below into your OpenCode.
+
+```text
+Install and configure OpenCode Telegram Plugin by following the instructions here:
+https://raw.githubusercontent.com/coin-seeker/opencode-telegram-plugin/refs/heads/main/docs/installation.md
+```
+
 Configure the npm package in `~/.config/opencode/opencode.json`:
 
 ```json

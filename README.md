@@ -24,9 +24,20 @@ Control and monitor OpenCode from Telegram. Install it as the npm package `@coin
 
 ## Installation
 
-Install the plugin by adding the npm package name to your OpenCode config.
+Paste below into your OpenCode.
+
+```text
+Install and configure OpenCode Telegram Plugin by following the instructions here:
+https://raw.githubusercontent.com/coin-seeker/opencode-telegram-plugin/refs/heads/main/docs/installation.md
+```
+
+OpenCode resolves the npm package on startup automatically.
 
 For a step-by-step manual install guide and an AI-agent-friendly install prompt, see [`docs/installation.md`](docs/installation.md).
+
+### Setup
+
+One env file. One config entry. Restart. Done.
 
 ### 1. Create a Telegram Bot
 

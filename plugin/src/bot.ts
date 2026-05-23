@@ -1,15 +1,26 @@
-import { Bot, GrammyError } from "grammy";
 import type { QuestionInfo } from "@opencode-ai/sdk/v2";
+import { Bot, GrammyError } from "grammy";
 import type { Config } from "./config.js";
 import type { Logger } from "./lib/logger.js";
+import { questionText } from "./lib/question-format.js";
 import type { StateStore } from "./lib/state-store.js";
 
 type SendMessageOptions = Parameters<Bot["api"]["sendMessage"]>[2];
 type EditMessageOptions = Parameters<Bot["api"]["editMessageText"]>[3];
 
 export interface TelegramQuestionDispatcher {
-  handleCallbackQuery(data: string, messageId: number, chatId: number, userId: number): Promise<void>;
-  handleTextReply(text: string, chatId: number, userId: number, replyToMessageId: number): Promise<void>;
+  handleCallbackQuery(
+    data: string,
+    messageId: number,
+    chatId: number,
+    userId: number,
+  ): Promise<void>;
+  handleTextReply(
+    text: string,
+    chatId: number,
+    userId: number,
+    replyToMessageId: number,
+  ): Promise<void>;
 }
 
 export interface TelegramPermissionDispatcher {
@@ -20,7 +31,10 @@ export interface TelegramBotManager {
   start(): Promise<void>;
   stop(): Promise<void>;
   sendMessage(text: string, options?: SendMessageOptions): Promise<{ message_id: number }>;
-  sendQuestionWithKeyboard(question: QuestionInfo, callbackData: string[]): Promise<{ message_id: number }>;
+  sendQuestionWithKeyboard(
+    question: QuestionInfo,
+    callbackData: string[],
+  ): Promise<{ message_id: number }>;
   editMessage(messageId: number, text: string): Promise<void>;
   editMessageText(messageId: number, text: string, options?: EditMessageOptions): Promise<void>;
   editMessageRemoveKeyboard(messageId: number, finalText: string): Promise<void>;
@@ -60,7 +74,9 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
           activeChatId = newChatId;
           await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
           logger.info("chat_id discovered", { chatId: newChatId });
-          await ctx.reply(`✅ Chat connected!\n\nYour chat_id: ${newChatId}\n\nThis chat is now active for OpenCode notifications.`);
+          await ctx.reply(
+            `✅ Chat connected!\n\nYour chat_id: ${newChatId}\n\nThis chat is now active for OpenCode notifications.`,
+          );
         }
       }
       await next();
@@ -69,7 +85,9 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
     bot.catch((err) => {
       const e = err.error;
       if (e instanceof GrammyError && e.error_code === 409) {
-        logger.info("polling conflict (409) - another process took over", { description: e.description });
+        logger.info("polling conflict (409) - another process took over", {
+          description: e.description,
+        });
       } else {
         logger.error("bot error", { error: String(e) });
       }
@@ -81,7 +99,13 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       const messageId = ctx.callbackQuery.message?.message_id;
       const chatId = ctx.chat?.id;
       const userId = ctx.from?.id;
-      if (!questionDispatcher || messageId === undefined || chatId === undefined || userId === undefined) return;
+      if (
+        !questionDispatcher ||
+        messageId === undefined ||
+        chatId === undefined ||
+        userId === undefined
+      )
+        return;
       await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
     });
 
@@ -140,15 +164,20 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       return { message_id: result.message_id };
     },
     async sendQuestionWithKeyboard(question, callbackData) {
-      const inlineKeyboard = question.options.map((option, index) => ([{
-        text: option.label,
-        callback_data: callbackData[index] ?? "",
-      }]));
+      const inlineKeyboard = question.options.map((option, index) => [
+        {
+          text: option.label,
+          callback_data: callbackData[index] ?? "",
+        },
+      ]);
       if (callbackData[question.options.length]) {
-        inlineKeyboard.push([{ text: "✏️ Custom answer", callback_data: callbackData[question.options.length] }]);
+        inlineKeyboard.push([
+          { text: "✏️ Custom answer", callback_data: callbackData[question.options.length] },
+        ]);
       }
-      const header = question.header ? `❓ ${question.header}` : "❓ Question";
-      return this.sendMessage(`${header}\n\n${question.question}`, { reply_markup: { inline_keyboard: inlineKeyboard } });
+      return this.sendMessage(questionText(question), {
+        reply_markup: { inline_keyboard: inlineKeyboard },
+      });
     },
     async editMessage(messageId: number, text: string) {
       const chatId = await requireChatId("editMessage");

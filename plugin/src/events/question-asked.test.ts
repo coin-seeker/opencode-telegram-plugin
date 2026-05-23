@@ -1,13 +1,13 @@
-import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
 import type { EventQuestionAsked } from "@opencode-ai/sdk/v2";
 import type { TelegramBotManager } from "../bot.js";
-import { createPendingQuestionStore, createQuestionShortHash } from "../lib/pending-questions.js";
 import { createPendingPermissionStore } from "../lib/pending-permissions.js";
+import { createPendingQuestionStore, createQuestionShortHash } from "../lib/pending-questions.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import { createQuestionDispatcher, handleQuestionAsked } from "./question-asked.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
@@ -61,7 +61,12 @@ function createBot() {
   return { bot, sentMessages, editedMessages };
 }
 
-function createContext(bot: TelegramBotManager, requestID: string, dir: string, replies: Array<{ requestID: string; answers: QuestionAnswer[] }>): EventHandlerContext {
+function createContext(
+  bot: TelegramBotManager,
+  requestID: string,
+  dir: string,
+  replies: Array<{ requestID: string; answers: QuestionAnswer[] }>,
+): EventHandlerContext {
   return {
     client: {} as EventHandlerContext["client"],
     bot,
@@ -73,8 +78,14 @@ function createContext(bot: TelegramBotManager, requestID: string, dir: string, 
     pluginDir: dir,
     serverUrl: new URL("http://localhost:4096"),
     tokenHash: "tok",
-    pendingQuestions: createPendingQuestionStore({ tokenHash: "tok", baseDir: join(dir, `pending-${requestID}`) }),
-    pendingPermissions: createPendingPermissionStore({ tokenHash: "tok", baseDir: join(dir, `permissions-${requestID}`) }),
+    pendingQuestions: createPendingQuestionStore({
+      tokenHash: "tok",
+      baseDir: join(dir, `pending-${requestID}`),
+    }),
+    pendingPermissions: createPendingPermissionStore({
+      tokenHash: "tok",
+      baseDir: join(dir, `permissions-${requestID}`),
+    }),
     async replyToQuestion(answeredRequestID, answers) {
       replies.push({ requestID: answeredRequestID, answers });
     },
@@ -110,8 +121,8 @@ function multipleQuestionEvent(requestID = "que_multiple"): EventQuestionAsked {
           question: "Pick options?",
           multiple: true,
           options: [
-            { label: "A", description: "A" },
-            { label: "B", description: "B" },
+            { label: "A", description: "First choice details" },
+            { label: "B", description: "Second choice details" },
           ],
         },
       ],
@@ -132,8 +143,8 @@ function mixedQuestionEvent(requestID = "que_mixed"): EventQuestionAsked {
           question: "Pick options?",
           multiple: true,
           options: [
-            { label: "A", description: "A" },
-            { label: "B", description: "B" },
+            { label: "A", description: "First choice details" },
+            { label: "B", description: "Second choice details" },
           ],
         },
         { header: "Next", question: "Next?", options: [{ label: "C", description: "C" }] },
@@ -164,7 +175,10 @@ describe("question asked flow", () => {
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
     assert.equal(replies.length, 0);
-    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["A"], null]);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
+      ["A"],
+      null,
+    ]);
     assert.match(editedMessages.at(-1)?.text ?? "", /Second\?/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:1:0`, 10, 1, 1);
@@ -183,20 +197,30 @@ describe("question asked flow", () => {
     const dispatcher = createQuestionDispatcher(ctx);
 
     assert.match(sentMessages[0]?.text ?? "", /Pick options\?/);
-    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [null]);
+    assert.match(sentMessages[0]?.text ?? "", /> First choice details/);
+    assert.match(sentMessages[0]?.text ?? "", /> Second choice details/);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
+      null,
+    ]);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
     assert.equal(replies.length, 0);
-    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["A"]]);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
+      ["A"],
+    ]);
     assert.match(JSON.stringify(editedMessages.at(-1)?.options), /✅ A/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:1`, 10, 1, 1);
     assert.equal(replies.length, 0);
-    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["A", "B"]]);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
+      ["A", "B"],
+    ]);
     assert.match(JSON.stringify(editedMessages.at(-1)?.options), /✅ B/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
-    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["B"]]);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
+      ["B"],
+    ]);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);
     assert.deepEqual(replies, [{ requestID: "que_multiple", answers: [["B"]] }]);
@@ -218,7 +242,9 @@ describe("question asked flow", () => {
 
     await dispatcher.handleTextReply("Custom", 1, 1, 11);
     assert.equal(replies.length, 0);
-    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["Custom"]]);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
+      ["Custom"],
+    ]);
     assert.match(sentMessages.at(-1)?.text ?? "", /Custom answer added/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);

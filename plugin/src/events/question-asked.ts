@@ -1,7 +1,8 @@
 import type { EventQuestionAsked, QuestionInfo } from "@opencode-ai/sdk/v2";
+import type { TelegramQuestionDispatcher } from "../bot.js";
 import { claimOnce } from "../lib/claim.js";
 import { createQuestionShortHash, type PendingQuestionState } from "../lib/pending-questions.js";
-import type { TelegramQuestionDispatcher } from "../bot.js";
+import { pendingQuestionText } from "../lib/question-format.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
 
 const QUESTION_EXPIRY_MS = 5 * 60_000;
@@ -15,27 +16,51 @@ function isQuestionInfo(value: Record<string, unknown>): boolean {
   if (typeof value.question !== "string") return false;
   if (typeof value.header !== "string") return false;
   if (!Array.isArray(value.options)) return false;
-  return value.options.every((option) => typeof option === "object" && option !== null && isQuestionOption(option as Record<string, unknown>));
+  return value.options.every(
+    (option) =>
+      typeof option === "object" &&
+      option !== null &&
+      isQuestionOption(option as Record<string, unknown>),
+  );
 }
 
-export function isEventQuestionAsked(event: { type: string; properties?: Record<string, unknown> }): event is EventQuestionAsked {
+export function isEventQuestionAsked(event: {
+  type: string;
+  properties?: Record<string, unknown>;
+}): event is EventQuestionAsked {
   if (event.type !== "question.asked") return false;
   const props = event.properties;
   if (!props) return false;
   if (typeof props.id !== "string") return false;
   if (typeof props.sessionID !== "string") return false;
   if (!Array.isArray(props.questions)) return false;
-  return props.questions.every((question) => typeof question === "object" && question !== null && isQuestionInfo(question as Record<string, unknown>));
+  return props.questions.every(
+    (question) =>
+      typeof question === "object" &&
+      question !== null &&
+      isQuestionInfo(question as Record<string, unknown>),
+  );
 }
 
-function buildCallbackData(shortHash: string, questionIndex: number, optionIndex: number | "c" | "d"): string {
+function buildCallbackData(
+  shortHash: string,
+  questionIndex: number,
+  optionIndex: number | "c" | "d",
+): string {
   const data = `q:${shortHash}:${questionIndex}:${optionIndex}`;
-  if (Buffer.byteLength(data, "utf8") > 64) throw new Error("Telegram callback_data exceeds 64 bytes");
+  if (Buffer.byteLength(data, "utf8") > 64)
+    throw new Error("Telegram callback_data exceeds 64 bytes");
   return data;
 }
 
-function callbackDataForQuestion(shortHash: string, questionIndex: number, question: QuestionInfo): string[] {
-  const data = question.options.map((_, optionIndex) => buildCallbackData(shortHash, questionIndex, optionIndex));
+function callbackDataForQuestion(
+  shortHash: string,
+  questionIndex: number,
+  question: QuestionInfo,
+): string[] {
+  const data = question.options.map((_, optionIndex) =>
+    buildCallbackData(shortHash, questionIndex, optionIndex),
+  );
   if (question.custom !== false) data.push(buildCallbackData(shortHash, questionIndex, "c"));
   return data;
 }
@@ -48,44 +73,69 @@ function selectedAnswers(pending: PendingQuestionState, questionIndex: number): 
   return pending.answersInProgress[questionIndex] ?? [];
 }
 
-function questionInlineKeyboard(shortHash: string, questionIndex: number, question: QuestionInfo, selected: QuestionAnswer): Array<Array<{ text: string; callback_data: string }>> {
+function questionInlineKeyboard(
+  shortHash: string,
+  questionIndex: number,
+  question: QuestionInfo,
+  selected: QuestionAnswer,
+): Array<Array<{ text: string; callback_data: string }>> {
   const multiple = question.multiple === true;
-  const inlineKeyboard = question.options.map((option, optionIndex) => ([{
-    text: multiple && selected.includes(option.label) ? `✅ ${option.label}` : option.label,
-    callback_data: buildCallbackData(shortHash, questionIndex, optionIndex),
-  }]));
+  const inlineKeyboard = question.options.map((option, optionIndex) => [
+    {
+      text: multiple && selected.includes(option.label) ? `✅ ${option.label}` : option.label,
+      callback_data: buildCallbackData(shortHash, questionIndex, optionIndex),
+    },
+  ]);
   if (question.custom !== false) {
-    inlineKeyboard.push([{ text: "✏️ Custom answer", callback_data: buildCallbackData(shortHash, questionIndex, "c") }]);
+    inlineKeyboard.push([
+      { text: "✏️ Custom answer", callback_data: buildCallbackData(shortHash, questionIndex, "c") },
+    ]);
   }
   if (multiple) {
-    inlineKeyboard.push([{ text: "✅ Done", callback_data: buildCallbackData(shortHash, questionIndex, "d") }]);
+    inlineKeyboard.push([
+      { text: "✅ Done", callback_data: buildCallbackData(shortHash, questionIndex, "d") },
+    ]);
   }
   return inlineKeyboard;
 }
 
 function questionPromptText(pending: PendingQuestionState, questionIndex: number): string {
-  const question = pending.questions[questionIndex];
-  const prefix = pending.questions.length > 1 ? `Question ${questionIndex + 1}/${pending.questions.length}\n\n` : "";
-  const allQuestions = pending.questions.length > 1
-    ? `All questions:\n${pending.questions.map((q, i) => `${i + 1}. ${q.header}: ${q.question}`).join("\n")}\n\n`
-    : "";
-  return `${allQuestions}${prefix}❓ ${question.header}\n\n${question.question}`;
+  return pendingQuestionText(pending.questions, questionIndex);
 }
 
 function answerSummary(questions: QuestionInfo[], answers: QuestionAnswer[]): string {
   return answers
-    .map((answer, index) => `${index + 1}. ${questions[index]?.header ?? "Question"}: ${answer.join(", ") || "(empty)"}`)
+    .map(
+      (answer, index) =>
+        `${index + 1}. ${questions[index]?.header ?? "Question"}: ${answer.join(", ") || "(empty)"}`,
+    )
     .join("\n");
 }
 
-async function editPromptForQuestion(ctx: EventHandlerContext, pending: PendingQuestionState, shortHash: string, questionIndex: number): Promise<void> {
+async function editPromptForQuestion(
+  ctx: EventHandlerContext,
+  pending: PendingQuestionState,
+  shortHash: string,
+  questionIndex: number,
+): Promise<void> {
   const messageId = pending.telegramMessageIds[0];
   const question = pending.questions[questionIndex];
-  const inlineKeyboard = questionInlineKeyboard(shortHash, questionIndex, question, selectedAnswers(pending, questionIndex));
-  await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), { reply_markup: { inline_keyboard: inlineKeyboard } });
+  const inlineKeyboard = questionInlineKeyboard(
+    shortHash,
+    questionIndex,
+    question,
+    selectedAnswers(pending, questionIndex),
+  );
+  await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), {
+    reply_markup: { inline_keyboard: inlineKeyboard },
+  });
 }
 
-async function completeIfReady(ctx: EventHandlerContext, pending: PendingQuestionState, shortHash: string): Promise<void> {
+async function completeIfReady(
+  ctx: EventHandlerContext,
+  pending: PendingQuestionState,
+  shortHash: string,
+): Promise<void> {
   const nextIndex = pending.answersInProgress.findIndex((answer) => answer === null);
   if (nextIndex >= 0) {
     pending.currentQuestionIndex = nextIndex;
@@ -98,27 +148,48 @@ async function completeIfReady(ctx: EventHandlerContext, pending: PendingQuestio
   const messageId = pending.telegramMessageIds[0];
   try {
     await ctx.replyToQuestion(pending.requestID, answers);
-    await ctx.bot.editMessageRemoveKeyboard(messageId, `✅ Answered:\n${answerSummary(pending.questions, answers)}`);
-    ctx.logger.info("question reply sent", { requestID: pending.requestID, sessionID: pending.sessionID });
+    await ctx.bot.editMessageRemoveKeyboard(
+      messageId,
+      `✅ Answered:\n${answerSummary(pending.questions, answers)}`,
+    );
+    ctx.logger.info("question reply sent", {
+      requestID: pending.requestID,
+      sessionID: pending.sessionID,
+    });
   } catch (err) {
     await ctx.bot.editMessageRemoveKeyboard(messageId, "⚠️ Failed to send answer to opencode");
-    ctx.logger.error("failed to send question reply", { error: String(err), requestID: pending.requestID });
+    ctx.logger.error("failed to send question reply", {
+      error: String(err),
+      requestID: pending.requestID,
+    });
   } finally {
     await ctx.pendingQuestions.deletePending(shortHash);
   }
 }
 
-async function expirePending(ctx: EventHandlerContext, shortHash: string, pending: PendingQuestionState, messageId: number): Promise<void> {
+async function expirePending(
+  ctx: EventHandlerContext,
+  shortHash: string,
+  pending: PendingQuestionState,
+  messageId: number,
+): Promise<void> {
   await ctx.bot.editMessageRemoveKeyboard(messageId, "⏱ Question expired");
   await ctx.pendingQuestions.deletePending(shortHash);
   ctx.logger.info("pending question expired", { requestID: pending.requestID });
 }
 
-export async function handleQuestionAsked(event: EventQuestionAsked, ctx: EventHandlerContext): Promise<void> {
+export async function handleQuestionAsked(
+  event: EventQuestionAsked,
+  ctx: EventHandlerContext,
+): Promise<void> {
   const request = event.properties;
   if (request.questions.length === 0) return;
 
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `question.asked:${request.id}`, ttlMs: 5_000 });
+  const claimed = await claimOnce({
+    claimsDir: ctx.claimsDir,
+    key: `question.asked:${request.id}`,
+    ttlMs: 5_000,
+  });
   if (!claimed) return;
 
   const shortHash = createQuestionShortHash(request.id);
@@ -136,18 +207,29 @@ export async function handleQuestionAsked(event: EventQuestionAsked, ctx: EventH
   };
 
   try {
-    const message = request.questions.length === 1 && useSimpleQuestionKeyboard(firstQuestion)
-      ? await ctx.bot.sendQuestionWithKeyboard(firstQuestion, callbackDataForQuestion(shortHash, 0, firstQuestion))
-      : await ctx.bot.sendMessage(questionPromptText(pending, 0), {
-        reply_markup: {
-          inline_keyboard: questionInlineKeyboard(shortHash, 0, firstQuestion, []),
-        },
-      });
+    const message =
+      request.questions.length === 1 && useSimpleQuestionKeyboard(firstQuestion)
+        ? await ctx.bot.sendQuestionWithKeyboard(
+            firstQuestion,
+            callbackDataForQuestion(shortHash, 0, firstQuestion),
+          )
+        : await ctx.bot.sendMessage(questionPromptText(pending, 0), {
+            reply_markup: {
+              inline_keyboard: questionInlineKeyboard(shortHash, 0, firstQuestion, []),
+            },
+          });
     pending.telegramMessageIds = [message.message_id];
     await ctx.pendingQuestions.savePending(shortHash, pending);
-    ctx.logger.info("question prompt sent", { requestID: request.id, sessionID: request.sessionID, count: request.questions.length });
+    ctx.logger.info("question prompt sent", {
+      requestID: request.id,
+      sessionID: request.sessionID,
+      count: request.questions.length,
+    });
   } catch (err) {
-    ctx.logger.error("failed to send question prompt", { error: String(err), requestID: request.id });
+    ctx.logger.error("failed to send question prompt", {
+      error: String(err),
+      requestID: request.id,
+    });
   }
 }
 
@@ -173,12 +255,26 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
 
       if (selection === "c") {
         if (question.multiple === true) {
-          await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), { reply_markup: { inline_keyboard: [] } });
+          await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), {
+            reply_markup: { inline_keyboard: [] },
+          });
         } else {
-          await ctx.bot.editMessageRemoveKeyboard(messageId, "✏️ Reply to the next message with your custom answer.");
+          await ctx.bot.editMessageRemoveKeyboard(
+            messageId,
+            "✏️ Reply to the next message with your custom answer.",
+          );
         }
-        const prompt = await ctx.bot.replyWithForceReply("Type your custom answer", "Type your answer");
-        pending.awaitingCustomFor = { shortHash, questionIndex, chatId, userId, promptMessageId: prompt.message_id };
+        const prompt = await ctx.bot.replyWithForceReply(
+          "Type your custom answer",
+          "Type your answer",
+        );
+        pending.awaitingCustomFor = {
+          shortHash,
+          questionIndex,
+          chatId,
+          userId,
+          promptMessageId: prompt.message_id,
+        };
         await ctx.pendingQuestions.savePending(shortHash, pending);
         return;
       }
@@ -219,7 +315,9 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       const question = match.data.questions[awaiting.questionIndex];
       if (question?.multiple === true) {
         const current = selectedAnswers(match.data, awaiting.questionIndex);
-        match.data.answersInProgress[awaiting.questionIndex] = current.includes(text) ? current : [...current, text];
+        match.data.answersInProgress[awaiting.questionIndex] = current.includes(text)
+          ? current
+          : [...current, text];
         match.data.awaitingCustomFor = undefined;
         await ctx.bot.sendMessage("✅ Custom answer added. Tap Done when finished.");
         await ctx.pendingQuestions.savePending(match.shortHash, match.data);

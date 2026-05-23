@@ -465,6 +465,37 @@ function loadConfig(opts) {
 
 // src/bot.ts
 import { Bot, GrammyError } from "grammy";
+
+// src/lib/question-format.ts
+function optionDescriptionText(question) {
+  const options = question.options.map((option, index) => {
+    const description = option.description.trim();
+    return description ? `${index + 1}. ${option.label}
+> ${description}` : `${index + 1}. ${option.label}`;
+  });
+  return options.length > 0 ? `
+
+${options.join("\n")}` : "";
+}
+function questionText(question) {
+  const header = question.header ? `\u2753 ${question.header}` : "\u2753 Question";
+  return `${header}
+
+${question.question}${optionDescriptionText(question)}`;
+}
+function pendingQuestionText(questions, questionIndex) {
+  const question = questions[questionIndex];
+  const prefix = questions.length > 1 ? `Question ${questionIndex + 1}/${questions.length}
+
+` : "";
+  const allQuestions = questions.length > 1 ? `All questions:
+${questions.map((q, i) => `${i + 1}. ${q.header}: ${q.question}`).join("\n")}
+
+` : "";
+  return `${allQuestions}${prefix}${questionText(question)}`;
+}
+
+// src/bot.ts
 function createTelegramBot(opts) {
   const { config, stateStore, logger, polling } = opts;
   const bot = new Bot(config.botToken);
@@ -485,11 +516,13 @@ function createTelegramBot(opts) {
           activeChatId = newChatId;
           await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
           logger.info("chat_id discovered", { chatId: newChatId });
-          await ctx.reply(`\u2705 Chat connected!
+          await ctx.reply(
+            `\u2705 Chat connected!
 
 Your chat_id: ${newChatId}
 
-This chat is now active for OpenCode notifications.`);
+This chat is now active for OpenCode notifications.`
+          );
         }
       }
       await next();
@@ -497,7 +530,9 @@ This chat is now active for OpenCode notifications.`);
     bot.catch((err) => {
       const e = err.error;
       if (e instanceof GrammyError && e.error_code === 409) {
-        logger.info("polling conflict (409) - another process took over", { description: e.description });
+        logger.info("polling conflict (409) - another process took over", {
+          description: e.description
+        });
       } else {
         logger.error("bot error", { error: String(e) });
       }
@@ -508,7 +543,8 @@ This chat is now active for OpenCode notifications.`);
       const messageId = ctx.callbackQuery.message?.message_id;
       const chatId = ctx.chat?.id;
       const userId = ctx.from?.id;
-      if (!questionDispatcher || messageId === void 0 || chatId === void 0 || userId === void 0) return;
+      if (!questionDispatcher || messageId === void 0 || chatId === void 0 || userId === void 0)
+        return;
       await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
     });
     bot.callbackQuery(/^p:([^:]+):(o|a|r)$/, async (ctx) => {
@@ -563,17 +599,20 @@ This chat is now active for OpenCode notifications.`);
       return { message_id: result.message_id };
     },
     async sendQuestionWithKeyboard(question, callbackData) {
-      const inlineKeyboard = question.options.map((option, index) => [{
-        text: option.label,
-        callback_data: callbackData[index] ?? ""
-      }]);
+      const inlineKeyboard = question.options.map((option, index) => [
+        {
+          text: option.label,
+          callback_data: callbackData[index] ?? ""
+        }
+      ]);
       if (callbackData[question.options.length]) {
-        inlineKeyboard.push([{ text: "\u270F\uFE0F Custom answer", callback_data: callbackData[question.options.length] }]);
+        inlineKeyboard.push([
+          { text: "\u270F\uFE0F Custom answer", callback_data: callbackData[question.options.length] }
+        ]);
       }
-      const header = question.header ? `\u2753 ${question.header}` : "\u2753 Question";
-      return this.sendMessage(`${header}
-
-${question.question}`, { reply_markup: { inline_keyboard: inlineKeyboard } });
+      return this.sendMessage(questionText(question), {
+        reply_markup: { inline_keyboard: inlineKeyboard }
+      });
     },
     async editMessage(messageId, text) {
       const chatId = await requireChatId("editMessage");
@@ -772,6 +811,10 @@ function shouldSuppressIdle(sessionID) {
 }
 
 // src/events/session-idle.ts
+var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 async function resolveParentID(sessionId, ctx) {
   const cachedParentID = ctx.sessionTitleService.getParentID(sessionId);
   if (cachedParentID !== void 0) return cachedParentID;
@@ -786,6 +829,19 @@ async function resolveParentID(sessionId, ctx) {
   } catch (err) {
     ctx.logger.warn("session parentID cache miss fetch failed", { sessionId, error: String(err) });
     return void 0;
+  }
+}
+async function hydrateDescendants(sessionId, ctx, seen = /* @__PURE__ */ new Set()) {
+  if (seen.has(sessionId)) return;
+  seen.add(sessionId);
+  try {
+    const result = await ctx.client.session.children({ path: { id: sessionId } });
+    for (const child of result.data ?? []) {
+      ctx.sessionTitleService.setSessionInfo(child);
+      await hydrateDescendants(child.id, ctx, seen);
+    }
+  } catch (err) {
+    ctx.logger.warn("session children fetch failed", { sessionId, error: String(err) });
   }
 }
 async function sendIdleNotification(sessionId, ctx) {
@@ -808,8 +864,20 @@ async function sendIdleNotification(sessionId, ctx) {
 async function flushDeferredParentIfReady(parentID, ctx) {
   if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
   if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
+  if (ctx.sessionTitleService.getSessionStatus(parentID) !== "idle") {
+    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
+    ctx.logger.info("clearing deferred parent idle notification - parent resumed", { sessionId: parentID });
+    return;
+  }
   ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
   await sendIdleNotification(parentID, ctx);
+}
+async function deferParentIdleIfDescendantsRunning(sessionId, ctx) {
+  await hydrateDescendants(sessionId, ctx);
+  if (!ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) return false;
+  ctx.sessionTitleService.deferIdleNotification(sessionId);
+  ctx.logger.info("deferring parent idle notification - child sessions still running", { sessionId });
+  return true;
 }
 async function handleSessionIdle(event, ctx) {
   const sessionId = event.properties.sessionID;
@@ -823,9 +891,15 @@ async function handleSessionIdle(event, ctx) {
   if (parentID === void 0) {
     ctx.logger.warn("session parentID unknown; sending idle notification", { sessionId });
   }
-  if (ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) {
-    ctx.sessionTitleService.deferIdleNotification(sessionId);
-    ctx.logger.info("deferring parent idle notification - child sessions still running", { sessionId });
+  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx)) {
+    return;
+  }
+  await sleep(ctx.idleRecheckDelayMs ?? ROOT_IDLE_RECHECK_DELAY_MS);
+  if (ctx.sessionTitleService.getSessionStatus(sessionId) !== "idle") {
+    ctx.logger.info("idle notification skipped - session resumed during recheck delay", { sessionId });
+    return;
+  }
+  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx)) {
     return;
   }
   await sendIdleNotification(sessionId, ctx);
@@ -1020,7 +1094,9 @@ function isQuestionInfo(value) {
   if (typeof value.question !== "string") return false;
   if (typeof value.header !== "string") return false;
   if (!Array.isArray(value.options)) return false;
-  return value.options.every((option) => typeof option === "object" && option !== null && isQuestionOption(option));
+  return value.options.every(
+    (option) => typeof option === "object" && option !== null && isQuestionOption(option)
+  );
 }
 function isEventQuestionAsked(event) {
   if (event.type !== "question.asked") return false;
@@ -1029,15 +1105,20 @@ function isEventQuestionAsked(event) {
   if (typeof props.id !== "string") return false;
   if (typeof props.sessionID !== "string") return false;
   if (!Array.isArray(props.questions)) return false;
-  return props.questions.every((question) => typeof question === "object" && question !== null && isQuestionInfo(question));
+  return props.questions.every(
+    (question) => typeof question === "object" && question !== null && isQuestionInfo(question)
+  );
 }
 function buildCallbackData2(shortHash, questionIndex, optionIndex) {
   const data = `q:${shortHash}:${questionIndex}:${optionIndex}`;
-  if (Buffer.byteLength(data, "utf8") > 64) throw new Error("Telegram callback_data exceeds 64 bytes");
+  if (Buffer.byteLength(data, "utf8") > 64)
+    throw new Error("Telegram callback_data exceeds 64 bytes");
   return data;
 }
 function callbackDataForQuestion(shortHash, questionIndex, question) {
-  const data = question.options.map((_, optionIndex) => buildCallbackData2(shortHash, questionIndex, optionIndex));
+  const data = question.options.map(
+    (_, optionIndex) => buildCallbackData2(shortHash, questionIndex, optionIndex)
+  );
   if (question.custom !== false) data.push(buildCallbackData2(shortHash, questionIndex, "c"));
   return data;
 }
@@ -1049,39 +1130,44 @@ function selectedAnswers(pending, questionIndex) {
 }
 function questionInlineKeyboard(shortHash, questionIndex, question, selected) {
   const multiple = question.multiple === true;
-  const inlineKeyboard = question.options.map((option, optionIndex) => [{
-    text: multiple && selected.includes(option.label) ? `\u2705 ${option.label}` : option.label,
-    callback_data: buildCallbackData2(shortHash, questionIndex, optionIndex)
-  }]);
+  const inlineKeyboard = question.options.map((option, optionIndex) => [
+    {
+      text: multiple && selected.includes(option.label) ? `\u2705 ${option.label}` : option.label,
+      callback_data: buildCallbackData2(shortHash, questionIndex, optionIndex)
+    }
+  ]);
   if (question.custom !== false) {
-    inlineKeyboard.push([{ text: "\u270F\uFE0F Custom answer", callback_data: buildCallbackData2(shortHash, questionIndex, "c") }]);
+    inlineKeyboard.push([
+      { text: "\u270F\uFE0F Custom answer", callback_data: buildCallbackData2(shortHash, questionIndex, "c") }
+    ]);
   }
   if (multiple) {
-    inlineKeyboard.push([{ text: "\u2705 Done", callback_data: buildCallbackData2(shortHash, questionIndex, "d") }]);
+    inlineKeyboard.push([
+      { text: "\u2705 Done", callback_data: buildCallbackData2(shortHash, questionIndex, "d") }
+    ]);
   }
   return inlineKeyboard;
 }
 function questionPromptText(pending, questionIndex) {
-  const question = pending.questions[questionIndex];
-  const prefix = pending.questions.length > 1 ? `Question ${questionIndex + 1}/${pending.questions.length}
-
-` : "";
-  const allQuestions = pending.questions.length > 1 ? `All questions:
-${pending.questions.map((q, i) => `${i + 1}. ${q.header}: ${q.question}`).join("\n")}
-
-` : "";
-  return `${allQuestions}${prefix}\u2753 ${question.header}
-
-${question.question}`;
+  return pendingQuestionText(pending.questions, questionIndex);
 }
 function answerSummary(questions, answers) {
-  return answers.map((answer, index) => `${index + 1}. ${questions[index]?.header ?? "Question"}: ${answer.join(", ") || "(empty)"}`).join("\n");
+  return answers.map(
+    (answer, index) => `${index + 1}. ${questions[index]?.header ?? "Question"}: ${answer.join(", ") || "(empty)"}`
+  ).join("\n");
 }
 async function editPromptForQuestion(ctx, pending, shortHash, questionIndex) {
   const messageId = pending.telegramMessageIds[0];
   const question = pending.questions[questionIndex];
-  const inlineKeyboard = questionInlineKeyboard(shortHash, questionIndex, question, selectedAnswers(pending, questionIndex));
-  await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), { reply_markup: { inline_keyboard: inlineKeyboard } });
+  const inlineKeyboard = questionInlineKeyboard(
+    shortHash,
+    questionIndex,
+    question,
+    selectedAnswers(pending, questionIndex)
+  );
+  await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), {
+    reply_markup: { inline_keyboard: inlineKeyboard }
+  });
 }
 async function completeIfReady(ctx, pending, shortHash) {
   const nextIndex = pending.answersInProgress.findIndex((answer) => answer === null);
@@ -1095,12 +1181,21 @@ async function completeIfReady(ctx, pending, shortHash) {
   const messageId = pending.telegramMessageIds[0];
   try {
     await ctx.replyToQuestion(pending.requestID, answers);
-    await ctx.bot.editMessageRemoveKeyboard(messageId, `\u2705 Answered:
-${answerSummary(pending.questions, answers)}`);
-    ctx.logger.info("question reply sent", { requestID: pending.requestID, sessionID: pending.sessionID });
+    await ctx.bot.editMessageRemoveKeyboard(
+      messageId,
+      `\u2705 Answered:
+${answerSummary(pending.questions, answers)}`
+    );
+    ctx.logger.info("question reply sent", {
+      requestID: pending.requestID,
+      sessionID: pending.sessionID
+    });
   } catch (err) {
     await ctx.bot.editMessageRemoveKeyboard(messageId, "\u26A0\uFE0F Failed to send answer to opencode");
-    ctx.logger.error("failed to send question reply", { error: String(err), requestID: pending.requestID });
+    ctx.logger.error("failed to send question reply", {
+      error: String(err),
+      requestID: pending.requestID
+    });
   } finally {
     await ctx.pendingQuestions.deletePending(shortHash);
   }
@@ -1113,7 +1208,11 @@ async function expirePending2(ctx, shortHash, pending, messageId) {
 async function handleQuestionAsked(event, ctx) {
   const request = event.properties;
   if (request.questions.length === 0) return;
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `question.asked:${request.id}`, ttlMs: 5e3 });
+  const claimed = await claimOnce({
+    claimsDir: ctx.claimsDir,
+    key: `question.asked:${request.id}`,
+    ttlMs: 5e3
+  });
   if (!claimed) return;
   const shortHash = createQuestionShortHash(request.id);
   const firstQuestion = request.questions[0];
@@ -1129,16 +1228,26 @@ async function handleQuestionAsked(event, ctx) {
     answersInProgress: request.questions.map(() => null)
   };
   try {
-    const message = request.questions.length === 1 && useSimpleQuestionKeyboard(firstQuestion) ? await ctx.bot.sendQuestionWithKeyboard(firstQuestion, callbackDataForQuestion(shortHash, 0, firstQuestion)) : await ctx.bot.sendMessage(questionPromptText(pending, 0), {
+    const message = request.questions.length === 1 && useSimpleQuestionKeyboard(firstQuestion) ? await ctx.bot.sendQuestionWithKeyboard(
+      firstQuestion,
+      callbackDataForQuestion(shortHash, 0, firstQuestion)
+    ) : await ctx.bot.sendMessage(questionPromptText(pending, 0), {
       reply_markup: {
         inline_keyboard: questionInlineKeyboard(shortHash, 0, firstQuestion, [])
       }
     });
     pending.telegramMessageIds = [message.message_id];
     await ctx.pendingQuestions.savePending(shortHash, pending);
-    ctx.logger.info("question prompt sent", { requestID: request.id, sessionID: request.sessionID, count: request.questions.length });
+    ctx.logger.info("question prompt sent", {
+      requestID: request.id,
+      sessionID: request.sessionID,
+      count: request.questions.length
+    });
   } catch (err) {
-    ctx.logger.error("failed to send question prompt", { error: String(err), requestID: request.id });
+    ctx.logger.error("failed to send question prompt", {
+      error: String(err),
+      requestID: request.id
+    });
   }
 }
 function createQuestionDispatcher(ctx) {
@@ -1162,12 +1271,26 @@ function createQuestionDispatcher(ctx) {
       if (!question) return;
       if (selection === "c") {
         if (question.multiple === true) {
-          await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), { reply_markup: { inline_keyboard: [] } });
+          await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), {
+            reply_markup: { inline_keyboard: [] }
+          });
         } else {
-          await ctx.bot.editMessageRemoveKeyboard(messageId, "\u270F\uFE0F Reply to the next message with your custom answer.");
+          await ctx.bot.editMessageRemoveKeyboard(
+            messageId,
+            "\u270F\uFE0F Reply to the next message with your custom answer."
+          );
         }
-        const prompt = await ctx.bot.replyWithForceReply("Type your custom answer", "Type your answer");
-        pending.awaitingCustomFor = { shortHash, questionIndex, chatId, userId, promptMessageId: prompt.message_id };
+        const prompt = await ctx.bot.replyWithForceReply(
+          "Type your custom answer",
+          "Type your answer"
+        );
+        pending.awaitingCustomFor = {
+          shortHash,
+          questionIndex,
+          chatId,
+          userId,
+          promptMessageId: prompt.message_id
+        };
         await ctx.pendingQuestions.savePending(shortHash, pending);
         return;
       }

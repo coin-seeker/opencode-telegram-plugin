@@ -5,9 +5,9 @@
 
 // src/telegram-remote.ts
 import { fileURLToPath } from "url";
-import { dirname as dirname3, join as join5 } from "path";
-import { tmpdir as tmpdir3 } from "os";
-import { createHash as createHash3 } from "crypto";
+import { dirname as dirname4, join as join6 } from "path";
+import { tmpdir as tmpdir4 } from "os";
+import { createHash as createHash4 } from "crypto";
 
 // src/lib/logger.ts
 import { appendFile } from "fs/promises";
@@ -314,17 +314,103 @@ function createQuestionShortHash(requestID) {
   return createHash("sha256").update(requestID).digest("base64url").slice(0, 10);
 }
 
+// src/lib/pending-permissions.ts
+import { createHash as createHash2 } from "crypto";
+import { mkdir as mkdir3, readFile as readFile4, readdir as readdir2, rename as rename3, unlink as unlink3, writeFile as writeFile3 } from "fs/promises";
+import { tmpdir as tmpdir3 } from "os";
+import { dirname as dirname3, join as join3 } from "path";
+function hasCode4(err, code) {
+  return "code" in err && err.code === code;
+}
+function pendingFilePath2(dir, shortHash) {
+  return join3(dir, `${shortHash}.json`);
+}
+function parsePending2(text) {
+  const parsed = JSON.parse(text);
+  if (typeof parsed.requestID !== "string") throw new Error("Invalid pending permission: requestID");
+  if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending permission: sessionID");
+  if (typeof parsed.title !== "string") throw new Error("Invalid pending permission: title");
+  if (typeof parsed.permission !== "string") throw new Error("Invalid pending permission: permission");
+  if (!Array.isArray(parsed.patterns)) throw new Error("Invalid pending permission: patterns");
+  if (!Array.isArray(parsed.always)) throw new Error("Invalid pending permission: always");
+  if (parsed.endpoint !== "request" && parsed.endpoint !== "session") throw new Error("Invalid pending permission: endpoint");
+  return parsed;
+}
+async function listPendingFiles2(dir) {
+  try {
+    const entries = await readdir2(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+  } catch (err) {
+    if (err instanceof Error && hasCode4(err, "ENOENT")) return [];
+    throw err;
+  }
+}
+function shortHashFromFileName2(fileName) {
+  return fileName.slice(0, -".json".length);
+}
+function createPendingPermissionStore(opts) {
+  const dir = opts.baseDir ?? join3(tmpdir3(), `opencoder-telegram-pending-permissions-${opts.tokenHash}`);
+  return {
+    dir,
+    async savePending(shortHash, data) {
+      const filePath = pendingFilePath2(dir, shortHash);
+      await mkdir3(dirname3(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp.${process.pid}`;
+      await writeFile3(tmpPath, JSON.stringify(data, null, 2), "utf8");
+      await rename3(tmpPath, filePath);
+    },
+    async loadPending(shortHash) {
+      try {
+        return parsePending2(await readFile4(pendingFilePath2(dir, shortHash), "utf8"));
+      } catch (err) {
+        if (err instanceof Error && hasCode4(err, "ENOENT")) return void 0;
+        throw err;
+      }
+    },
+    async deletePending(shortHash) {
+      try {
+        await unlink3(pendingFilePath2(dir, shortHash));
+      } catch (err) {
+        if (!(err instanceof Error) || !hasCode4(err, "ENOENT")) throw err;
+      }
+    },
+    async findByRequestID(requestID) {
+      for (const fileName of await listPendingFiles2(dir)) {
+        const shortHash = shortHashFromFileName2(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data?.requestID === requestID) return { shortHash, data };
+      }
+      return void 0;
+    },
+    async sweepExpired() {
+      const expired = [];
+      for (const fileName of await listPendingFiles2(dir)) {
+        const shortHash = shortHashFromFileName2(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data && data.expiresAt < Date.now()) {
+          expired.push(data);
+          await this.deletePending(shortHash);
+        }
+      }
+      return expired;
+    }
+  };
+}
+function createPermissionShortHash(requestID) {
+  return createHash2("sha256").update(requestID).digest("base64url").slice(0, 10);
+}
+
 // src/lib/env-loader.ts
 import { existsSync } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 import dotenv from "dotenv";
 function loadPluginEnv(opts) {
   const paths = [
-    join3(opts.pluginDir, "../../.env"),
-    join3(opts.pluginDir, "..", ".env"),
-    join3(opts.pluginDir, ".env"),
-    join3(opts.homeDir ?? homedir2(), ".config/opencode/telegram-remote/.env")
+    join4(opts.pluginDir, "../../.env"),
+    join4(opts.pluginDir, "..", ".env"),
+    join4(opts.pluginDir, ".env"),
+    join4(opts.homeDir ?? homedir2(), ".config/opencode/telegram-remote/.env")
   ];
   const loadedFrom = [];
   const values = {};
@@ -384,6 +470,7 @@ function createTelegramBot(opts) {
   const bot = new Bot(config.botToken);
   let activeChatId = opts.initialChatId;
   let questionDispatcher;
+  let permissionDispatcher;
   if (polling) {
     bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
@@ -423,6 +510,13 @@ This chat is now active for OpenCode notifications.`);
       const userId = ctx.from?.id;
       if (!questionDispatcher || messageId === void 0 || chatId === void 0 || userId === void 0) return;
       await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
+    });
+    bot.callbackQuery(/^p:([^:]+):(o|a|r)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const data = ctx.callbackQuery.data;
+      const messageId = ctx.callbackQuery.message?.message_id;
+      if (!permissionDispatcher || messageId === void 0) return;
+      await permissionDispatcher.handleCallbackQuery(data, messageId);
     });
     bot.on("message:text", async (ctx) => {
       const replyToMessageId = ctx.message.reply_to_message?.message_id;
@@ -511,6 +605,9 @@ ${question.question}`, { reply_markup: { inline_keyboard: inlineKeyboard } });
     },
     setQuestionDispatcher(dispatcher) {
       questionDispatcher = dispatcher;
+    },
+    setPermissionDispatcher(dispatcher) {
+      permissionDispatcher = dispatcher;
     }
   };
 }
@@ -585,29 +682,29 @@ var SessionTitleService = class {
 };
 
 // src/lib/claim.ts
-import { mkdir as mkdir3, open as open2, readdir as readdir2, stat as stat2, unlink as unlink3 } from "fs/promises";
-import { join as join4 } from "path";
-import { createHash as createHash2 } from "crypto";
+import { mkdir as mkdir4, open as open2, readdir as readdir3, stat as stat2, unlink as unlink4 } from "fs/promises";
+import { join as join5 } from "path";
+import { createHash as createHash3 } from "crypto";
 var DEFAULT_TTL_MS2 = 6e4;
 var sweptDirs = /* @__PURE__ */ new Set();
-function hasCode4(err, code) {
+function hasCode5(err, code) {
   return "code" in err && err.code === code;
 }
 function claimPath(claimsDir, key) {
-  const hash = createHash2("sha256").update(key).digest("hex").slice(0, 16);
-  return join4(claimsDir, `${hash}.claim`);
+  const hash = createHash3("sha256").update(key).digest("hex").slice(0, 16);
+  return join5(claimsDir, `${hash}.claim`);
 }
 async function sweep(claimsDir, ttlMs) {
   if (sweptDirs.has(claimsDir)) return;
   sweptDirs.add(claimsDir);
   try {
-    const entries = await readdir2(claimsDir, { withFileTypes: true });
+    const entries = await readdir3(claimsDir, { withFileTypes: true });
     await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith(".claim")).map(async (entry) => {
-      const filePath = join4(claimsDir, entry.name);
+      const filePath = join5(claimsDir, entry.name);
       try {
         const fileStat = await stat2(filePath);
         if (Date.now() - fileStat.mtimeMs > ttlMs * 2) {
-          await unlink3(filePath);
+          await unlink4(filePath);
         }
       } catch {
       }
@@ -626,20 +723,20 @@ async function createClaim(filePath) {
 }
 async function claimOnce(opts) {
   const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS2;
-  await mkdir3(opts.claimsDir, { recursive: true });
+  await mkdir4(opts.claimsDir, { recursive: true });
   await sweep(opts.claimsDir, ttlMs);
   const filePath = claimPath(opts.claimsDir, opts.key);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       return await createClaim(filePath);
     } catch (err) {
-      if (!(err instanceof Error) || !hasCode4(err, "EEXIST")) throw err;
+      if (!(err instanceof Error) || !hasCode5(err, "EEXIST")) throw err;
       try {
         const fileStat = await stat2(filePath);
         if (Date.now() - fileStat.mtimeMs <= ttlMs || attempt === 1) return false;
-        await unlink3(filePath);
+        await unlink4(filePath);
       } catch (statErr) {
-        if (statErr instanceof Error && hasCode4(statErr, "ENOENT")) continue;
+        if (statErr instanceof Error && hasCode5(statErr, "ENOENT")) continue;
         return false;
       }
     }
@@ -764,28 +861,158 @@ async function handleSessionUpdated(event, ctx) {
 }
 
 // src/events/permission-updated.ts
-async function handlePermissionUpdated(event, ctx) {
-  const permission = event.properties;
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `permission.updated:${permission.id}` });
-  if (!claimed) return;
-  const sessionTitle = ctx.sessionTitleService.getSessionTitle(permission.sessionID);
+var PERMISSION_EXPIRY_MS = 5 * 6e4;
+var CALLBACK_RE = /^p:([^:]+):(o|a|r)$/;
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+function isEventPermissionAsked(event) {
+  if (event.type !== "permission.asked") return false;
+  const props = event.properties;
+  if (!props) return false;
+  if (typeof props.id !== "string") return false;
+  if (typeof props.sessionID !== "string") return false;
+  if (typeof props.permission !== "string") return false;
+  if (!isStringArray(props.patterns)) return false;
+  if (!isStringArray(props.always)) return false;
+  return true;
+}
+function buildCallbackData(shortHash, reply) {
+  const data = `p:${shortHash}:${reply}`;
+  if (Buffer.byteLength(data, "utf8") > 64) throw new Error("Telegram callback_data exceeds 64 bytes");
+  return data;
+}
+function normalizeUpdated(permission) {
+  const pattern = permission.pattern === void 0 ? [] : Array.isArray(permission.pattern) ? permission.pattern : [permission.pattern];
+  return {
+    requestID: permission.id,
+    sessionID: permission.sessionID,
+    title: permission.title,
+    permission: permission.type,
+    patterns: pattern,
+    always: [],
+    endpoint: "session",
+    claimKey: `permission.updated:${permission.id}`
+  };
+}
+function normalizeAsked(permission) {
+  return {
+    requestID: permission.id,
+    sessionID: permission.sessionID,
+    title: permission.patterns.join(", ") || permission.permission,
+    permission: permission.permission,
+    patterns: permission.patterns,
+    always: permission.always,
+    endpoint: "request",
+    claimKey: `permission.asked:${permission.id}`
+  };
+}
+function permissionMessage(permission, sessionTitle) {
   const titleLine = sessionTitle ? `\u{1F4CB} ${sessionTitle}` : `Session: ${permission.sessionID}`;
-  const message = `\u2753 Permission requested
+  const patterns = permission.patterns.length > 0 ? `
+Patterns: ${permission.patterns.join(", ")}` : "";
+  const always = permission.always.length > 0 ? `
+Always options: ${permission.always.join(", ")}` : "";
+  return `\u2753 Permission requested
 
 ${titleLine}
 
-Type: ${permission.type}
-Detail: ${permission.title}`;
+Permission: ${permission.permission}
+Detail: ${permission.title}${patterns}${always}`;
+}
+function permissionKeyboard(shortHash) {
+  return [
+    [{ text: "\u2705 Allow once", callback_data: buildCallbackData(shortHash, "o") }],
+    [{ text: "\u267B\uFE0F Always allow", callback_data: buildCallbackData(shortHash, "a") }],
+    [{ text: "\u274C Reject", callback_data: buildCallbackData(shortHash, "r") }]
+  ];
+}
+function replyFromSelection(selection) {
+  if (selection === "o") return "once";
+  if (selection === "a") return "always";
+  if (selection === "r") return "reject";
+  return void 0;
+}
+function replyLabel(reply) {
+  if (reply === "once") return "Allowed once";
+  if (reply === "always") return "Always allowed";
+  return "Rejected";
+}
+async function handleNormalizedPermission(permission, ctx) {
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: permission.claimKey });
+  if (!claimed) return;
+  const shortHash = createPermissionShortHash(permission.requestID);
+  const sentAt = Date.now();
+  const rawSessionTitle = ctx.sessionTitleService.getSessionTitle(permission.sessionID);
+  const sessionTitle = rawSessionTitle === null ? void 0 : rawSessionTitle;
   try {
-    await ctx.bot.sendMessage(message);
+    const message = await ctx.bot.sendMessage(permissionMessage(permission, sessionTitle), {
+      reply_markup: { inline_keyboard: permissionKeyboard(shortHash) }
+    });
+    const pending = {
+      requestID: permission.requestID,
+      sessionID: permission.sessionID,
+      title: permission.title,
+      permission: permission.permission,
+      patterns: permission.patterns,
+      always: permission.always,
+      sentAt,
+      expiresAt: sentAt + PERMISSION_EXPIRY_MS,
+      telegramMessageId: message.message_id,
+      endpoint: permission.endpoint
+    };
+    await ctx.pendingPermissions.savePending(shortHash, pending);
   } catch (err) {
     ctx.logger.error("failed to send permission notification", { error: String(err) });
   }
 }
+async function expirePending(ctx, shortHash, pending, messageId) {
+  await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 Permission request expired");
+  await ctx.pendingPermissions.deletePending(shortHash);
+  ctx.logger.info("pending permission expired", { requestID: pending.requestID });
+}
+async function handlePermissionUpdated(event, ctx) {
+  await handleNormalizedPermission(normalizeUpdated(event.properties), ctx);
+}
+async function handlePermissionAsked(event, ctx) {
+  await handleNormalizedPermission(normalizeAsked(event.properties), ctx);
+}
+function createPermissionDispatcher(ctx) {
+  return {
+    async handleCallbackQuery(data, messageId) {
+      const match = CALLBACK_RE.exec(data);
+      if (!match) return;
+      const shortHash = match[1];
+      const reply = replyFromSelection(match[2]);
+      if (!reply) return;
+      const pending = await ctx.pendingPermissions.loadPending(shortHash);
+      if (!pending) {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
+        return;
+      }
+      if (pending.expiresAt < Date.now()) {
+        await expirePending(ctx, shortHash, pending, messageId);
+        return;
+      }
+      try {
+        await ctx.replyToPermission(pending.requestID, pending.sessionID, reply, pending.endpoint);
+        await ctx.bot.editMessageRemoveKeyboard(messageId, `\u2705 Permission ${replyLabel(reply)}
+
+${pending.permission}: ${pending.title}`);
+        ctx.logger.info("permission reply sent", { requestID: pending.requestID, sessionID: pending.sessionID, reply });
+      } catch (err) {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, "\u26A0\uFE0F Failed to send permission reply to opencode");
+        ctx.logger.error("failed to send permission reply", { error: String(err), requestID: pending.requestID });
+      } finally {
+        await ctx.pendingPermissions.deletePending(shortHash);
+      }
+    }
+  };
+}
 
 // src/events/question-asked.ts
 var QUESTION_EXPIRY_MS = 5 * 6e4;
-var CALLBACK_RE = /^q:([^:]+):(\d+):(\d+|c|d)$/;
+var CALLBACK_RE2 = /^q:([^:]+):(\d+):(\d+|c|d)$/;
 function isQuestionOption(value) {
   return typeof value.label === "string" && typeof value.description === "string";
 }
@@ -804,14 +1031,14 @@ function isEventQuestionAsked(event) {
   if (!Array.isArray(props.questions)) return false;
   return props.questions.every((question) => typeof question === "object" && question !== null && isQuestionInfo(question));
 }
-function buildCallbackData(shortHash, questionIndex, optionIndex) {
+function buildCallbackData2(shortHash, questionIndex, optionIndex) {
   const data = `q:${shortHash}:${questionIndex}:${optionIndex}`;
   if (Buffer.byteLength(data, "utf8") > 64) throw new Error("Telegram callback_data exceeds 64 bytes");
   return data;
 }
 function callbackDataForQuestion(shortHash, questionIndex, question) {
-  const data = question.options.map((_, optionIndex) => buildCallbackData(shortHash, questionIndex, optionIndex));
-  if (question.custom !== false) data.push(buildCallbackData(shortHash, questionIndex, "c"));
+  const data = question.options.map((_, optionIndex) => buildCallbackData2(shortHash, questionIndex, optionIndex));
+  if (question.custom !== false) data.push(buildCallbackData2(shortHash, questionIndex, "c"));
   return data;
 }
 function useSimpleQuestionKeyboard(question) {
@@ -824,13 +1051,13 @@ function questionInlineKeyboard(shortHash, questionIndex, question, selected) {
   const multiple = question.multiple === true;
   const inlineKeyboard = question.options.map((option, optionIndex) => [{
     text: multiple && selected.includes(option.label) ? `\u2705 ${option.label}` : option.label,
-    callback_data: buildCallbackData(shortHash, questionIndex, optionIndex)
+    callback_data: buildCallbackData2(shortHash, questionIndex, optionIndex)
   }]);
   if (question.custom !== false) {
-    inlineKeyboard.push([{ text: "\u270F\uFE0F Custom answer", callback_data: buildCallbackData(shortHash, questionIndex, "c") }]);
+    inlineKeyboard.push([{ text: "\u270F\uFE0F Custom answer", callback_data: buildCallbackData2(shortHash, questionIndex, "c") }]);
   }
   if (multiple) {
-    inlineKeyboard.push([{ text: "\u2705 Done", callback_data: buildCallbackData(shortHash, questionIndex, "d") }]);
+    inlineKeyboard.push([{ text: "\u2705 Done", callback_data: buildCallbackData2(shortHash, questionIndex, "d") }]);
   }
   return inlineKeyboard;
 }
@@ -878,7 +1105,7 @@ ${answerSummary(pending.questions, answers)}`);
     await ctx.pendingQuestions.deletePending(shortHash);
   }
 }
-async function expirePending(ctx, shortHash, pending, messageId) {
+async function expirePending2(ctx, shortHash, pending, messageId) {
   await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 Question expired");
   await ctx.pendingQuestions.deletePending(shortHash);
   ctx.logger.info("pending question expired", { requestID: pending.requestID });
@@ -917,7 +1144,7 @@ async function handleQuestionAsked(event, ctx) {
 function createQuestionDispatcher(ctx) {
   return {
     async handleCallbackQuery(data, messageId, chatId, userId) {
-      const match = CALLBACK_RE.exec(data);
+      const match = CALLBACK_RE2.exec(data);
       if (!match) return;
       const shortHash = match[1];
       const questionIndex = Number(match[2]);
@@ -928,7 +1155,7 @@ function createQuestionDispatcher(ctx) {
         return;
       }
       if (pending.expiresAt < Date.now()) {
-        await expirePending(ctx, shortHash, pending, messageId);
+        await expirePending2(ctx, shortHash, pending, messageId);
         return;
       }
       const question = pending.questions[questionIndex];
@@ -971,7 +1198,7 @@ function createQuestionDispatcher(ctx) {
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
       if (match.data.expiresAt < Date.now()) {
-        await expirePending(ctx, match.shortHash, match.data, match.data.telegramMessageIds[0]);
+        await expirePending2(ctx, match.shortHash, match.data, match.data.telegramMessageIds[0]);
         return;
       }
       const question = match.data.questions[awaiting.questionIndex];
@@ -1012,7 +1239,7 @@ async function handleQuestionReplied(event, ctx) {
 }
 
 // src/telegram-remote.ts
-var pluginDir = dirname3(fileURLToPath(import.meta.url));
+var pluginDir = dirname4(fileURLToPath(import.meta.url));
 var TelegramRemote = async (input) => {
   const logger = createLogger({ namespace: "telegram" });
   try {
@@ -1021,10 +1248,11 @@ var TelegramRemote = async (input) => {
     const config = loadConfig({ logger, env: process.env });
     const stateStore = createStateStore();
     const initialState = await stateStore.read();
-    const tokenHash = createHash3("sha256").update(config.botToken).digest("hex").slice(0, 16);
-    const lockPath = join5(tmpdir3(), `opencoder-telegram-${tokenHash}.lock`);
-    const claimsDir = join5(tmpdir3(), `opencoder-telegram-claims-${tokenHash}`);
+    const tokenHash = createHash4("sha256").update(config.botToken).digest("hex").slice(0, 16);
+    const lockPath = join6(tmpdir4(), `opencoder-telegram-${tokenHash}.lock`);
+    const claimsDir = join6(tmpdir4(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
+    const pendingPermissions = createPendingPermissionStore({ tokenHash });
     const lockResult = await acquireLock({ lockPath });
     const isLeader = lockResult.acquired;
     logger.info(
@@ -1039,6 +1267,23 @@ var TelegramRemote = async (input) => {
         url: `/question/${encodeURIComponent(requestID)}/reply`,
         headers: { "Content-Type": "application/json" },
         body: { answers },
+        throwOnError: true
+      });
+    };
+    const replyToPermission = async (requestID, sessionID, reply, endpoint) => {
+      if (endpoint === "request") {
+        await client._client.post({
+          url: `/permission/${encodeURIComponent(requestID)}/reply`,
+          headers: { "Content-Type": "application/json" },
+          body: { reply },
+          throwOnError: true
+        });
+        return;
+      }
+      await client._client.post({
+        url: `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
+        headers: { "Content-Type": "application/json" },
+        body: { response: reply },
         throwOnError: true
       });
     };
@@ -1085,10 +1330,13 @@ var TelegramRemote = async (input) => {
       serverUrl: input.serverUrl,
       tokenHash,
       pendingQuestions,
-      replyToQuestion
+      pendingPermissions,
+      replyToQuestion,
+      replyToPermission
     };
     if (isLeader) {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
+      bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
     }
     return {
       event: async ({ event }) => {
@@ -1106,6 +1354,10 @@ var TelegramRemote = async (input) => {
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
           default: {
+            if (isEventPermissionAsked(extEvent)) {
+              if (!isLeader) return;
+              return handlePermissionAsked(extEvent, ctx);
+            }
             if (isEventSessionError(extEvent)) {
               return handleSessionError(extEvent, ctx);
             }

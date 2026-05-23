@@ -471,28 +471,25 @@ function optionDescriptionText(question) {
   const options = question.options.map((option, index) => {
     const description = option.description.trim();
     return description ? `${index + 1}. ${option.label}
-> ${description}` : `${index + 1}. ${option.label}`;
+\uC124\uBA85: ${description}` : `${index + 1}. ${option.label}`;
   });
   return options.length > 0 ? `
 
-${options.join("\n")}` : "";
+Options:
+
+${options.join("\n\n")}` : "";
 }
-function questionText(question) {
-  const header = question.header ? `\u2753 ${question.header}` : "\u2753 Question";
+function questionText(question, progress) {
+  const title = question.header || "Question";
+  const header = progress ? `\u2753 ${progress} \xB7 ${title}` : `\u2753 ${title}`;
   return `${header}
 
 ${question.question}${optionDescriptionText(question)}`;
 }
 function pendingQuestionText(questions, questionIndex) {
   const question = questions[questionIndex];
-  const prefix = questions.length > 1 ? `Question ${questionIndex + 1}/${questions.length}
-
-` : "";
-  const allQuestions = questions.length > 1 ? `All questions:
-${questions.map((q, i) => `${i + 1}. ${q.header}: ${q.question}`).join("\n")}
-
-` : "";
-  return `${allQuestions}${prefix}${questionText(question)}`;
+  const progress = questions.length > 1 ? `Question ${questionIndex + 1}/${questions.length}` : void 0;
+  return questionText(question, progress);
 }
 
 // src/bot.ts

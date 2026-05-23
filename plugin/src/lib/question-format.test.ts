@@ -15,11 +15,11 @@ describe("question text formatting", () => {
 
     assert.equal(
       text,
-      "❓ Strategy\n\nChoose one\n\n1. Split\n> List frequently, detail overnight.\n2. Hybrid\n> Fast polling plus reconciliation.",
+      "❓ Strategy\n\nChoose one\n\nOptions:\n\n1. Split\n설명: List frequently, detail overnight.\n\n2. Hybrid\n설명: Fast polling plus reconciliation.",
     );
   });
 
-  test("keeps multi-question context while rendering current options", () => {
+  test("renders only the current question for multi-question prompts", () => {
     const text = pendingQuestionText(
       [
         { header: "First", question: "First?", options: [{ label: "A", description: "Alpha" }] },
@@ -28,8 +28,9 @@ describe("question text formatting", () => {
       1,
     );
 
-    assert.match(text, /Question 2\/2/);
-    assert.match(text, /All questions:\n1\. First: First\?\n2\. Second: Second\?/);
-    assert.match(text, /1\. B\n> Beta/);
+    assert.match(text, /^❓ Question 2\/2 · Second/);
+    assert.doesNotMatch(text, /All questions:/);
+    assert.doesNotMatch(text, /First\?/);
+    assert.match(text, /Options:\n\n1\. B\n설명: Beta/);
   });
 });

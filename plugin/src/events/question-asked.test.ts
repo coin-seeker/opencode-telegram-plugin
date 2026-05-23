@@ -180,6 +180,8 @@ describe("question asked flow", () => {
       null,
     ]);
     assert.match(editedMessages.at(-1)?.text ?? "", /Second\?/);
+    assert.doesNotMatch(editedMessages.at(-1)?.text ?? "", /All questions:/);
+    assert.doesNotMatch(editedMessages.at(-1)?.text ?? "", /First\?/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:1:0`, 10, 1, 1);
     assert.deepEqual(replies, [{ requestID: "que_test", answers: [["A"], ["B"]] }]);
@@ -197,8 +199,10 @@ describe("question asked flow", () => {
     const dispatcher = createQuestionDispatcher(ctx);
 
     assert.match(sentMessages[0]?.text ?? "", /Pick options\?/);
-    assert.match(sentMessages[0]?.text ?? "", /> First choice details/);
-    assert.match(sentMessages[0]?.text ?? "", /> Second choice details/);
+    assert.match(sentMessages[0]?.text ?? "", /Options:\n\n1\. A/);
+    assert.match(sentMessages[0]?.text ?? "", /설명: First choice details/);
+    assert.match(sentMessages[0]?.text ?? "", /\n\n2\. B/);
+    assert.match(sentMessages[0]?.text ?? "", /설명: Second choice details/);
     assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
       null,
     ]);

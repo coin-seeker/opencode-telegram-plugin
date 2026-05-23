@@ -1,13 +1,13 @@
-import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
 import type { EventSessionIdle, Session } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
-import { createPendingQuestionStore, type QuestionAnswer } from "../lib/pending-questions.js";
 import { createPendingPermissionStore, type PermissionReply } from "../lib/pending-permissions.js";
+import { createPendingQuestionStore, type QuestionAnswer } from "../lib/pending-questions.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import { handleSessionIdle } from "./session-idle.js";
 import type { EventHandlerContext } from "./types.js";
@@ -41,11 +41,13 @@ function idleEvent(sessionID: string): EventSessionIdle {
 
 function createBot() {
   const sentMessages: string[] = [];
+  const sentOptions: unknown[] = [];
   const bot: TelegramBotManager = {
     async start() {},
     async stop() {},
-    async sendMessage(text) {
+    async sendMessage(text, options) {
       sentMessages.push(text);
+      sentOptions.push(options);
       return { message_id: sentMessages.length };
     },
     async sendQuestionWithKeyboard() {
@@ -63,13 +65,19 @@ function createBot() {
     },
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
+    setStartWorkDispatcher() {},
   };
-  return { bot, sentMessages };
+  return { bot, sentMessages, sentOptions };
 }
 
-function createContext(bot: TelegramBotManager, dir: string, service: SessionTitleService, childrenBySession: Record<string, Session[]> = {}): EventHandlerContext {
+function createContext(
+  bot: TelegramBotManager,
+  dir: string,
+  service: SessionTitleService,
+  childrenBySession: Record<string, Session[]> = {},
+): EventHandlerContext {
   return {
-    client: ({
+    client: {
       session: {
         async get() {
           return { data: undefined };
@@ -78,7 +86,7 @@ function createContext(bot: TelegramBotManager, dir: string, service: SessionTit
           return { data: childrenBySession[options.path.id] ?? [] };
         },
       },
-    } as unknown) as EventHandlerContext["client"],
+    } as unknown as EventHandlerContext["client"],
     bot,
     sessionTitleService: service,
     stateStore: {} as EventHandlerContext["stateStore"],
@@ -88,11 +96,18 @@ function createContext(bot: TelegramBotManager, dir: string, service: SessionTit
     pluginDir: dir,
     serverUrl: new URL("http://localhost:4096"),
     tokenHash: "tok",
-    pendingQuestions: createPendingQuestionStore({ tokenHash: "tok", baseDir: join(dir, "questions") }),
-    pendingPermissions: createPendingPermissionStore({ tokenHash: "tok", baseDir: join(dir, "permissions") }),
+    pendingQuestions: createPendingQuestionStore({
+      tokenHash: "tok",
+      baseDir: join(dir, "questions"),
+    }),
+    pendingPermissions: createPendingPermissionStore({
+      tokenHash: "tok",
+      baseDir: join(dir, "permissions"),
+    }),
     idleRecheckDelayMs: 20,
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
     async replyToPermission(_requestID: string, _sessionID: string, _reply: PermissionReply) {},
+    async runSessionCommand() {},
   };
 }
 
@@ -110,7 +125,7 @@ describe("session idle notifications", () => {
   test("waits for checker child sessions created during root idle recheck", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent", "Plan builder"));
-    const { bot, sentMessages } = createBot();
+    const { bot, sentMessages, sentOptions } = createBot();
     const ctx = createContext(bot, join(dir, "race"), service);
 
     const parentIdle = handleSessionIdle(idleEvent("parent"), ctx);
@@ -123,7 +138,10 @@ describe("session idle notifications", () => {
 
     await handleSessionIdle(idleEvent("momus"), ctx);
 
-    assert.deepEqual(sentMessages, ["Agent has finished: Plan builder"]);
+    assert.deepEqual(sentMessages, [
+      "Agent has finished: Plan builder\n\nIf this was a plan builder session, tap below to run /start-work.",
+    ]);
+    assert.match(JSON.stringify(sentOptions[0]), /Run \/start-work/);
     assert.equal(service.hasDeferredIdleNotification("parent"), false);
   });
 

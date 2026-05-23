@@ -1,6 +1,7 @@
 import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
-import { claimOnce } from "../lib/claim.js";
 import { shouldSuppressIdle } from "../lib/abort-tracker.js";
+import { claimOnce } from "../lib/claim.js";
+import { startWorkKeyboard } from "./start-work.js";
 import type { EventHandlerContext } from "./types.js";
 
 const ROOT_IDLE_RECHECK_DELAY_MS = 2_500;
@@ -9,7 +10,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function resolveParentID(sessionId: string, ctx: EventHandlerContext): Promise<string | null | undefined> {
+async function resolveParentID(
+  sessionId: string,
+  ctx: EventHandlerContext,
+): Promise<string | null | undefined> {
   const cachedParentID = ctx.sessionTitleService.getParentID(sessionId);
   if (cachedParentID !== undefined) return cachedParentID;
 
@@ -27,7 +31,11 @@ async function resolveParentID(sessionId: string, ctx: EventHandlerContext): Pro
   }
 }
 
-async function hydrateDescendants(sessionId: string, ctx: EventHandlerContext, seen = new Set<string>()): Promise<void> {
+async function hydrateDescendants(
+  sessionId: string,
+  ctx: EventHandlerContext,
+  seen = new Set<string>(),
+): Promise<void> {
   if (seen.has(sessionId)) return;
   seen.add(sessionId);
 
@@ -48,13 +56,23 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
     return;
   }
 
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `session.idle:${sessionId}`, ttlMs: 5000 });
+  const claimed = await claimOnce({
+    claimsDir: ctx.claimsDir,
+    key: `session.idle:${sessionId}`,
+    ttlMs: 5000,
+  });
   if (!claimed) return;
 
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
+  const message = title
+    ? `Agent has finished: ${title}\n\nIf this was a plan builder session, tap below to run /start-work.`
+    : "Agent has finished.\n\nIf this was a plan builder session, tap below to run /start-work.";
+  const keyboard = startWorkKeyboard(sessionId);
   try {
-    await ctx.bot.sendMessage(message);
+    await ctx.bot.sendMessage(
+      message,
+      keyboard ? { reply_markup: { inline_keyboard: keyboard } } : undefined,
+    );
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
     ctx.logger.info("idle notification sent", { sessionId, title });
   } catch (err) {
@@ -62,23 +80,33 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
   }
 }
 
-async function flushDeferredParentIfReady(parentID: string, ctx: EventHandlerContext): Promise<void> {
+async function flushDeferredParentIfReady(
+  parentID: string,
+  ctx: EventHandlerContext,
+): Promise<void> {
   if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
   if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
   if (ctx.sessionTitleService.getSessionStatus(parentID) !== "idle") {
     ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
-    ctx.logger.info("clearing deferred parent idle notification - parent resumed", { sessionId: parentID });
+    ctx.logger.info("clearing deferred parent idle notification - parent resumed", {
+      sessionId: parentID,
+    });
     return;
   }
   ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
   await sendIdleNotification(parentID, ctx);
 }
 
-async function deferParentIdleIfDescendantsRunning(sessionId: string, ctx: EventHandlerContext): Promise<boolean> {
+async function deferParentIdleIfDescendantsRunning(
+  sessionId: string,
+  ctx: EventHandlerContext,
+): Promise<boolean> {
   await hydrateDescendants(sessionId, ctx);
   if (!ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) return false;
   ctx.sessionTitleService.deferIdleNotification(sessionId);
-  ctx.logger.info("deferring parent idle notification - child sessions still running", { sessionId });
+  ctx.logger.info("deferring parent idle notification - child sessions still running", {
+    sessionId,
+  });
   return true;
 }
 
@@ -105,7 +133,9 @@ export async function handleSessionIdle(
   await sleep(ctx.idleRecheckDelayMs ?? ROOT_IDLE_RECHECK_DELAY_MS);
 
   if (ctx.sessionTitleService.getSessionStatus(sessionId) !== "idle") {
-    ctx.logger.info("idle notification skipped - session resumed during recheck delay", { sessionId });
+    ctx.logger.info("idle notification skipped - session resumed during recheck delay", {
+      sessionId,
+    });
     return;
   }
 
@@ -116,7 +146,10 @@ export async function handleSessionIdle(
   await sendIdleNotification(sessionId, ctx);
 }
 
-export async function handleSessionStatus(event: EventSessionStatus, ctx: EventHandlerContext): Promise<void> {
+export async function handleSessionStatus(
+  event: EventSessionStatus,
+  ctx: EventHandlerContext,
+): Promise<void> {
   const sessionId = event.properties.sessionID;
   const statusType = event.properties.status.type;
   ctx.sessionTitleService.setSessionStatus(sessionId, statusType);

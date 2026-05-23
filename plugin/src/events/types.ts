@@ -6,6 +6,7 @@ import type { PendingPermissionStore, PermissionReply } from "../lib/pending-per
 import type { PendingQuestionStore, QuestionAnswer } from "../lib/pending-questions.js";
 import type { StateStore } from "../lib/state-store.js";
 import type { SessionTitleService } from "../services/session-title-service.js";
+import type { StartWorkCommandStore } from "./start-work.js";
 
 export type { QuestionAnswer } from "../lib/pending-questions.js";
 
@@ -24,6 +25,7 @@ export interface EventHandlerContext {
   tokenHash: string;
   pendingQuestions: PendingQuestionStore;
   pendingPermissions: PendingPermissionStore;
+  startWorkCommands: StartWorkCommandStore;
   idleRecheckDelayMs?: number;
   replyToQuestion(requestID: string, answers: QuestionAnswer[]): Promise<void>;
   replyToPermission(
@@ -32,5 +34,5 @@ export interface EventHandlerContext {
     reply: PermissionReply,
     endpoint: "request" | "session",
   ): Promise<void>;
-  runSessionCommand(sessionID: string, command: string): Promise<void>;
+  runSessionCommand(sessionID: string, command: string, args: string): Promise<void>;
 }

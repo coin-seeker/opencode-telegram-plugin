@@ -14,5 +14,5 @@ export { handleSessionCreated } from "./session-created.js";
 export { handleSessionError, isEventSessionError } from "./session-error.js";
 export { handleSessionIdle, handleSessionStatus } from "./session-idle.js";
 export { handleSessionUpdated } from "./session-updated.js";
-export { createStartWorkDispatcher } from "./start-work.js";
+export { createStartWorkDispatcher, StartWorkCommandStore } from "./start-work.js";
 export type { EventHandlerContext, OpencodeClient } from "./types.js";

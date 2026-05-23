@@ -956,6 +956,33 @@ async function handleSessionError(event, ctx) {
 // src/events/start-work.ts
 var CALLBACK_RE3 = /^sw:(.+)$/;
 var START_WORK_COMMAND = "start-work";
+var START_WORK_RE = /(?:^|[\s`])\/start-work(?:\s+([^\n`]+))?/g;
+var StartWorkCommandStore = class {
+  commands = /* @__PURE__ */ new Map();
+  updateFromText(sessionID, text) {
+    const command = extractStartWorkCommand(sessionID, text);
+    if (!command) return void 0;
+    this.commands.set(sessionID, command.arguments);
+    return command;
+  }
+  get(sessionID) {
+    const args = this.commands.get(sessionID);
+    if (args === void 0) return void 0;
+    return { sessionID, arguments: args };
+  }
+  delete(sessionID) {
+    this.commands.delete(sessionID);
+  }
+};
+function extractStartWorkCommand(sessionID, text) {
+  let latestArgs;
+  for (const match of text.matchAll(START_WORK_RE)) {
+    const args = (match[1] ?? "").trim();
+    if (args) latestArgs = args;
+  }
+  if (latestArgs === void 0) return void 0;
+  return { sessionID, arguments: latestArgs };
+}
 function startWorkCallbackData(sessionID) {
   const data = `sw:${encodeURIComponent(sessionID)}`;
   return Buffer.byteLength(data, "utf8") <= 64 ? data : void 0;
@@ -971,14 +998,25 @@ function createStartWorkDispatcher(ctx) {
       const match = CALLBACK_RE3.exec(data);
       if (!match) return;
       const sessionID = decodeURIComponent(match[1]);
-      try {
-        await ctx.runSessionCommand(sessionID, START_WORK_COMMAND);
+      const command = ctx.startWorkCommands.get(sessionID);
+      if (!command) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          `\u25B6\uFE0F Sent /start-work to opencode.
+          `\u26A0\uFE0F No /start-work command was detected for this session.
 
 Session: ${sessionID}`
         );
+        return;
+      }
+      try {
+        await ctx.runSessionCommand(sessionID, START_WORK_COMMAND, command.arguments);
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          `\u25B6\uFE0F Sent /start-work ${command.arguments} to opencode.
+
+Session: ${sessionID}`
+        );
+        ctx.startWorkCommands.delete(sessionID);
         ctx.logger.info("start-work command sent", { sessionID });
       } catch (err) {
         await ctx.bot.editMessageRemoveKeyboard(
@@ -1039,13 +1077,15 @@ async function sendIdleNotification(sessionId, ctx) {
   });
   if (!claimed) return;
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const message = title ? `Agent has finished: ${title}
+  const startWorkCommand = ctx.startWorkCommands.get(sessionId);
+  const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
+  const keyboard = startWorkCommand ? startWorkKeyboard(sessionId) : void 0;
+  const text = startWorkCommand ? `${message}
 
-If this was a plan builder session, tap below to run /start-work.` : "Agent has finished.\n\nIf this was a plan builder session, tap below to run /start-work.";
-  const keyboard = startWorkKeyboard(sessionId);
+Plan is ready. Tap below to run /start-work ${startWorkCommand.arguments}.` : message;
   try {
     await ctx.bot.sendMessage(
-      message,
+      text,
       keyboard ? { reply_markup: { inline_keyboard: keyboard } } : void 0
     );
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
@@ -1427,6 +1467,16 @@ var SessionTitleService = class {
 
 // src/telegram-remote.ts
 var pluginDir = dirname4(fileURLToPath(import.meta.url));
+function getTextPartFromMessagePartUpdated(event) {
+  if (event.type !== "message.part.updated") return void 0;
+  const part = event.properties?.part;
+  if (!part || typeof part !== "object") return void 0;
+  const candidate = part;
+  if (candidate.type !== "text" || typeof candidate.sessionID !== "string" || typeof candidate.text !== "string") {
+    return void 0;
+  }
+  return { type: "text", sessionID: candidate.sessionID, text: candidate.text };
+}
 var TelegramRemote = async (input) => {
   const logger = createLogger({ namespace: "telegram" });
   try {
@@ -1440,6 +1490,7 @@ var TelegramRemote = async (input) => {
     const claimsDir = join6(tmpdir4(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
+    const startWorkCommands = new StartWorkCommandStore();
     const lockResult = await acquireLock({ lockPath });
     const isLeader = lockResult.acquired;
     logger.info(
@@ -1478,10 +1529,10 @@ var TelegramRemote = async (input) => {
         throwOnError: true
       });
     };
-    const runSessionCommand = async (sessionID, command) => {
+    const runSessionCommand = async (sessionID, command, args) => {
       await input.client.session.command({
         path: { id: sessionID },
-        body: { command, arguments: "" },
+        body: { command, arguments: args },
         throwOnError: true
       });
     };
@@ -1529,6 +1580,7 @@ var TelegramRemote = async (input) => {
       tokenHash,
       pendingQuestions,
       pendingPermissions,
+      startWorkCommands,
       replyToQuestion,
       replyToPermission,
       runSessionCommand
@@ -1554,6 +1606,17 @@ var TelegramRemote = async (input) => {
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
           default: {
+            const textPart = getTextPartFromMessagePartUpdated(extEvent);
+            if (textPart) {
+              const command = startWorkCommands.updateFromText(textPart.sessionID, textPart.text);
+              if (command) {
+                logger.info("start-work command detected", {
+                  sessionID: command.sessionID,
+                  arguments: command.arguments
+                });
+              }
+              return;
+            }
             if (isEventPermissionAsked(extEvent)) {
               if (!isLeader) return;
               return handlePermissionAsked(extEvent, ctx);

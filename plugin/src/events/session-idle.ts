@@ -64,13 +64,15 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
   if (!claimed) return;
 
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const message = title
-    ? `Agent has finished: ${title}\n\nIf this was a plan builder session, tap below to run /start-work.`
-    : "Agent has finished.\n\nIf this was a plan builder session, tap below to run /start-work.";
-  const keyboard = startWorkKeyboard(sessionId);
+  const startWorkCommand = ctx.startWorkCommands.get(sessionId);
+  const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
+  const keyboard = startWorkCommand ? startWorkKeyboard(sessionId) : undefined;
+  const text = startWorkCommand
+    ? `${message}\n\nPlan is ready. Tap below to run /start-work ${startWorkCommand.arguments}.`
+    : message;
   try {
     await ctx.bot.sendMessage(
-      message,
+      text,
       keyboard ? { reply_markup: { inline_keyboard: keyboard } } : undefined,
     );
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);

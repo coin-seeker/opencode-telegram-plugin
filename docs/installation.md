@@ -1,6 +1,6 @@
 # OpenCode Telegram Plugin Installation
 
-Use this guide to install `@coinseeker/opencode-telegram-plugin@1.0.7` as an OpenCode npm package plugin.
+Use this guide to install `@coinseeker/opencode-telegram-plugin@1.0.8` as an OpenCode npm package plugin.
 
 ## For AI Coding Agents
 
@@ -21,7 +21,7 @@ Copy this prompt into an AI coding agent if you want it to install the plugin:
 ```text
 Install OpenCode Telegram Plugin from npm.
 
-Package: @coinseeker/opencode-telegram-plugin@1.0.7
+Package: @coinseeker/opencode-telegram-plugin@1.0.8
 
 Before modifying files, ask me for:
 - TELEGRAM_BOT_TOKEN
@@ -31,7 +31,7 @@ Before modifying files, ask me for:
 Then:
 1. Create ~/.config/opencode/telegram-remote/.env with the provided Telegram values.
 2. chmod 600 ~/.config/opencode/telegram-remote/.env.
-3. Add "@coinseeker/opencode-telegram-plugin@1.0.7" to ~/.config/opencode/opencode.json under the singular "plugin" array, preserving existing plugins.
+3. Add "@coinseeker/opencode-telegram-plugin@1.0.8" to ~/.config/opencode/opencode.json under the singular "plugin" array, preserving existing plugins.
 4. Do not commit .env or any secrets.
 5. Show me the final non-secret config path and ask me to restart OpenCode.
 ```
@@ -63,7 +63,7 @@ Open `~/.config/opencode/opencode.json` and append the pinned npm package name:
 ```json
 {
   "plugin": [
-    "@coinseeker/opencode-telegram-plugin@1.0.7"
+    "@coinseeker/opencode-telegram-plugin@1.0.8"
   ]
 }
 ```
@@ -170,7 +170,7 @@ node -e "const os=require('os'); console.log(os.tmpdir() + '/opencoder-telegram.
 
 ### Plugin Does Not Load
 
-- Confirm the npm package name is exactly `@coinseeker/opencode-telegram-plugin@1.0.7`.
+- Confirm the npm package name is exactly `@coinseeker/opencode-telegram-plugin@1.0.8`.
 - Confirm the key is `plugin`, not `plugins`.
 - Restart OpenCode.
 

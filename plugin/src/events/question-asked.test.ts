@@ -58,16 +58,80 @@ function createBot() {
   return { bot, sentMessages, editedMessages };
 }
 
-function questionEvent(): EventQuestionAsked {
+function createContext(bot: TelegramBotManager, requestID: string, dir: string, replies: Array<{ requestID: string; answers: QuestionAnswer[] }>): EventHandlerContext {
+  return {
+    client: {} as EventHandlerContext["client"],
+    bot,
+    sessionTitleService: {} as EventHandlerContext["sessionTitleService"],
+    stateStore: {} as EventHandlerContext["stateStore"],
+    config: { botToken: "token", allowedUserIds: [1] },
+    logger: createLogger(),
+    claimsDir: join(dir, `claims-${requestID}`),
+    pluginDir: dir,
+    serverUrl: new URL("http://localhost:4096"),
+    tokenHash: "tok",
+    pendingQuestions: createPendingQuestionStore({ tokenHash: "tok", baseDir: join(dir, `pending-${requestID}`) }),
+    async replyToQuestion(answeredRequestID, answers) {
+      replies.push({ requestID: answeredRequestID, answers });
+    },
+  };
+}
+
+function questionEvent(requestID = "que_test"): EventQuestionAsked {
   return {
     id: "event-1",
     type: "question.asked",
     properties: {
-      id: "que_test",
+      id: requestID,
       sessionID: "ses_test",
       questions: [
         { header: "First", question: "First?", options: [{ label: "A", description: "A" }] },
         { header: "Second", question: "Second?", options: [{ label: "B", description: "B" }] },
+      ],
+    },
+  };
+}
+
+function multipleQuestionEvent(requestID = "que_multiple"): EventQuestionAsked {
+  return {
+    id: `event-${requestID}`,
+    type: "question.asked",
+    properties: {
+      id: requestID,
+      sessionID: "ses_test",
+      questions: [
+        {
+          header: "Pick",
+          question: "Pick options?",
+          multiple: true,
+          options: [
+            { label: "A", description: "A" },
+            { label: "B", description: "B" },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+function mixedQuestionEvent(requestID = "que_mixed"): EventQuestionAsked {
+  return {
+    id: `event-${requestID}`,
+    type: "question.asked",
+    properties: {
+      id: requestID,
+      sessionID: "ses_test",
+      questions: [
+        {
+          header: "Pick",
+          question: "Pick options?",
+          multiple: true,
+          options: [
+            { label: "A", description: "A" },
+            { label: "B", description: "B" },
+          ],
+        },
+        { header: "Next", question: "Next?", options: [{ label: "C", description: "C" }] },
       ],
     },
   };
@@ -86,24 +150,8 @@ describe("question asked flow", () => {
 
   test("waits for all multi-question answers before replying", async () => {
     const { bot, editedMessages } = createBot();
-    const pendingQuestions = createPendingQuestionStore({ tokenHash: "tok", baseDir: join(dir, "pending") });
     const replies: Array<{ requestID: string; answers: QuestionAnswer[] }> = [];
-    const ctx: EventHandlerContext = {
-      client: {} as EventHandlerContext["client"],
-      bot,
-      sessionTitleService: {} as EventHandlerContext["sessionTitleService"],
-      stateStore: {} as EventHandlerContext["stateStore"],
-      config: { botToken: "token", allowedUserIds: [1] },
-      logger: createLogger(),
-      claimsDir: join(dir, "claims"),
-      pluginDir: dir,
-      serverUrl: new URL("http://localhost:4096"),
-      tokenHash: "tok",
-      pendingQuestions,
-      async replyToQuestion(requestID, answers) {
-        replies.push({ requestID, answers });
-      },
-    };
+    const ctx = createContext(bot, "que_test", dir, replies);
 
     await handleQuestionAsked(questionEvent(), ctx);
     const shortHash = createQuestionShortHash("que_test");
@@ -111,12 +159,83 @@ describe("question asked flow", () => {
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
     assert.equal(replies.length, 0);
-    assert.deepEqual((await pendingQuestions.loadPending(shortHash))?.answersInProgress, [["A"], null]);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["A"], null]);
     assert.match(editedMessages.at(-1)?.text ?? "", /Second\?/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:1:0`, 10, 1, 1);
     assert.deepEqual(replies, [{ requestID: "que_test", answers: [["A"], ["B"]] }]);
-    assert.equal(await pendingQuestions.loadPending(shortHash), undefined);
+    assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+  });
+
+  test("toggles multiple selections and waits for Done before replying", async () => {
+    const { bot, sentMessages, editedMessages } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[] }> = [];
+    const ctx = createContext(bot, "que_multiple", dir, replies);
+
+    await handleQuestionAsked(multipleQuestionEvent(), ctx);
+    const shortHash = createQuestionShortHash("que_multiple");
+    const dispatcher = createQuestionDispatcher(ctx);
+
+    assert.match(sentMessages[0]?.text ?? "", /Pick options\?/);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [null]);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
+    assert.equal(replies.length, 0);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["A"]]);
+    assert.match(JSON.stringify(editedMessages.at(-1)?.options), /✅ A/);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:1`, 10, 1, 1);
+    assert.equal(replies.length, 0);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["A", "B"]]);
+    assert.match(JSON.stringify(editedMessages.at(-1)?.options), /✅ B/);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["B"]]);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);
+    assert.deepEqual(replies, [{ requestID: "que_multiple", answers: [["B"]] }]);
+    assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+  });
+
+  test("adds custom multiple answers without replying until Done", async () => {
+    const { bot, sentMessages } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[] }> = [];
+    const ctx = createContext(bot, "que_multiple_custom", dir, replies);
+
+    await handleQuestionAsked(multipleQuestionEvent("que_multiple_custom"), ctx);
+    const shortHash = createQuestionShortHash("que_multiple_custom");
+    const dispatcher = createQuestionDispatcher(ctx);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:c`, 10, 1, 1);
+    assert.match(sentMessages.at(-1)?.text ?? "", /Type your custom answer/);
+
+    await dispatcher.handleTextReply("Custom", 1, 1, 11);
+    assert.equal(replies.length, 0);
+    assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [["Custom"]]);
+    assert.match(sentMessages.at(-1)?.text ?? "", /Custom answer added/);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);
+    assert.deepEqual(replies, [{ requestID: "que_multiple_custom", answers: [["Custom"]] }]);
+  });
+
+  test("submits mixed multi-select and single-select questions in order", async () => {
+    const { bot, editedMessages } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[] }> = [];
+    const ctx = createContext(bot, "que_mixed", dir, replies);
+
+    await handleQuestionAsked(mixedQuestionEvent(), ctx);
+    const shortHash = createQuestionShortHash("que_mixed");
+    const dispatcher = createQuestionDispatcher(ctx);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:1`, 10, 1, 1);
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);
+    assert.equal(replies.length, 0);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Next\?/);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:1:0`, 10, 1, 1);
+    assert.deepEqual(replies, [{ requestID: "que_mixed", answers: [["A", "B"], ["C"]] }]);
   });
 });

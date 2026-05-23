@@ -69,7 +69,7 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       }
     });
 
-    bot.callbackQuery(/^q:([^:]+):(\d+):(\d+|c)$/, async (ctx) => {
+    bot.callbackQuery(/^q:([^:]+):(\d+):(\d+|c|d)$/, async (ctx) => {
       await ctx.answerCallbackQuery();
       const data = ctx.callbackQuery.data;
       const messageId = ctx.callbackQuery.message?.message_id;

@@ -5,7 +5,7 @@ import type { TelegramQuestionDispatcher } from "../bot.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
 
 const QUESTION_EXPIRY_MS = 5 * 60_000;
-const CALLBACK_RE = /^q:([^:]+):(\d+):(\d+|c)$/;
+const CALLBACK_RE = /^q:([^:]+):(\d+):(\d+|c|d)$/;
 
 function isQuestionOption(value: Record<string, unknown>): boolean {
   return typeof value.label === "string" && typeof value.description === "string";
@@ -28,7 +28,7 @@ export function isEventQuestionAsked(event: { type: string; properties?: Record<
   return props.questions.every((question) => typeof question === "object" && question !== null && isQuestionInfo(question as Record<string, unknown>));
 }
 
-function buildCallbackData(shortHash: string, questionIndex: number, optionIndex: number | "c"): string {
+function buildCallbackData(shortHash: string, questionIndex: number, optionIndex: number | "c" | "d"): string {
   const data = `q:${shortHash}:${questionIndex}:${optionIndex}`;
   if (Buffer.byteLength(data, "utf8") > 64) throw new Error("Telegram callback_data exceeds 64 bytes");
   return data;
@@ -38,6 +38,29 @@ function callbackDataForQuestion(shortHash: string, questionIndex: number, quest
   const data = question.options.map((_, optionIndex) => buildCallbackData(shortHash, questionIndex, optionIndex));
   if (question.custom !== false) data.push(buildCallbackData(shortHash, questionIndex, "c"));
   return data;
+}
+
+function useSimpleQuestionKeyboard(question: QuestionInfo): boolean {
+  return question.multiple !== true;
+}
+
+function selectedAnswers(pending: PendingQuestionState, questionIndex: number): QuestionAnswer {
+  return pending.answersInProgress[questionIndex] ?? [];
+}
+
+function questionInlineKeyboard(shortHash: string, questionIndex: number, question: QuestionInfo, selected: QuestionAnswer): Array<Array<{ text: string; callback_data: string }>> {
+  const multiple = question.multiple === true;
+  const inlineKeyboard = question.options.map((option, optionIndex) => ([{
+    text: multiple && selected.includes(option.label) ? `✅ ${option.label}` : option.label,
+    callback_data: buildCallbackData(shortHash, questionIndex, optionIndex),
+  }]));
+  if (question.custom !== false) {
+    inlineKeyboard.push([{ text: "✏️ Custom answer", callback_data: buildCallbackData(shortHash, questionIndex, "c") }]);
+  }
+  if (multiple) {
+    inlineKeyboard.push([{ text: "✅ Done", callback_data: buildCallbackData(shortHash, questionIndex, "d") }]);
+  }
+  return inlineKeyboard;
 }
 
 function questionPromptText(pending: PendingQuestionState, questionIndex: number): string {
@@ -58,13 +81,7 @@ function answerSummary(questions: QuestionInfo[], answers: QuestionAnswer[]): st
 async function editPromptForQuestion(ctx: EventHandlerContext, pending: PendingQuestionState, shortHash: string, questionIndex: number): Promise<void> {
   const messageId = pending.telegramMessageIds[0];
   const question = pending.questions[questionIndex];
-  const inlineKeyboard = question.options.map((option, optionIndex) => ([{
-    text: option.label,
-    callback_data: buildCallbackData(shortHash, questionIndex, optionIndex),
-  }]));
-  if (question.custom !== false) {
-    inlineKeyboard.push([{ text: "✏️ Custom answer", callback_data: buildCallbackData(shortHash, questionIndex, "c") }]);
-  }
+  const inlineKeyboard = questionInlineKeyboard(shortHash, questionIndex, question, selectedAnswers(pending, questionIndex));
   await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), { reply_markup: { inline_keyboard: inlineKeyboard } });
 }
 
@@ -119,14 +136,11 @@ export async function handleQuestionAsked(event: EventQuestionAsked, ctx: EventH
   };
 
   try {
-    const message = request.questions.length === 1
+    const message = request.questions.length === 1 && useSimpleQuestionKeyboard(firstQuestion)
       ? await ctx.bot.sendQuestionWithKeyboard(firstQuestion, callbackDataForQuestion(shortHash, 0, firstQuestion))
       : await ctx.bot.sendMessage(questionPromptText(pending, 0), {
         reply_markup: {
-          inline_keyboard: firstQuestion.options.map((option, optionIndex) => ([{
-            text: option.label,
-            callback_data: buildCallbackData(shortHash, 0, optionIndex),
-          }])).concat(firstQuestion.custom !== false ? [[{ text: "✏️ Custom answer", callback_data: buildCallbackData(shortHash, 0, "c") }]] : []),
+          inline_keyboard: questionInlineKeyboard(shortHash, 0, firstQuestion, []),
         },
       });
     pending.telegramMessageIds = [message.message_id];
@@ -158,17 +172,36 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       if (!question) return;
 
       if (selection === "c") {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "✏️ Reply to the next message with your custom answer.");
+        if (question.multiple === true) {
+          await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), { reply_markup: { inline_keyboard: [] } });
+        } else {
+          await ctx.bot.editMessageRemoveKeyboard(messageId, "✏️ Reply to the next message with your custom answer.");
+        }
         const prompt = await ctx.bot.replyWithForceReply("Type your custom answer", "Type your answer");
         pending.awaitingCustomFor = { shortHash, questionIndex, chatId, userId, promptMessageId: prompt.message_id };
         await ctx.pendingQuestions.savePending(shortHash, pending);
         return;
       }
 
+      if (selection === "d") {
+        if (question.multiple !== true) return;
+        pending.answersInProgress[questionIndex] = selectedAnswers(pending, questionIndex);
+        pending.awaitingCustomFor = undefined;
+        await completeIfReady(ctx, pending, shortHash);
+        return;
+      }
+
       const option = question.options[Number(selection)];
       if (!option) return;
       if (question.multiple === true) {
-        ctx.logger.info("multiple-choice question handled as single-select", { requestID: pending.requestID, questionIndex });
+        const current = selectedAnswers(pending, questionIndex);
+        pending.answersInProgress[questionIndex] = current.includes(option.label)
+          ? current.filter((answer) => answer !== option.label)
+          : [...current, option.label];
+        pending.awaitingCustomFor = undefined;
+        await ctx.pendingQuestions.savePending(shortHash, pending);
+        await editPromptForQuestion(ctx, pending, shortHash, questionIndex);
+        return;
       }
       pending.answersInProgress[questionIndex] = [option.label];
       pending.awaitingCustomFor = undefined;
@@ -181,6 +214,16 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
       if (match.data.expiresAt < Date.now()) {
         await expirePending(ctx, match.shortHash, match.data, match.data.telegramMessageIds[0]);
+        return;
+      }
+      const question = match.data.questions[awaiting.questionIndex];
+      if (question?.multiple === true) {
+        const current = selectedAnswers(match.data, awaiting.questionIndex);
+        match.data.answersInProgress[awaiting.questionIndex] = current.includes(text) ? current : [...current, text];
+        match.data.awaitingCustomFor = undefined;
+        await ctx.bot.sendMessage("✅ Custom answer added. Tap Done when finished.");
+        await ctx.pendingQuestions.savePending(match.shortHash, match.data);
+        await editPromptForQuestion(ctx, match.data, match.shortHash, awaiting.questionIndex);
         return;
       }
       match.data.answersInProgress[awaiting.questionIndex] = [text];

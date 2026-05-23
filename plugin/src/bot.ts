@@ -12,6 +12,10 @@ export interface TelegramQuestionDispatcher {
   handleTextReply(text: string, chatId: number, userId: number, replyToMessageId: number): Promise<void>;
 }
 
+export interface TelegramPermissionDispatcher {
+  handleCallbackQuery(data: string, messageId: number): Promise<void>;
+}
+
 export interface TelegramBotManager {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -24,6 +28,7 @@ export interface TelegramBotManager {
   deleteMessage(messageId: number): Promise<void>;
   getActiveChatId(): Promise<number | undefined>;
   setQuestionDispatcher(dispatcher: TelegramQuestionDispatcher): void;
+  setPermissionDispatcher(dispatcher: TelegramPermissionDispatcher): void;
 }
 
 export interface CreateBotOptions {
@@ -39,6 +44,7 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
   const bot = new Bot(config.botToken);
   let activeChatId: number | undefined = opts.initialChatId;
   let questionDispatcher: TelegramQuestionDispatcher | undefined;
+  let permissionDispatcher: TelegramPermissionDispatcher | undefined;
 
   if (polling) {
     bot.use(async (ctx, next) => {
@@ -77,6 +83,14 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       const userId = ctx.from?.id;
       if (!questionDispatcher || messageId === undefined || chatId === undefined || userId === undefined) return;
       await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
+    });
+
+    bot.callbackQuery(/^p:([^:]+):(o|a|r)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const data = ctx.callbackQuery.data;
+      const messageId = ctx.callbackQuery.message?.message_id;
+      if (!permissionDispatcher || messageId === undefined) return;
+      await permissionDispatcher.handleCallbackQuery(data, messageId);
     });
 
     bot.on("message:text", async (ctx) => {
@@ -166,6 +180,9 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
     },
     setQuestionDispatcher(dispatcher) {
       questionDispatcher = dispatcher;
+    },
+    setPermissionDispatcher(dispatcher) {
+      permissionDispatcher = dispatcher;
     },
   };
 }

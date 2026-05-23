@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import type { EventQuestionAsked } from "@opencode-ai/sdk/v2";
 import type { TelegramBotManager } from "../bot.js";
 import { createPendingQuestionStore, createQuestionShortHash } from "../lib/pending-questions.js";
+import { createPendingPermissionStore } from "../lib/pending-permissions.js";
+import { SessionTitleService } from "../services/session-title-service.js";
 import { createQuestionDispatcher, handleQuestionAsked } from "./question-asked.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
 
@@ -54,6 +56,7 @@ function createBot() {
       return 1;
     },
     setQuestionDispatcher() {},
+    setPermissionDispatcher() {},
   };
   return { bot, sentMessages, editedMessages };
 }
@@ -62,7 +65,7 @@ function createContext(bot: TelegramBotManager, requestID: string, dir: string, 
   return {
     client: {} as EventHandlerContext["client"],
     bot,
-    sessionTitleService: {} as EventHandlerContext["sessionTitleService"],
+    sessionTitleService: new SessionTitleService(),
     stateStore: {} as EventHandlerContext["stateStore"],
     config: { botToken: "token", allowedUserIds: [1] },
     logger: createLogger(),
@@ -71,9 +74,11 @@ function createContext(bot: TelegramBotManager, requestID: string, dir: string, 
     serverUrl: new URL("http://localhost:4096"),
     tokenHash: "tok",
     pendingQuestions: createPendingQuestionStore({ tokenHash: "tok", baseDir: join(dir, `pending-${requestID}`) }),
+    pendingPermissions: createPendingPermissionStore({ tokenHash: "tok", baseDir: join(dir, `permissions-${requestID}`) }),
     async replyToQuestion(answeredRequestID, answers) {
       replies.push({ requestID: answeredRequestID, answers });
     },
+    async replyToPermission() {},
   };
 }
 

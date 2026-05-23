@@ -8,12 +8,14 @@ import { createLogger } from "./lib/logger.js";
 import { acquireLock } from "./lib/lock.js";
 import { createStateStore } from "./lib/state-store.js";
 import { createPendingQuestionStore, type QuestionAnswer } from "./lib/pending-questions.js";
+import { createPendingPermissionStore, type PermissionReply } from "./lib/pending-permissions.js";
 import { loadPluginEnv } from "./lib/env-loader.js";
 import { loadConfig } from "./config.js";
 import { createTelegramBot } from "./bot.js";
 import { SessionTitleService } from "./services/session-title-service.js";
 import {
   handlePermissionUpdated,
+  handlePermissionAsked,
   handleQuestionReplied,
   handleQuestionAsked,
   handleSessionError,
@@ -22,6 +24,8 @@ import {
   handleSessionStatus,
   handleSessionUpdated,
   createQuestionDispatcher,
+  createPermissionDispatcher,
+  isEventPermissionAsked,
   isEventQuestionAsked,
   isEventQuestionReplied,
   isEventSessionError,
@@ -33,7 +37,7 @@ const pluginDir = dirname(fileURLToPath(import.meta.url));
 interface InternalOpencodeHttpClient {
   post(options: {
     url: string;
-    body: { answers: QuestionAnswer[] };
+    body: { answers: QuestionAnswer[] } | { reply: PermissionReply } | { response: PermissionReply };
     headers: { "Content-Type": string };
     throwOnError: true;
   }): Promise<{ data?: boolean }>;
@@ -56,6 +60,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const lockPath = join(tmpdir(), `opencoder-telegram-${tokenHash}.lock`);
     const claimsDir = join(tmpdir(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
+    const pendingPermissions = createPendingPermissionStore({ tokenHash });
     const lockResult = await acquireLock({ lockPath });
     const isLeader = lockResult.acquired;
 
@@ -72,6 +77,23 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
         url: `/question/${encodeURIComponent(requestID)}/reply`,
         headers: { "Content-Type": "application/json" },
         body: { answers },
+        throwOnError: true,
+      });
+    };
+    const replyToPermission = async (requestID: string, sessionID: string, reply: PermissionReply, endpoint: "request" | "session"): Promise<void> => {
+      if (endpoint === "request") {
+        await client._client.post({
+          url: `/permission/${encodeURIComponent(requestID)}/reply`,
+          headers: { "Content-Type": "application/json" },
+          body: { reply },
+          throwOnError: true,
+        });
+        return;
+      }
+      await client._client.post({
+        url: `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
+        headers: { "Content-Type": "application/json" },
+        body: { response: reply },
         throwOnError: true,
       });
     };
@@ -123,11 +145,14 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       serverUrl: input.serverUrl,
       tokenHash,
       pendingQuestions,
+      pendingPermissions,
       replyToQuestion,
+      replyToPermission,
     };
 
     if (isLeader) {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
+      bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
     }
 
     return {
@@ -146,6 +171,10 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
           default: {
+            if (isEventPermissionAsked(extEvent)) {
+              if (!isLeader) return;
+              return handlePermissionAsked(extEvent, ctx);
+            }
             if (isEventSessionError(extEvent)) {
               return handleSessionError(extEvent, ctx);
             }

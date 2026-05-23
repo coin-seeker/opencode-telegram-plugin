@@ -4,464 +4,10 @@
  */
 
 // src/telegram-remote.ts
-import { fileURLToPath } from "url";
-import { dirname as dirname4, join as join6 } from "path";
-import { tmpdir as tmpdir4 } from "os";
 import { createHash as createHash4 } from "crypto";
-
-// src/lib/logger.ts
-import { appendFile } from "fs/promises";
-import { tmpdir } from "os";
-var DEFAULT_BUFFER_LIMIT = 4096;
-var DEFAULT_FLUSH_INTERVAL_MS = 2e3;
-function safeJson(data) {
-  try {
-    return JSON.stringify(data);
-  } catch {
-    return '{"serialization":"failed"}';
-  }
-}
-function createLogger(opts = {}) {
-  const filePath = opts.filePath ?? `${tmpdir()}/opencoder-telegram.log`;
-  const namespace = opts.namespace ?? "default";
-  const bufferLimit = opts.bufferLimit ?? DEFAULT_BUFFER_LIMIT;
-  const flushIntervalMs = opts.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
-  let buffer = "";
-  let closed = false;
-  let flushing = Promise.resolve();
-  const timer = setInterval(() => {
-    void flushBuffer();
-  }, flushIntervalMs);
-  timer.unref();
-  async function flushBuffer() {
-    if (buffer.length === 0) return flushing;
-    const chunk = buffer;
-    buffer = "";
-    flushing = flushing.then(async () => {
-      try {
-        await appendFile(filePath, chunk, "utf8");
-      } catch {
-      }
-    });
-    return flushing;
-  }
-  function write(level, msg, data) {
-    if (closed) return;
-    const json = data === void 0 ? "" : ` ${safeJson(data)}`;
-    buffer += `[${(/* @__PURE__ */ new Date()).toISOString()}] [${level}] [${process.pid}] [${namespace}] ${msg}${json}
-`;
-    if (level === "error" || buffer.length >= bufferLimit) {
-      void flushBuffer();
-    }
-  }
-  return {
-    debug(msg, data) {
-      write("debug", msg, data);
-    },
-    info(msg, data) {
-      write("info", msg, data);
-    },
-    warn(msg, data) {
-      write("warn", msg, data);
-    },
-    error(msg, data) {
-      write("error", msg, data);
-    },
-    async flush() {
-      await flushBuffer();
-    },
-    async close() {
-      if (closed) return;
-      closed = true;
-      clearInterval(timer);
-      await flushBuffer();
-    }
-  };
-}
-
-// src/lib/lock.ts
-import { open, readFile, stat, unlink } from "fs/promises";
-import { hostname } from "os";
-var DEFAULT_TTL_MS = 5 * 60 * 1e3;
-function hasCode(err, code) {
-  return "code" in err && err.code === code;
-}
-function parseLockData(text) {
-  try {
-    const parsed = JSON.parse(text);
-    if (typeof parsed.pid === "number" && typeof parsed.hostname === "string" && typeof parsed.createdAt === "string") {
-      return { pid: parsed.pid, hostname: parsed.hostname, createdAt: parsed.createdAt };
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    if (err instanceof Error && hasCode(err, "ESRCH")) return false;
-    return true;
-  }
-}
-async function createLock(lockPath, pid) {
-  const file = await open(lockPath, "wx");
-  const acquiredAt = /* @__PURE__ */ new Date();
-  const data = { pid, hostname: hostname(), createdAt: acquiredAt.toISOString() };
-  try {
-    await file.writeFile(JSON.stringify(data), "utf8");
-  } finally {
-    await file.close();
-  }
-  let released = false;
-  return {
-    path: lockPath,
-    acquiredAt,
-    async release() {
-      if (released) return;
-      released = true;
-      try {
-        await unlink(lockPath);
-      } catch {
-      }
-    }
-  };
-}
-async function inspectExisting(lockPath, ttlMs) {
-  let ownerPid;
-  let dead = false;
-  try {
-    const text = await readFile(lockPath, "utf8");
-    const data = parseLockData(text);
-    if (data) {
-      ownerPid = data.pid;
-      dead = !isPidAlive(data.pid);
-    }
-  } catch {
-    return { stale: true, reason: "unreadable lock" };
-  }
-  try {
-    const fileStat = await stat(lockPath);
-    const expired = Date.now() - fileStat.mtimeMs > ttlMs;
-    if (dead) return { stale: true, ownerPid, reason: "dead owner" };
-    if (expired) return { stale: true, ownerPid, reason: "expired lock" };
-    return { stale: false, ownerPid, reason: "lock held" };
-  } catch {
-    return { stale: true, ownerPid, reason: "missing lock" };
-  }
-}
-async function acquireLock(opts) {
-  const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
-  const pid = opts.pid ?? process.pid;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      return { acquired: true, handle: await createLock(opts.lockPath, pid) };
-    } catch (err) {
-      if (!(err instanceof Error) || !hasCode(err, "EEXIST")) {
-        return { acquired: false, reason: err instanceof Error ? err.message : String(err) };
-      }
-      const existing = await inspectExisting(opts.lockPath, ttlMs);
-      if (!existing.stale || attempt === 1) {
-        return { acquired: false, reason: existing.reason, ownerPid: existing.ownerPid };
-      }
-      try {
-        await unlink(opts.lockPath);
-      } catch {
-        return { acquired: false, reason: "failed to remove stale lock", ownerPid: existing.ownerPid };
-      }
-    }
-  }
-  return { acquired: false, reason: "lock acquisition failed" };
-}
-
-// src/lib/state-store.ts
-import { mkdir, readFile as readFile2, rename, writeFile } from "fs/promises";
-import { homedir } from "os";
-import { dirname, join } from "path";
-function hasCode2(err, code) {
-  return "code" in err && err.code === code;
-}
-function parseState(text) {
-  const parsed = JSON.parse(text);
-  const state = {};
-  if (typeof parsed.chatId === "number") state.chatId = parsed.chatId;
-  if (typeof parsed.updatedAt === "string") state.updatedAt = parsed.updatedAt;
-  if (typeof parsed.discoveredBy === "number") state.discoveredBy = parsed.discoveredBy;
-  return state;
-}
-function createStateStore(opts = {}) {
-  const filePath = opts.filePath ?? join(homedir(), ".config/opencode/telegram-remote/state.json");
-  return {
-    async read() {
-      try {
-        return parseState(await readFile2(filePath, "utf8"));
-      } catch (err) {
-        if (err instanceof Error && hasCode2(err, "ENOENT")) return {};
-        throw err;
-      }
-    },
-    async write(patch) {
-      const existing = await this.read();
-      const next = { ...existing, ...patch, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-      await mkdir(dirname(filePath), { recursive: true });
-      const tmpPath = `${filePath}.tmp.${process.pid}`;
-      await writeFile(tmpPath, JSON.stringify(next, null, 2), "utf8");
-      try {
-        await rename(tmpPath, filePath);
-      } catch (err) {
-        if (!(err instanceof Error) || !hasCode2(err, "ENOENT")) throw err;
-        await writeFile(tmpPath, JSON.stringify(next, null, 2), "utf8");
-        await rename(tmpPath, filePath);
-      }
-      return next;
-    }
-  };
-}
-
-// src/lib/pending-questions.ts
-import { createHash } from "crypto";
-import { mkdir as mkdir2, readFile as readFile3, readdir, rename as rename2, unlink as unlink2, writeFile as writeFile2 } from "fs/promises";
-import { tmpdir as tmpdir2 } from "os";
-import { dirname as dirname2, join as join2 } from "path";
-function hasCode3(err, code) {
-  return "code" in err && err.code === code;
-}
-function pendingFilePath(dir, shortHash) {
-  return join2(dir, `${shortHash}.json`);
-}
-function parsePending(text) {
-  const parsed = JSON.parse(text);
-  if (typeof parsed.requestID !== "string") throw new Error("Invalid pending question: requestID");
-  if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending question: sessionID");
-  if (!Array.isArray(parsed.questions)) throw new Error("Invalid pending question: questions");
-  if (!Array.isArray(parsed.telegramMessageIds)) throw new Error("Invalid pending question: telegramMessageIds");
-  if (!Array.isArray(parsed.answersInProgress)) throw new Error("Invalid pending question: answersInProgress");
-  parsed.answersInProgress = parsed.answersInProgress.map((answer) => answer ?? null);
-  return parsed;
-}
-async function listPendingFiles(dir) {
-  try {
-    const entries = await readdir(dir, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
-  } catch (err) {
-    if (err instanceof Error && hasCode3(err, "ENOENT")) return [];
-    throw err;
-  }
-}
-function shortHashFromFileName(fileName) {
-  return fileName.slice(0, -".json".length);
-}
-function createPendingQuestionStore(opts) {
-  const dir = opts.baseDir ?? join2(tmpdir2(), `opencoder-telegram-pending-questions-${opts.tokenHash}`);
-  return {
-    dir,
-    async savePending(shortHash, data) {
-      const filePath = pendingFilePath(dir, shortHash);
-      await mkdir2(dirname2(filePath), { recursive: true });
-      const tmpPath = `${filePath}.tmp.${process.pid}`;
-      await writeFile2(tmpPath, JSON.stringify(data, null, 2), "utf8");
-      await rename2(tmpPath, filePath);
-    },
-    async loadPending(shortHash) {
-      try {
-        return parsePending(await readFile3(pendingFilePath(dir, shortHash), "utf8"));
-      } catch (err) {
-        if (err instanceof Error && hasCode3(err, "ENOENT")) return void 0;
-        throw err;
-      }
-    },
-    async deletePending(shortHash) {
-      try {
-        await unlink2(pendingFilePath(dir, shortHash));
-      } catch (err) {
-        if (!(err instanceof Error) || !hasCode3(err, "ENOENT")) throw err;
-      }
-    },
-    async sweepExpired() {
-      const expired = [];
-      for (const fileName of await listPendingFiles(dir)) {
-        const shortHash = shortHashFromFileName(fileName);
-        const data = await this.loadPending(shortHash);
-        if (data && data.expiresAt < Date.now()) {
-          expired.push(data);
-          await this.deletePending(shortHash);
-        }
-      }
-      return expired;
-    },
-    async findByRequestID(requestID) {
-      for (const fileName of await listPendingFiles(dir)) {
-        const shortHash = shortHashFromFileName(fileName);
-        const data = await this.loadPending(shortHash);
-        if (data?.requestID === requestID) return { shortHash, data };
-      }
-      return void 0;
-    },
-    async findAwaitingCustom(chatId, userId) {
-      for (const fileName of await listPendingFiles(dir)) {
-        const shortHash = shortHashFromFileName(fileName);
-        const data = await this.loadPending(shortHash);
-        const awaiting = data?.awaitingCustomFor;
-        if (awaiting && awaiting.chatId === chatId && awaiting.userId === userId) return { shortHash, data };
-      }
-      return void 0;
-    }
-  };
-}
-function createQuestionShortHash(requestID) {
-  return createHash("sha256").update(requestID).digest("base64url").slice(0, 10);
-}
-
-// src/lib/pending-permissions.ts
-import { createHash as createHash2 } from "crypto";
-import { mkdir as mkdir3, readFile as readFile4, readdir as readdir2, rename as rename3, unlink as unlink3, writeFile as writeFile3 } from "fs/promises";
-import { tmpdir as tmpdir3 } from "os";
-import { dirname as dirname3, join as join3 } from "path";
-function hasCode4(err, code) {
-  return "code" in err && err.code === code;
-}
-function pendingFilePath2(dir, shortHash) {
-  return join3(dir, `${shortHash}.json`);
-}
-function parsePending2(text) {
-  const parsed = JSON.parse(text);
-  if (typeof parsed.requestID !== "string") throw new Error("Invalid pending permission: requestID");
-  if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending permission: sessionID");
-  if (typeof parsed.title !== "string") throw new Error("Invalid pending permission: title");
-  if (typeof parsed.permission !== "string") throw new Error("Invalid pending permission: permission");
-  if (!Array.isArray(parsed.patterns)) throw new Error("Invalid pending permission: patterns");
-  if (!Array.isArray(parsed.always)) throw new Error("Invalid pending permission: always");
-  if (parsed.endpoint !== "request" && parsed.endpoint !== "session") throw new Error("Invalid pending permission: endpoint");
-  return parsed;
-}
-async function listPendingFiles2(dir) {
-  try {
-    const entries = await readdir2(dir, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
-  } catch (err) {
-    if (err instanceof Error && hasCode4(err, "ENOENT")) return [];
-    throw err;
-  }
-}
-function shortHashFromFileName2(fileName) {
-  return fileName.slice(0, -".json".length);
-}
-function createPendingPermissionStore(opts) {
-  const dir = opts.baseDir ?? join3(tmpdir3(), `opencoder-telegram-pending-permissions-${opts.tokenHash}`);
-  return {
-    dir,
-    async savePending(shortHash, data) {
-      const filePath = pendingFilePath2(dir, shortHash);
-      await mkdir3(dirname3(filePath), { recursive: true });
-      const tmpPath = `${filePath}.tmp.${process.pid}`;
-      await writeFile3(tmpPath, JSON.stringify(data, null, 2), "utf8");
-      await rename3(tmpPath, filePath);
-    },
-    async loadPending(shortHash) {
-      try {
-        return parsePending2(await readFile4(pendingFilePath2(dir, shortHash), "utf8"));
-      } catch (err) {
-        if (err instanceof Error && hasCode4(err, "ENOENT")) return void 0;
-        throw err;
-      }
-    },
-    async deletePending(shortHash) {
-      try {
-        await unlink3(pendingFilePath2(dir, shortHash));
-      } catch (err) {
-        if (!(err instanceof Error) || !hasCode4(err, "ENOENT")) throw err;
-      }
-    },
-    async findByRequestID(requestID) {
-      for (const fileName of await listPendingFiles2(dir)) {
-        const shortHash = shortHashFromFileName2(fileName);
-        const data = await this.loadPending(shortHash);
-        if (data?.requestID === requestID) return { shortHash, data };
-      }
-      return void 0;
-    },
-    async sweepExpired() {
-      const expired = [];
-      for (const fileName of await listPendingFiles2(dir)) {
-        const shortHash = shortHashFromFileName2(fileName);
-        const data = await this.loadPending(shortHash);
-        if (data && data.expiresAt < Date.now()) {
-          expired.push(data);
-          await this.deletePending(shortHash);
-        }
-      }
-      return expired;
-    }
-  };
-}
-function createPermissionShortHash(requestID) {
-  return createHash2("sha256").update(requestID).digest("base64url").slice(0, 10);
-}
-
-// src/lib/env-loader.ts
-import { existsSync } from "fs";
-import { homedir as homedir2 } from "os";
-import { join as join4 } from "path";
-import dotenv from "dotenv";
-function loadPluginEnv(opts) {
-  const paths = [
-    join4(opts.pluginDir, "../../.env"),
-    join4(opts.pluginDir, "..", ".env"),
-    join4(opts.pluginDir, ".env"),
-    join4(opts.homeDir ?? homedir2(), ".config/opencode/telegram-remote/.env")
-  ];
-  const loadedFrom = [];
-  const values = {};
-  for (const envPath of paths) {
-    if (!existsSync(envPath)) continue;
-    const result = dotenv.config({ path: envPath, override: false });
-    if (result.parsed) {
-      loadedFrom.push(envPath);
-      for (const [key, value] of Object.entries(result.parsed)) {
-        if (!(key in values)) values[key] = value;
-      }
-    }
-  }
-  return { loadedFrom, values };
-}
-
-// src/config.ts
-function parseAllowedUserIds(value) {
-  if (!value || value.trim() === "") {
-    return [];
-  }
-  return value.split(",").map((id2) => id2.trim()).filter((id2) => id2 !== "").map((id2) => Number.parseInt(id2, 10)).filter((id2) => !Number.isNaN(id2));
-}
-function loadConfig(opts) {
-  const { logger, env } = opts;
-  const botToken = env.TELEGRAM_BOT_TOKEN;
-  const allowedUserIdsStr = env.TELEGRAM_ALLOWED_USER_IDS;
-  const chatIdStr = env.TELEGRAM_CHAT_ID;
-  if (!botToken || botToken.trim() === "") {
-    logger.error("missing TELEGRAM_BOT_TOKEN");
-    throw new Error("Missing required environment variable: TELEGRAM_BOT_TOKEN");
-  }
-  const allowedUserIds = parseAllowedUserIds(allowedUserIdsStr);
-  if (allowedUserIds.length === 0) {
-    logger.error("missing or invalid TELEGRAM_ALLOWED_USER_IDS");
-    throw new Error("Missing or invalid TELEGRAM_ALLOWED_USER_IDS");
-  }
-  let chatId;
-  if (chatIdStr && chatIdStr.trim() !== "") {
-    const parsed = Number.parseInt(chatIdStr.trim(), 10);
-    if (!Number.isNaN(parsed)) {
-      chatId = parsed;
-    }
-  }
-  logger.info("config loaded", { allowedUserCount: allowedUserIds.length, hasChatId: chatId !== void 0 });
-  return {
-    botToken,
-    allowedUserIds,
-    chatId
-  };
-}
+import { tmpdir as tmpdir4 } from "os";
+import { dirname as dirname4, join as join6 } from "path";
+import { fileURLToPath } from "url";
 
 // src/bot.ts
 import { Bot, GrammyError } from "grammy";
@@ -499,6 +45,7 @@ function createTelegramBot(opts) {
   let activeChatId = opts.initialChatId;
   let questionDispatcher;
   let permissionDispatcher;
+  let startWorkDispatcher;
   if (polling) {
     bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
@@ -550,6 +97,13 @@ This chat is now active for OpenCode notifications.`
       const messageId = ctx.callbackQuery.message?.message_id;
       if (!permissionDispatcher || messageId === void 0) return;
       await permissionDispatcher.handleCallbackQuery(data, messageId);
+    });
+    bot.callbackQuery(/^sw:(.+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const data = ctx.callbackQuery.data;
+      const messageId = ctx.callbackQuery.message?.message_id;
+      if (!startWorkDispatcher || messageId === void 0) return;
+      await startWorkDispatcher.handleCallbackQuery(data, messageId);
     });
     bot.on("message:text", async (ctx) => {
       const replyToMessageId = ctx.message.reply_to_message?.message_id;
@@ -644,103 +198,73 @@ This chat is now active for OpenCode notifications.`
     },
     setPermissionDispatcher(dispatcher) {
       permissionDispatcher = dispatcher;
+    },
+    setStartWorkDispatcher(dispatcher) {
+      startWorkDispatcher = dispatcher;
     }
   };
 }
 
-// src/services/session-title-service.ts
-var SessionTitleService = class {
-  sessions = /* @__PURE__ */ new Map();
-  setSessionInfo(info) {
-    const existing = this.sessions.get(info.id);
-    this.sessions.set(info.id, {
-      title: info.title || null,
-      parentID: info.parentID ?? null,
-      status: existing?.status,
-      idleNotificationPending: existing?.idleNotificationPending ?? false
-    });
+// src/config.ts
+function parseAllowedUserIds(value) {
+  if (!value || value.trim() === "") {
+    return [];
   }
-  setSessionTitle(sessionId, title) {
-    const existing = this.sessions.get(sessionId);
-    this.sessions.set(sessionId, {
-      title,
-      parentID: existing?.parentID ?? null,
-      status: existing?.status,
-      idleNotificationPending: existing?.idleNotificationPending ?? false
-    });
+  return value.split(",").map((id2) => id2.trim()).filter((id2) => id2 !== "").map((id2) => Number.parseInt(id2, 10)).filter((id2) => !Number.isNaN(id2));
+}
+function loadConfig(opts) {
+  const { logger, env } = opts;
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  const allowedUserIdsStr = env.TELEGRAM_ALLOWED_USER_IDS;
+  const chatIdStr = env.TELEGRAM_CHAT_ID;
+  if (!botToken || botToken.trim() === "") {
+    logger.error("missing TELEGRAM_BOT_TOKEN");
+    throw new Error("Missing required environment variable: TELEGRAM_BOT_TOKEN");
   }
-  setSessionStatus(sessionId, status) {
-    const existing = this.sessions.get(sessionId);
-    this.sessions.set(sessionId, {
-      title: existing?.title ?? null,
-      parentID: existing?.parentID ?? null,
-      status,
-      idleNotificationPending: status === "idle" ? existing?.idleNotificationPending ?? false : false
-    });
+  const allowedUserIds = parseAllowedUserIds(allowedUserIdsStr);
+  if (allowedUserIds.length === 0) {
+    logger.error("missing or invalid TELEGRAM_ALLOWED_USER_IDS");
+    throw new Error("Missing or invalid TELEGRAM_ALLOWED_USER_IDS");
   }
-  getSessionTitle(sessionId) {
-    return this.sessions.get(sessionId)?.title ?? null;
-  }
-  getParentID(sessionId) {
-    return this.sessions.get(sessionId)?.parentID;
-  }
-  getSessionStatus(sessionId) {
-    return this.sessions.get(sessionId)?.status;
-  }
-  hasUnfinishedDescendants(parentID) {
-    for (const [sessionID, session] of this.sessions.entries()) {
-      if (session.parentID !== parentID) continue;
-      if (session.status !== "idle") return true;
-      if (this.hasUnfinishedDescendants(sessionID)) return true;
+  let chatId;
+  if (chatIdStr && chatIdStr.trim() !== "") {
+    const parsed = Number.parseInt(chatIdStr.trim(), 10);
+    if (!Number.isNaN(parsed)) {
+      chatId = parsed;
     }
-    return false;
   }
-  deferIdleNotification(sessionId) {
-    const existing = this.sessions.get(sessionId);
-    this.sessions.set(sessionId, {
-      title: existing?.title ?? null,
-      parentID: existing?.parentID ?? null,
-      status: existing?.status ?? "idle",
-      idleNotificationPending: true
-    });
-  }
-  hasDeferredIdleNotification(sessionId) {
-    return this.sessions.get(sessionId)?.idleNotificationPending ?? false;
-  }
-  clearDeferredIdleNotification(sessionId) {
-    const existing = this.sessions.get(sessionId);
-    if (!existing) return;
-    this.sessions.set(sessionId, {
-      ...existing,
-      idleNotificationPending: false
-    });
-  }
-};
+  logger.info("config loaded", { allowedUserCount: allowedUserIds.length, hasChatId: chatId !== void 0 });
+  return {
+    botToken,
+    allowedUserIds,
+    chatId
+  };
+}
 
 // src/lib/claim.ts
-import { mkdir as mkdir4, open as open2, readdir as readdir3, stat as stat2, unlink as unlink4 } from "fs/promises";
-import { join as join5 } from "path";
-import { createHash as createHash3 } from "crypto";
-var DEFAULT_TTL_MS2 = 6e4;
+import { mkdir, open, readdir, stat, unlink } from "fs/promises";
+import { join } from "path";
+import { createHash } from "crypto";
+var DEFAULT_TTL_MS = 6e4;
 var sweptDirs = /* @__PURE__ */ new Set();
-function hasCode5(err, code) {
+function hasCode(err, code) {
   return "code" in err && err.code === code;
 }
 function claimPath(claimsDir, key) {
-  const hash = createHash3("sha256").update(key).digest("hex").slice(0, 16);
-  return join5(claimsDir, `${hash}.claim`);
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 16);
+  return join(claimsDir, `${hash}.claim`);
 }
 async function sweep(claimsDir, ttlMs) {
   if (sweptDirs.has(claimsDir)) return;
   sweptDirs.add(claimsDir);
   try {
-    const entries = await readdir3(claimsDir, { withFileTypes: true });
+    const entries = await readdir(claimsDir, { withFileTypes: true });
     await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith(".claim")).map(async (entry) => {
-      const filePath = join5(claimsDir, entry.name);
+      const filePath = join(claimsDir, entry.name);
       try {
-        const fileStat = await stat2(filePath);
+        const fileStat = await stat(filePath);
         if (Date.now() - fileStat.mtimeMs > ttlMs * 2) {
-          await unlink4(filePath);
+          await unlink(filePath);
         }
       } catch {
       }
@@ -749,7 +273,7 @@ async function sweep(claimsDir, ttlMs) {
   }
 }
 async function createClaim(filePath) {
-  const file = await open2(filePath, "wx");
+  const file = await open(filePath, "wx");
   try {
     await file.writeFile((/* @__PURE__ */ new Date()).toISOString(), "utf8");
   } finally {
@@ -758,21 +282,21 @@ async function createClaim(filePath) {
   return true;
 }
 async function claimOnce(opts) {
-  const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS2;
-  await mkdir4(opts.claimsDir, { recursive: true });
+  const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
+  await mkdir(opts.claimsDir, { recursive: true });
   await sweep(opts.claimsDir, ttlMs);
   const filePath = claimPath(opts.claimsDir, opts.key);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       return await createClaim(filePath);
     } catch (err) {
-      if (!(err instanceof Error) || !hasCode5(err, "EEXIST")) throw err;
+      if (!(err instanceof Error) || !hasCode(err, "EEXIST")) throw err;
       try {
-        const fileStat = await stat2(filePath);
+        const fileStat = await stat(filePath);
         if (Date.now() - fileStat.mtimeMs <= ttlMs || attempt === 1) return false;
-        await unlink4(filePath);
+        await unlink(filePath);
       } catch (statErr) {
-        if (statErr instanceof Error && hasCode5(statErr, "ENOENT")) continue;
+        if (statErr instanceof Error && hasCode(statErr, "ENOENT")) continue;
         return false;
       }
     }
@@ -780,155 +304,90 @@ async function claimOnce(opts) {
   return false;
 }
 
-// src/lib/abort-tracker.ts
-var ABORT_TTL_MS = 5e3;
-var sessionAborts = /* @__PURE__ */ new Map();
-var lastGlobalAbortAt = 0;
-function noteAbort(sessionID) {
-  const now = Date.now();
-  if (sessionID) {
-    sessionAborts.set(sessionID, now);
-    return;
-  }
-  lastGlobalAbortAt = now;
+// src/lib/pending-permissions.ts
+import { createHash as createHash2 } from "crypto";
+import { mkdir as mkdir2, readFile, readdir as readdir2, rename, unlink as unlink2, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { dirname, join as join2 } from "path";
+function hasCode2(err, code) {
+  return "code" in err && err.code === code;
 }
-function shouldSuppressIdle(sessionID) {
-  const now = Date.now();
-  const sessionAbortAt = sessionAborts.get(sessionID) ?? 0;
-  const abortAt = Math.max(sessionAbortAt, lastGlobalAbortAt);
-  if (abortAt === 0) return false;
-  if (now - abortAt <= ABORT_TTL_MS) {
-    sessionAborts.delete(sessionID);
-    if (abortAt === lastGlobalAbortAt) lastGlobalAbortAt = 0;
-    return true;
-  }
-  sessionAborts.delete(sessionID);
-  if (now - lastGlobalAbortAt > ABORT_TTL_MS) lastGlobalAbortAt = 0;
-  return false;
+function pendingFilePath(dir, shortHash) {
+  return join2(dir, `${shortHash}.json`);
 }
-
-// src/events/session-idle.ts
-var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function parsePending(text) {
+  const parsed = JSON.parse(text);
+  if (typeof parsed.requestID !== "string") throw new Error("Invalid pending permission: requestID");
+  if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending permission: sessionID");
+  if (typeof parsed.title !== "string") throw new Error("Invalid pending permission: title");
+  if (typeof parsed.permission !== "string") throw new Error("Invalid pending permission: permission");
+  if (!Array.isArray(parsed.patterns)) throw new Error("Invalid pending permission: patterns");
+  if (!Array.isArray(parsed.always)) throw new Error("Invalid pending permission: always");
+  if (parsed.endpoint !== "request" && parsed.endpoint !== "session") throw new Error("Invalid pending permission: endpoint");
+  return parsed;
 }
-async function resolveParentID(sessionId, ctx) {
-  const cachedParentID = ctx.sessionTitleService.getParentID(sessionId);
-  if (cachedParentID !== void 0) return cachedParentID;
+async function listPendingFiles(dir) {
   try {
-    const result = await ctx.client.session.get({ path: { id: sessionId } });
-    if (result.data) {
-      ctx.sessionTitleService.setSessionInfo(result.data);
-      return ctx.sessionTitleService.getParentID(sessionId);
+    const entries = await readdir2(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+  } catch (err) {
+    if (err instanceof Error && hasCode2(err, "ENOENT")) return [];
+    throw err;
+  }
+}
+function shortHashFromFileName(fileName) {
+  return fileName.slice(0, -".json".length);
+}
+function createPendingPermissionStore(opts) {
+  const dir = opts.baseDir ?? join2(tmpdir(), `opencoder-telegram-pending-permissions-${opts.tokenHash}`);
+  return {
+    dir,
+    async savePending(shortHash, data) {
+      const filePath = pendingFilePath(dir, shortHash);
+      await mkdir2(dirname(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp.${process.pid}`;
+      await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf8");
+      await rename(tmpPath, filePath);
+    },
+    async loadPending(shortHash) {
+      try {
+        return parsePending(await readFile(pendingFilePath(dir, shortHash), "utf8"));
+      } catch (err) {
+        if (err instanceof Error && hasCode2(err, "ENOENT")) return void 0;
+        throw err;
+      }
+    },
+    async deletePending(shortHash) {
+      try {
+        await unlink2(pendingFilePath(dir, shortHash));
+      } catch (err) {
+        if (!(err instanceof Error) || !hasCode2(err, "ENOENT")) throw err;
+      }
+    },
+    async findByRequestID(requestID) {
+      for (const fileName of await listPendingFiles(dir)) {
+        const shortHash = shortHashFromFileName(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data?.requestID === requestID) return { shortHash, data };
+      }
+      return void 0;
+    },
+    async sweepExpired() {
+      const expired = [];
+      for (const fileName of await listPendingFiles(dir)) {
+        const shortHash = shortHashFromFileName(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data && data.expiresAt < Date.now()) {
+          expired.push(data);
+          await this.deletePending(shortHash);
+        }
+      }
+      return expired;
     }
-    ctx.logger.warn("session parentID cache miss fetch returned no data", { sessionId });
-    return void 0;
-  } catch (err) {
-    ctx.logger.warn("session parentID cache miss fetch failed", { sessionId, error: String(err) });
-    return void 0;
-  }
+  };
 }
-async function hydrateDescendants(sessionId, ctx, seen = /* @__PURE__ */ new Set()) {
-  if (seen.has(sessionId)) return;
-  seen.add(sessionId);
-  try {
-    const result = await ctx.client.session.children({ path: { id: sessionId } });
-    for (const child of result.data ?? []) {
-      ctx.sessionTitleService.setSessionInfo(child);
-      await hydrateDescendants(child.id, ctx, seen);
-    }
-  } catch (err) {
-    ctx.logger.warn("session children fetch failed", { sessionId, error: String(err) });
-  }
-}
-async function sendIdleNotification(sessionId, ctx) {
-  if (shouldSuppressIdle(sessionId)) {
-    ctx.logger.info("idle suppressed - session was aborted", { sessionId });
-    return;
-  }
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `session.idle:${sessionId}`, ttlMs: 5e3 });
-  if (!claimed) return;
-  const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
-  try {
-    await ctx.bot.sendMessage(message);
-    ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
-    ctx.logger.info("idle notification sent", { sessionId, title });
-  } catch (err) {
-    ctx.logger.error("failed to send idle notification", { error: String(err) });
-  }
-}
-async function flushDeferredParentIfReady(parentID, ctx) {
-  if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
-  if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
-  if (ctx.sessionTitleService.getSessionStatus(parentID) !== "idle") {
-    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
-    ctx.logger.info("clearing deferred parent idle notification - parent resumed", { sessionId: parentID });
-    return;
-  }
-  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
-  await sendIdleNotification(parentID, ctx);
-}
-async function deferParentIdleIfDescendantsRunning(sessionId, ctx) {
-  await hydrateDescendants(sessionId, ctx);
-  if (!ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) return false;
-  ctx.sessionTitleService.deferIdleNotification(sessionId);
-  ctx.logger.info("deferring parent idle notification - child sessions still running", { sessionId });
-  return true;
-}
-async function handleSessionIdle(event, ctx) {
-  const sessionId = event.properties.sessionID;
-  ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
-  const parentID = await resolveParentID(sessionId, ctx);
-  if (typeof parentID === "string") {
-    ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
-    await flushDeferredParentIfReady(parentID, ctx);
-    return;
-  }
-  if (parentID === void 0) {
-    ctx.logger.warn("session parentID unknown; sending idle notification", { sessionId });
-  }
-  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx)) {
-    return;
-  }
-  await sleep(ctx.idleRecheckDelayMs ?? ROOT_IDLE_RECHECK_DELAY_MS);
-  if (ctx.sessionTitleService.getSessionStatus(sessionId) !== "idle") {
-    ctx.logger.info("idle notification skipped - session resumed during recheck delay", { sessionId });
-    return;
-  }
-  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx)) {
-    return;
-  }
-  await sendIdleNotification(sessionId, ctx);
-}
-async function handleSessionStatus(event, ctx) {
-  const sessionId = event.properties.sessionID;
-  const statusType = event.properties.status.type;
-  ctx.sessionTitleService.setSessionStatus(sessionId, statusType);
-  if (statusType === "idle") {
-    await handleSessionIdle(event, ctx);
-  }
-}
-
-// src/events/session-error.ts
-function isEventSessionError(event) {
-  return event.type === "session.error";
-}
-async function handleSessionError(event, ctx) {
-  if (event.properties.error?.name !== "MessageAbortedError") return;
-  noteAbort(event.properties.sessionID);
-  ctx.logger.info("session abort recorded", { sessionId: event.properties.sessionID ?? "global" });
-}
-
-// src/events/session-created.ts
-async function handleSessionCreated(event, ctx) {
-  ctx.sessionTitleService.setSessionInfo(event.properties.info);
-}
-
-// src/events/session-updated.ts
-async function handleSessionUpdated(event, ctx) {
-  const info = event.properties.info;
-  ctx.sessionTitleService.setSessionInfo(info);
+function createPermissionShortHash(requestID) {
+  return createHash2("sha256").update(requestID).digest("base64url").slice(0, 10);
 }
 
 // src/events/permission-updated.ts
@@ -1079,6 +538,100 @@ ${pending.permission}: ${pending.title}`);
       }
     }
   };
+}
+
+// src/lib/pending-questions.ts
+import { createHash as createHash3 } from "crypto";
+import { mkdir as mkdir3, readFile as readFile2, readdir as readdir3, rename as rename2, unlink as unlink3, writeFile as writeFile2 } from "fs/promises";
+import { tmpdir as tmpdir2 } from "os";
+import { dirname as dirname2, join as join3 } from "path";
+function hasCode3(err, code) {
+  return "code" in err && err.code === code;
+}
+function pendingFilePath2(dir, shortHash) {
+  return join3(dir, `${shortHash}.json`);
+}
+function parsePending2(text) {
+  const parsed = JSON.parse(text);
+  if (typeof parsed.requestID !== "string") throw new Error("Invalid pending question: requestID");
+  if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending question: sessionID");
+  if (!Array.isArray(parsed.questions)) throw new Error("Invalid pending question: questions");
+  if (!Array.isArray(parsed.telegramMessageIds)) throw new Error("Invalid pending question: telegramMessageIds");
+  if (!Array.isArray(parsed.answersInProgress)) throw new Error("Invalid pending question: answersInProgress");
+  parsed.answersInProgress = parsed.answersInProgress.map((answer) => answer ?? null);
+  return parsed;
+}
+async function listPendingFiles2(dir) {
+  try {
+    const entries = await readdir3(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+  } catch (err) {
+    if (err instanceof Error && hasCode3(err, "ENOENT")) return [];
+    throw err;
+  }
+}
+function shortHashFromFileName2(fileName) {
+  return fileName.slice(0, -".json".length);
+}
+function createPendingQuestionStore(opts) {
+  const dir = opts.baseDir ?? join3(tmpdir2(), `opencoder-telegram-pending-questions-${opts.tokenHash}`);
+  return {
+    dir,
+    async savePending(shortHash, data) {
+      const filePath = pendingFilePath2(dir, shortHash);
+      await mkdir3(dirname2(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp.${process.pid}`;
+      await writeFile2(tmpPath, JSON.stringify(data, null, 2), "utf8");
+      await rename2(tmpPath, filePath);
+    },
+    async loadPending(shortHash) {
+      try {
+        return parsePending2(await readFile2(pendingFilePath2(dir, shortHash), "utf8"));
+      } catch (err) {
+        if (err instanceof Error && hasCode3(err, "ENOENT")) return void 0;
+        throw err;
+      }
+    },
+    async deletePending(shortHash) {
+      try {
+        await unlink3(pendingFilePath2(dir, shortHash));
+      } catch (err) {
+        if (!(err instanceof Error) || !hasCode3(err, "ENOENT")) throw err;
+      }
+    },
+    async sweepExpired() {
+      const expired = [];
+      for (const fileName of await listPendingFiles2(dir)) {
+        const shortHash = shortHashFromFileName2(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data && data.expiresAt < Date.now()) {
+          expired.push(data);
+          await this.deletePending(shortHash);
+        }
+      }
+      return expired;
+    },
+    async findByRequestID(requestID) {
+      for (const fileName of await listPendingFiles2(dir)) {
+        const shortHash = shortHashFromFileName2(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data?.requestID === requestID) return { shortHash, data };
+      }
+      return void 0;
+    },
+    async findAwaitingCustom(chatId, userId) {
+      for (const fileName of await listPendingFiles2(dir)) {
+        const shortHash = shortHashFromFileName2(fileName);
+        const data = await this.loadPending(shortHash);
+        const awaiting = data?.awaitingCustomFor;
+        if (awaiting && awaiting.chatId === chatId && awaiting.userId === userId) return { shortHash, data };
+      }
+      return void 0;
+    }
+  };
+}
+function createQuestionShortHash(requestID) {
+  return createHash3("sha256").update(requestID).digest("base64url").slice(0, 10);
 }
 
 // src/events/question-asked.ts
@@ -1358,6 +911,520 @@ async function handleQuestionReplied(event, ctx) {
   }
 }
 
+// src/events/session-created.ts
+async function handleSessionCreated(event, ctx) {
+  ctx.sessionTitleService.setSessionInfo(event.properties.info);
+}
+
+// src/lib/abort-tracker.ts
+var ABORT_TTL_MS = 5e3;
+var sessionAborts = /* @__PURE__ */ new Map();
+var lastGlobalAbortAt = 0;
+function noteAbort(sessionID) {
+  const now = Date.now();
+  if (sessionID) {
+    sessionAborts.set(sessionID, now);
+    return;
+  }
+  lastGlobalAbortAt = now;
+}
+function shouldSuppressIdle(sessionID) {
+  const now = Date.now();
+  const sessionAbortAt = sessionAborts.get(sessionID) ?? 0;
+  const abortAt = Math.max(sessionAbortAt, lastGlobalAbortAt);
+  if (abortAt === 0) return false;
+  if (now - abortAt <= ABORT_TTL_MS) {
+    sessionAborts.delete(sessionID);
+    if (abortAt === lastGlobalAbortAt) lastGlobalAbortAt = 0;
+    return true;
+  }
+  sessionAborts.delete(sessionID);
+  if (now - lastGlobalAbortAt > ABORT_TTL_MS) lastGlobalAbortAt = 0;
+  return false;
+}
+
+// src/events/session-error.ts
+function isEventSessionError(event) {
+  return event.type === "session.error";
+}
+async function handleSessionError(event, ctx) {
+  if (event.properties.error?.name !== "MessageAbortedError") return;
+  noteAbort(event.properties.sessionID);
+  ctx.logger.info("session abort recorded", { sessionId: event.properties.sessionID ?? "global" });
+}
+
+// src/events/start-work.ts
+var CALLBACK_RE3 = /^sw:(.+)$/;
+var START_WORK_COMMAND = "start-work";
+function startWorkCallbackData(sessionID) {
+  const data = `sw:${encodeURIComponent(sessionID)}`;
+  return Buffer.byteLength(data, "utf8") <= 64 ? data : void 0;
+}
+function startWorkKeyboard(sessionID) {
+  const callbackData = startWorkCallbackData(sessionID);
+  if (!callbackData) return void 0;
+  return [[{ text: "\u25B6\uFE0F Run /start-work", callback_data: callbackData }]];
+}
+function createStartWorkDispatcher(ctx) {
+  return {
+    async handleCallbackQuery(data, messageId) {
+      const match = CALLBACK_RE3.exec(data);
+      if (!match) return;
+      const sessionID = decodeURIComponent(match[1]);
+      try {
+        await ctx.runSessionCommand(sessionID, START_WORK_COMMAND);
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          `\u25B6\uFE0F Sent /start-work to opencode.
+
+Session: ${sessionID}`
+        );
+        ctx.logger.info("start-work command sent", { sessionID });
+      } catch (err) {
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          `\u26A0\uFE0F Failed to send /start-work to opencode.
+
+Session: ${sessionID}`
+        );
+        ctx.logger.error("failed to send start-work command", { sessionID, error: String(err) });
+      }
+    }
+  };
+}
+
+// src/events/session-idle.ts
+var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function resolveParentID(sessionId, ctx) {
+  const cachedParentID = ctx.sessionTitleService.getParentID(sessionId);
+  if (cachedParentID !== void 0) return cachedParentID;
+  try {
+    const result = await ctx.client.session.get({ path: { id: sessionId } });
+    if (result.data) {
+      ctx.sessionTitleService.setSessionInfo(result.data);
+      return ctx.sessionTitleService.getParentID(sessionId);
+    }
+    ctx.logger.warn("session parentID cache miss fetch returned no data", { sessionId });
+    return void 0;
+  } catch (err) {
+    ctx.logger.warn("session parentID cache miss fetch failed", { sessionId, error: String(err) });
+    return void 0;
+  }
+}
+async function hydrateDescendants(sessionId, ctx, seen = /* @__PURE__ */ new Set()) {
+  if (seen.has(sessionId)) return;
+  seen.add(sessionId);
+  try {
+    const result = await ctx.client.session.children({ path: { id: sessionId } });
+    for (const child of result.data ?? []) {
+      ctx.sessionTitleService.setSessionInfo(child);
+      await hydrateDescendants(child.id, ctx, seen);
+    }
+  } catch (err) {
+    ctx.logger.warn("session children fetch failed", { sessionId, error: String(err) });
+  }
+}
+async function sendIdleNotification(sessionId, ctx) {
+  if (shouldSuppressIdle(sessionId)) {
+    ctx.logger.info("idle suppressed - session was aborted", { sessionId });
+    return;
+  }
+  const claimed = await claimOnce({
+    claimsDir: ctx.claimsDir,
+    key: `session.idle:${sessionId}`,
+    ttlMs: 5e3
+  });
+  if (!claimed) return;
+  const title = ctx.sessionTitleService.getSessionTitle(sessionId);
+  const message = title ? `Agent has finished: ${title}
+
+If this was a plan builder session, tap below to run /start-work.` : "Agent has finished.\n\nIf this was a plan builder session, tap below to run /start-work.";
+  const keyboard = startWorkKeyboard(sessionId);
+  try {
+    await ctx.bot.sendMessage(
+      message,
+      keyboard ? { reply_markup: { inline_keyboard: keyboard } } : void 0
+    );
+    ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
+    ctx.logger.info("idle notification sent", { sessionId, title });
+  } catch (err) {
+    ctx.logger.error("failed to send idle notification", { error: String(err) });
+  }
+}
+async function flushDeferredParentIfReady(parentID, ctx) {
+  if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
+  if (ctx.sessionTitleService.getSessionStatus(parentID) !== "idle") {
+    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
+    ctx.logger.info("clearing deferred parent idle notification - parent resumed", {
+      sessionId: parentID
+    });
+    return;
+  }
+  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
+  await sendIdleNotification(parentID, ctx);
+}
+async function deferParentIdleIfDescendantsRunning(sessionId, ctx) {
+  await hydrateDescendants(sessionId, ctx);
+  if (!ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) return false;
+  ctx.sessionTitleService.deferIdleNotification(sessionId);
+  ctx.logger.info("deferring parent idle notification - child sessions still running", {
+    sessionId
+  });
+  return true;
+}
+async function handleSessionIdle(event, ctx) {
+  const sessionId = event.properties.sessionID;
+  ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
+  const parentID = await resolveParentID(sessionId, ctx);
+  if (typeof parentID === "string") {
+    ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
+    await flushDeferredParentIfReady(parentID, ctx);
+    return;
+  }
+  if (parentID === void 0) {
+    ctx.logger.warn("session parentID unknown; sending idle notification", { sessionId });
+  }
+  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx)) {
+    return;
+  }
+  await sleep(ctx.idleRecheckDelayMs ?? ROOT_IDLE_RECHECK_DELAY_MS);
+  if (ctx.sessionTitleService.getSessionStatus(sessionId) !== "idle") {
+    ctx.logger.info("idle notification skipped - session resumed during recheck delay", {
+      sessionId
+    });
+    return;
+  }
+  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx)) {
+    return;
+  }
+  await sendIdleNotification(sessionId, ctx);
+}
+async function handleSessionStatus(event, ctx) {
+  const sessionId = event.properties.sessionID;
+  const statusType = event.properties.status.type;
+  ctx.sessionTitleService.setSessionStatus(sessionId, statusType);
+  if (statusType === "idle") {
+    await handleSessionIdle(event, ctx);
+  }
+}
+
+// src/events/session-updated.ts
+async function handleSessionUpdated(event, ctx) {
+  const info = event.properties.info;
+  ctx.sessionTitleService.setSessionInfo(info);
+}
+
+// src/lib/env-loader.ts
+import { existsSync } from "fs";
+import { homedir } from "os";
+import { join as join4 } from "path";
+import dotenv from "dotenv";
+function loadPluginEnv(opts) {
+  const paths = [
+    join4(opts.pluginDir, "../../.env"),
+    join4(opts.pluginDir, "..", ".env"),
+    join4(opts.pluginDir, ".env"),
+    join4(opts.homeDir ?? homedir(), ".config/opencode/telegram-remote/.env")
+  ];
+  const loadedFrom = [];
+  const values = {};
+  for (const envPath of paths) {
+    if (!existsSync(envPath)) continue;
+    const result = dotenv.config({ path: envPath, override: false });
+    if (result.parsed) {
+      loadedFrom.push(envPath);
+      for (const [key, value] of Object.entries(result.parsed)) {
+        if (!(key in values)) values[key] = value;
+      }
+    }
+  }
+  return { loadedFrom, values };
+}
+
+// src/lib/lock.ts
+import { open as open2, readFile as readFile3, stat as stat2, unlink as unlink4 } from "fs/promises";
+import { hostname } from "os";
+var DEFAULT_TTL_MS2 = 5 * 60 * 1e3;
+function hasCode4(err, code) {
+  return "code" in err && err.code === code;
+}
+function parseLockData(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed.pid === "number" && typeof parsed.hostname === "string" && typeof parsed.createdAt === "string") {
+      return { pid: parsed.pid, hostname: parsed.hostname, createdAt: parsed.createdAt };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err instanceof Error && hasCode4(err, "ESRCH")) return false;
+    return true;
+  }
+}
+async function createLock(lockPath, pid) {
+  const file = await open2(lockPath, "wx");
+  const acquiredAt = /* @__PURE__ */ new Date();
+  const data = { pid, hostname: hostname(), createdAt: acquiredAt.toISOString() };
+  try {
+    await file.writeFile(JSON.stringify(data), "utf8");
+  } finally {
+    await file.close();
+  }
+  let released = false;
+  return {
+    path: lockPath,
+    acquiredAt,
+    async release() {
+      if (released) return;
+      released = true;
+      try {
+        await unlink4(lockPath);
+      } catch {
+      }
+    }
+  };
+}
+async function inspectExisting(lockPath, ttlMs) {
+  let ownerPid;
+  let dead = false;
+  try {
+    const text = await readFile3(lockPath, "utf8");
+    const data = parseLockData(text);
+    if (data) {
+      ownerPid = data.pid;
+      dead = !isPidAlive(data.pid);
+    }
+  } catch {
+    return { stale: true, reason: "unreadable lock" };
+  }
+  try {
+    const fileStat = await stat2(lockPath);
+    const expired = Date.now() - fileStat.mtimeMs > ttlMs;
+    if (dead) return { stale: true, ownerPid, reason: "dead owner" };
+    if (expired) return { stale: true, ownerPid, reason: "expired lock" };
+    return { stale: false, ownerPid, reason: "lock held" };
+  } catch {
+    return { stale: true, ownerPid, reason: "missing lock" };
+  }
+}
+async function acquireLock(opts) {
+  const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS2;
+  const pid = opts.pid ?? process.pid;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return { acquired: true, handle: await createLock(opts.lockPath, pid) };
+    } catch (err) {
+      if (!(err instanceof Error) || !hasCode4(err, "EEXIST")) {
+        return { acquired: false, reason: err instanceof Error ? err.message : String(err) };
+      }
+      const existing = await inspectExisting(opts.lockPath, ttlMs);
+      if (!existing.stale || attempt === 1) {
+        return { acquired: false, reason: existing.reason, ownerPid: existing.ownerPid };
+      }
+      try {
+        await unlink4(opts.lockPath);
+      } catch {
+        return { acquired: false, reason: "failed to remove stale lock", ownerPid: existing.ownerPid };
+      }
+    }
+  }
+  return { acquired: false, reason: "lock acquisition failed" };
+}
+
+// src/lib/logger.ts
+import { appendFile } from "fs/promises";
+import { tmpdir as tmpdir3 } from "os";
+var DEFAULT_BUFFER_LIMIT = 4096;
+var DEFAULT_FLUSH_INTERVAL_MS = 2e3;
+function safeJson(data) {
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return '{"serialization":"failed"}';
+  }
+}
+function createLogger(opts = {}) {
+  const filePath = opts.filePath ?? `${tmpdir3()}/opencoder-telegram.log`;
+  const namespace = opts.namespace ?? "default";
+  const bufferLimit = opts.bufferLimit ?? DEFAULT_BUFFER_LIMIT;
+  const flushIntervalMs = opts.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
+  let buffer = "";
+  let closed = false;
+  let flushing = Promise.resolve();
+  const timer = setInterval(() => {
+    void flushBuffer();
+  }, flushIntervalMs);
+  timer.unref();
+  async function flushBuffer() {
+    if (buffer.length === 0) return flushing;
+    const chunk = buffer;
+    buffer = "";
+    flushing = flushing.then(async () => {
+      try {
+        await appendFile(filePath, chunk, "utf8");
+      } catch {
+      }
+    });
+    return flushing;
+  }
+  function write(level, msg, data) {
+    if (closed) return;
+    const json = data === void 0 ? "" : ` ${safeJson(data)}`;
+    buffer += `[${(/* @__PURE__ */ new Date()).toISOString()}] [${level}] [${process.pid}] [${namespace}] ${msg}${json}
+`;
+    if (level === "error" || buffer.length >= bufferLimit) {
+      void flushBuffer();
+    }
+  }
+  return {
+    debug(msg, data) {
+      write("debug", msg, data);
+    },
+    info(msg, data) {
+      write("info", msg, data);
+    },
+    warn(msg, data) {
+      write("warn", msg, data);
+    },
+    error(msg, data) {
+      write("error", msg, data);
+    },
+    async flush() {
+      await flushBuffer();
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      await flushBuffer();
+    }
+  };
+}
+
+// src/lib/state-store.ts
+import { mkdir as mkdir4, readFile as readFile4, rename as rename3, writeFile as writeFile3 } from "fs/promises";
+import { homedir as homedir2 } from "os";
+import { dirname as dirname3, join as join5 } from "path";
+function hasCode5(err, code) {
+  return "code" in err && err.code === code;
+}
+function parseState(text) {
+  const parsed = JSON.parse(text);
+  const state = {};
+  if (typeof parsed.chatId === "number") state.chatId = parsed.chatId;
+  if (typeof parsed.updatedAt === "string") state.updatedAt = parsed.updatedAt;
+  if (typeof parsed.discoveredBy === "number") state.discoveredBy = parsed.discoveredBy;
+  return state;
+}
+function createStateStore(opts = {}) {
+  const filePath = opts.filePath ?? join5(homedir2(), ".config/opencode/telegram-remote/state.json");
+  return {
+    async read() {
+      try {
+        return parseState(await readFile4(filePath, "utf8"));
+      } catch (err) {
+        if (err instanceof Error && hasCode5(err, "ENOENT")) return {};
+        throw err;
+      }
+    },
+    async write(patch) {
+      const existing = await this.read();
+      const next = { ...existing, ...patch, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+      await mkdir4(dirname3(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp.${process.pid}`;
+      await writeFile3(tmpPath, JSON.stringify(next, null, 2), "utf8");
+      try {
+        await rename3(tmpPath, filePath);
+      } catch (err) {
+        if (!(err instanceof Error) || !hasCode5(err, "ENOENT")) throw err;
+        await writeFile3(tmpPath, JSON.stringify(next, null, 2), "utf8");
+        await rename3(tmpPath, filePath);
+      }
+      return next;
+    }
+  };
+}
+
+// src/services/session-title-service.ts
+var SessionTitleService = class {
+  sessions = /* @__PURE__ */ new Map();
+  setSessionInfo(info) {
+    const existing = this.sessions.get(info.id);
+    this.sessions.set(info.id, {
+      title: info.title || null,
+      parentID: info.parentID ?? null,
+      status: existing?.status,
+      idleNotificationPending: existing?.idleNotificationPending ?? false
+    });
+  }
+  setSessionTitle(sessionId, title) {
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title,
+      parentID: existing?.parentID ?? null,
+      status: existing?.status,
+      idleNotificationPending: existing?.idleNotificationPending ?? false
+    });
+  }
+  setSessionStatus(sessionId, status) {
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title: existing?.title ?? null,
+      parentID: existing?.parentID ?? null,
+      status,
+      idleNotificationPending: status === "idle" ? existing?.idleNotificationPending ?? false : false
+    });
+  }
+  getSessionTitle(sessionId) {
+    return this.sessions.get(sessionId)?.title ?? null;
+  }
+  getParentID(sessionId) {
+    return this.sessions.get(sessionId)?.parentID;
+  }
+  getSessionStatus(sessionId) {
+    return this.sessions.get(sessionId)?.status;
+  }
+  hasUnfinishedDescendants(parentID) {
+    for (const [sessionID, session] of this.sessions.entries()) {
+      if (session.parentID !== parentID) continue;
+      if (session.status !== "idle") return true;
+      if (this.hasUnfinishedDescendants(sessionID)) return true;
+    }
+    return false;
+  }
+  deferIdleNotification(sessionId) {
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title: existing?.title ?? null,
+      parentID: existing?.parentID ?? null,
+      status: existing?.status ?? "idle",
+      idleNotificationPending: true
+    });
+  }
+  hasDeferredIdleNotification(sessionId) {
+    return this.sessions.get(sessionId)?.idleNotificationPending ?? false;
+  }
+  clearDeferredIdleNotification(sessionId) {
+    const existing = this.sessions.get(sessionId);
+    if (!existing) return;
+    this.sessions.set(sessionId, {
+      ...existing,
+      idleNotificationPending: false
+    });
+  }
+};
+
 // src/telegram-remote.ts
 var pluginDir = dirname4(fileURLToPath(import.meta.url));
 var TelegramRemote = async (input) => {
@@ -1379,7 +1446,11 @@ var TelegramRemote = async (input) => {
       `lock ${isLeader ? "acquired - leader mode" : "held by other - pass-through mode"}`,
       isLeader ? {} : { reason: lockResult.reason }
     );
-    logger.info("server url", { url: input.serverUrl.toString(), href: input.serverUrl.href, origin: input.serverUrl.origin });
+    logger.info("server url", {
+      url: input.serverUrl.toString(),
+      href: input.serverUrl.href,
+      origin: input.serverUrl.origin
+    });
     const sessionTitleService = new SessionTitleService();
     const client = input.client;
     const replyToQuestion = async (requestID, answers) => {
@@ -1404,6 +1475,13 @@ var TelegramRemote = async (input) => {
         url: `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
         headers: { "Content-Type": "application/json" },
         body: { response: reply },
+        throwOnError: true
+      });
+    };
+    const runSessionCommand = async (sessionID, command) => {
+      await input.client.session.command({
+        path: { id: sessionID },
+        body: { command, arguments: "" },
         throwOnError: true
       });
     };
@@ -1452,11 +1530,13 @@ var TelegramRemote = async (input) => {
       pendingQuestions,
       pendingPermissions,
       replyToQuestion,
-      replyToPermission
+      replyToPermission,
+      runSessionCommand
     };
     if (isLeader) {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
+      bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
     }
     return {
       event: async ({ event }) => {
@@ -1494,7 +1574,9 @@ var TelegramRemote = async (input) => {
       }
     };
   } catch (err) {
-    logger.error("plugin initialization failed", { error: err instanceof Error ? err.message : String(err) });
+    logger.error("plugin initialization failed", {
+      error: err instanceof Error ? err.message : String(err)
+    });
     await logger.close();
     return { event: async () => {
     } };

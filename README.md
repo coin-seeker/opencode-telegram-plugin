@@ -12,6 +12,7 @@ Control and monitor OpenCode from Telegram. Install it as the npm package `@coin
 - **Multi-select question replies**: Toggle multiple choices in Telegram and submit them with **Done**.
 - **Custom answers**: Use Telegram free-text replies for prompts that allow custom input.
 - **Permission alerts**: Receive a ping when OpenCode is waiting on a permission decision.
+- **Permission replies from Telegram**: Approve once, always allow, or reject OpenCode permission prompts from Telegram.
 - **Multi-session safe**: A file-lock leader/pass-through model prevents duplicate Telegram polling across concurrent OpenCode windows.
 - **Clean terminals**: Plugin logs go to a temp file instead of stdout, so OpenCode terminal output stays clean.
 - **Access control**: Only whitelisted Telegram user IDs can interact with the bot.
@@ -155,6 +156,7 @@ The plugin reacts to these OpenCode events:
 | Child/subagent idle | A subagent finishes | Suppressed; no Telegram completion message |
 | Parent idle while background subagent is running | Parent appears idle before background work completes | Defers the parent completion message |
 | `permission.updated` | OpenCode is waiting on a permission decision | Sends `Permission needed: [Session Title]` |
+| `permission.asked` | OpenCode is waiting on a permission decision | Sends approve/reject inline buttons |
 | `question.asked` | OpenCode asks an interactive question | Sends Telegram inline buttons and optional custom answer flow |
 | `question.replied` | The question was answered elsewhere | Cleans up pending Telegram question state |
 
@@ -168,6 +170,14 @@ When OpenCode asks a question, the bot sends the question with inline buttons.
 - For multi-select prompts, tap options to toggle them, then tap **Done** to submit.
 - Tap **Custom answer** when available, then reply to the Telegram force-reply prompt with free text.
 - Multi-question prompts are handled one question at a time.
+
+### Answering Permission Prompts from Telegram
+
+When OpenCode asks for permission, such as reading a protected `.env` file, the bot sends inline buttons:
+
+- **Allow once** approves only this request.
+- **Always allow** approves this request and asks OpenCode to remember the matching rule when supported.
+- **Reject** denies the request.
 
 ### Interrupts and Background Subagents
 

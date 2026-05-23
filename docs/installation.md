@@ -80,6 +80,8 @@ If `plugin` already exists, keep its existing entries and add this one. The key 
 
 For OpenCode questions, tap an inline option to answer. For multi-select questions, tap options to toggle them and then tap **Done**.
 
+For OpenCode permission prompts, use the Telegram inline buttons to **Allow once**, **Always allow**, or **Reject**.
+
 ## Local Clone Development
 
 Use this only when developing the plugin or testing unreleased source changes.

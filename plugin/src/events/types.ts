@@ -24,6 +24,7 @@ export interface EventHandlerContext {
   tokenHash: string;
   pendingQuestions: PendingQuestionStore;
   pendingPermissions: PendingPermissionStore;
+  idleRecheckDelayMs?: number;
   replyToQuestion(requestID: string, answers: QuestionAnswer[]): Promise<void>;
   replyToPermission(requestID: string, sessionID: string, reply: PermissionReply, endpoint: "request" | "session"): Promise<void>;
 }

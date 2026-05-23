@@ -1,16 +1,25 @@
-import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
 import type { EventPermissionUpdated } from "@opencode-ai/sdk";
 import type { EventPermissionAsked } from "@opencode-ai/sdk/v2";
 import type { TelegramBotManager } from "../bot.js";
+import {
+  createPendingPermissionStore,
+  createPermissionShortHash,
+  type PermissionReply,
+} from "../lib/pending-permissions.js";
 import { createPendingQuestionStore, type QuestionAnswer } from "../lib/pending-questions.js";
-import { createPendingPermissionStore, createPermissionShortHash, type PermissionReply } from "../lib/pending-permissions.js";
 import { SessionTitleService } from "../services/session-title-service.js";
-import { createPermissionDispatcher, handlePermissionAsked, handlePermissionUpdated, isEventPermissionAsked } from "./permission-updated.js";
+import {
+  createPermissionDispatcher,
+  handlePermissionAsked,
+  handlePermissionUpdated,
+  isEventPermissionAsked,
+} from "./permission-updated.js";
 import type { EventHandlerContext } from "./types.js";
 
 function createLogger() {
@@ -58,11 +67,21 @@ function createBot() {
     },
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
+    setStartWorkDispatcher() {},
   };
   return { bot, sentMessages, editedMessages };
 }
 
-function createContext(bot: TelegramBotManager, dir: string, replies: Array<{ requestID: string; sessionID: string; reply: PermissionReply; endpoint: "request" | "session" }>): EventHandlerContext {
+function createContext(
+  bot: TelegramBotManager,
+  dir: string,
+  replies: Array<{
+    requestID: string;
+    sessionID: string;
+    reply: PermissionReply;
+    endpoint: "request" | "session";
+  }>,
+): EventHandlerContext {
   return {
     client: {} as EventHandlerContext["client"],
     bot,
@@ -74,12 +93,19 @@ function createContext(bot: TelegramBotManager, dir: string, replies: Array<{ re
     pluginDir: dir,
     serverUrl: new URL("http://localhost:4096"),
     tokenHash: "tok",
-    pendingQuestions: createPendingQuestionStore({ tokenHash: "tok", baseDir: join(dir, "questions") }),
-    pendingPermissions: createPendingPermissionStore({ tokenHash: "tok", baseDir: join(dir, "permissions") }),
+    pendingQuestions: createPendingQuestionStore({
+      tokenHash: "tok",
+      baseDir: join(dir, "questions"),
+    }),
+    pendingPermissions: createPendingPermissionStore({
+      tokenHash: "tok",
+      baseDir: join(dir, "permissions"),
+    }),
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
     async replyToPermission(requestID, sessionID, reply, endpoint) {
       replies.push({ requestID, sessionID, reply, endpoint });
     },
+    async runSessionCommand() {},
   };
 }
 
@@ -127,12 +153,20 @@ describe("permission updated flow", () => {
 
   test("detects v2 permission asked events", () => {
     assert.equal(isEventPermissionAsked(permissionAskedEvent()), true);
-    assert.equal(isEventPermissionAsked({ type: "permission.asked", properties: { id: "x" } }), false);
+    assert.equal(
+      isEventPermissionAsked({ type: "permission.asked", properties: { id: "x" } }),
+      false,
+    );
   });
 
   test("sends v2 permission prompt and replies once from Telegram", async () => {
     const { bot, sentMessages, editedMessages } = createBot();
-    const replies: Array<{ requestID: string; sessionID: string; reply: PermissionReply; endpoint: "request" | "session" }> = [];
+    const replies: Array<{
+      requestID: string;
+      sessionID: string;
+      reply: PermissionReply;
+      endpoint: "request" | "session";
+    }> = [];
     const ctx = createContext(bot, join(dir, "asked"), replies);
 
     await handlePermissionAsked(permissionAskedEvent(), ctx);
@@ -145,14 +179,21 @@ describe("permission updated flow", () => {
     const dispatcher = createPermissionDispatcher(ctx);
     await dispatcher.handleCallbackQuery(`p:${shortHash}:o`, 10);
 
-    assert.deepEqual(replies, [{ requestID: "per_asked", sessionID: "ses_test", reply: "once", endpoint: "request" }]);
+    assert.deepEqual(replies, [
+      { requestID: "per_asked", sessionID: "ses_test", reply: "once", endpoint: "request" },
+    ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Allowed once/);
   });
 
   test("sends legacy permission prompt and rejects from Telegram", async () => {
     const { bot, editedMessages } = createBot();
-    const replies: Array<{ requestID: string; sessionID: string; reply: PermissionReply; endpoint: "request" | "session" }> = [];
+    const replies: Array<{
+      requestID: string;
+      sessionID: string;
+      reply: PermissionReply;
+      endpoint: "request" | "session";
+    }> = [];
     const ctx = createContext(bot, join(dir, "updated"), replies);
 
     await handlePermissionUpdated(permissionUpdatedEvent(), ctx);
@@ -160,14 +201,21 @@ describe("permission updated flow", () => {
     const dispatcher = createPermissionDispatcher(ctx);
     await dispatcher.handleCallbackQuery(`p:${shortHash}:r`, 10);
 
-    assert.deepEqual(replies, [{ requestID: "per_updated", sessionID: "ses_test", reply: "reject", endpoint: "session" }]);
+    assert.deepEqual(replies, [
+      { requestID: "per_updated", sessionID: "ses_test", reply: "reject", endpoint: "session" },
+    ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Rejected/);
   });
 
   test("expires pending permission callbacks", async () => {
     const { bot, editedMessages } = createBot();
-    const replies: Array<{ requestID: string; sessionID: string; reply: PermissionReply; endpoint: "request" | "session" }> = [];
+    const replies: Array<{
+      requestID: string;
+      sessionID: string;
+      reply: PermissionReply;
+      endpoint: "request" | "session";
+    }> = [];
     const ctx = createContext(bot, join(dir, "expired"), replies);
     const shortHash = createPermissionShortHash("per_expired");
 

@@ -57,6 +57,7 @@ function createBot() {
     },
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
+    setStartWorkDispatcher() {},
   };
   return { bot, sentMessages, editedMessages };
 }
@@ -90,6 +91,7 @@ function createContext(
       replies.push({ requestID: answeredRequestID, answers });
     },
     async replyToPermission() {},
+    async runSessionCommand() {},
   };
 }
 

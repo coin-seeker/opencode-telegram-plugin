@@ -78,6 +78,8 @@ If `plugin` already exists, keep its existing entries and add this one. The key 
 4. The bot should reply with a connection confirmation.
 5. Run an OpenCode task and confirm Telegram notifications arrive.
 
+For OpenCode questions, tap an inline option to answer. For multi-select questions, tap options to toggle them and then tap **Done**.
+
 ## Local Clone Development
 
 Use this only when developing the plugin or testing unreleased source changes.

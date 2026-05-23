@@ -9,6 +9,7 @@ Control and monitor OpenCode from Telegram. Install it as the npm package `@coin
 - **Task completion notifications**: Receive Telegram messages when the root OpenCode session is truly finished.
 - **Subagent-aware completion**: Child/subagent idle events are suppressed, and parent completion is deferred until background subagents finish.
 - **Question replies from Telegram**: Answer OpenCode `question` prompts from inline Telegram buttons.
+- **Multi-select question replies**: Toggle multiple choices in Telegram and submit them with **Done**.
 - **Custom answers**: Use Telegram free-text replies for prompts that allow custom input.
 - **Permission alerts**: Receive a ping when OpenCode is waiting on a permission decision.
 - **Multi-session safe**: A file-lock leader/pass-through model prevents duplicate Telegram polling across concurrent OpenCode windows.
@@ -164,6 +165,7 @@ The plugin also consumes `session.created` and `session.updated` internally to c
 When OpenCode asks a question, the bot sends the question with inline buttons.
 
 - Tap an option to answer with that option label.
+- For multi-select prompts, tap options to toggle them, then tap **Done** to submit.
 - Tap **Custom answer** when available, then reply to the Telegram force-reply prompt with free text.
 - Multi-question prompts are handled one question at a time.
 

@@ -52,6 +52,7 @@ Keep this file private. Never commit or share your Telegram bot token.
 - Root session completion notifications.
 - Background subagent-aware completion: child session messages are suppressed and parent completion waits until children finish.
 - OpenCode question prompts via Telegram inline buttons.
+- Multi-select question prompts with toggle buttons and **Done** submission.
 - Custom free-text answers from Telegram.
 - Permission alerts.
 - Multi-session-safe Telegram polling through a file-lock leader model.

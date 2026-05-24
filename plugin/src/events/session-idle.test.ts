@@ -74,12 +74,13 @@ function createContext(
   dir: string,
   service: SessionTitleService,
   childrenBySession: Record<string, Session[]> = {},
+  sessionsById: Record<string, Session> = {},
 ): EventHandlerContext {
   return {
     client: {
       session: {
-        async get() {
-          return { data: undefined };
+        async get(options: { path: { id: string } }) {
+          return { data: sessionsById[options.path.id] };
         },
         async children(options: { path: { id: string } }) {
           return { data: childrenBySession[options.path.id] ?? [] };
@@ -136,11 +137,30 @@ describe("session idle notifications", () => {
 
     await handleSessionIdle(idleEvent("momus"), ctx);
 
-    assert.deepEqual(sentMessages, [
-      "Agent has finished: Plan builder",
-    ]);
+    assert.deepEqual(sentMessages, []);
     assert.equal(sentOptions[0], undefined);
+    assert.equal(service.hasDeferredIdleNotification("parent"), true);
+
+    service.setSessionStatus("parent", "busy");
+    await handleSessionIdle(idleEvent("parent"), ctx);
+
+    assert.deepEqual(sentMessages, ["Agent has finished: Plan builder"]);
     assert.equal(service.hasDeferredIdleNotification("parent"), false);
+  });
+
+  test("suppresses first-seen child idle by fetching parentID before status cache writes", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent-fetch", "Parent"));
+    const { bot, sentMessages } = createBot();
+    const child = createSession("child-fetch", "Child", "parent-fetch");
+    const ctx = createContext(bot, join(dir, "first-seen-child"), service, {}, {
+      "child-fetch": child,
+    });
+
+    await handleSessionIdle(idleEvent("child-fetch"), ctx);
+
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.getParentID("child-fetch"), "parent-fetch");
   });
 
   test("hydrates active checker children before sending root idle notification", async () => {

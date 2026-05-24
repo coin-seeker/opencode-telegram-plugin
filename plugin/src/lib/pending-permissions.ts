@@ -8,6 +8,7 @@ export type PermissionReply = "once" | "always" | "reject";
 export interface PendingPermissionState {
   requestID: string;
   sessionID: string;
+  serverUrl?: string;
   title: string;
   permission: string;
   patterns: string[];

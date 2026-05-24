@@ -79,15 +79,19 @@ async function flushDeferredParentIfReady(
 ): Promise<void> {
   if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
   if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
-  if (ctx.sessionTitleService.getSessionStatus(parentID) !== "idle") {
-    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
-    ctx.logger.info("clearing deferred parent idle notification - parent resumed", {
+  const parentStatus = ctx.sessionTitleService.getSessionStatus(parentID);
+  if (parentStatus === "idle") {
+    ctx.logger.info("keeping deferred parent idle notification - waiting for parent to resume", {
       sessionId: parentID,
     });
     return;
   }
-  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
-  await sendIdleNotification(parentID, ctx);
+  if (parentStatus !== undefined) {
+    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
+    ctx.logger.info("clearing deferred parent idle notification - parent resumed", {
+      sessionId: parentID,
+    });
+  }
 }
 
 async function deferParentIdleIfDescendantsRunning(
@@ -108,8 +112,8 @@ export async function handleSessionIdle(
   ctx: EventHandlerContext,
 ): Promise<void> {
   const sessionId = event.properties.sessionID;
-  ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
   const parentID = await resolveParentID(sessionId, ctx);
+  ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
   if (typeof parentID === "string") {
     ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
     await flushDeferredParentIfReady(parentID, ctx);

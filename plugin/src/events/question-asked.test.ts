@@ -65,7 +65,7 @@ function createContext(
   bot: TelegramBotManager,
   requestID: string,
   dir: string,
-  replies: Array<{ requestID: string; answers: QuestionAnswer[] }>,
+  replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }>,
 ): EventHandlerContext {
   return {
     client: {} as EventHandlerContext["client"],
@@ -86,8 +86,8 @@ function createContext(
       tokenHash: "tok",
       baseDir: join(dir, `permissions-${requestID}`),
     }),
-    async replyToQuestion(answeredRequestID, answers) {
-      replies.push({ requestID: answeredRequestID, answers });
+    async replyToQuestion(answeredRequestID, answers, serverUrl) {
+      replies.push({ requestID: answeredRequestID, answers, serverUrl });
     },
     async replyToPermission() {},
   };
@@ -166,7 +166,7 @@ describe("question asked flow", () => {
 
   test("waits for all multi-question answers before replying", async () => {
     const { bot, editedMessages } = createBot();
-    const replies: Array<{ requestID: string; answers: QuestionAnswer[] }> = [];
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
     const ctx = createContext(bot, "que_test", dir, replies);
 
     await handleQuestionAsked(questionEvent(), ctx);
@@ -184,14 +184,29 @@ describe("question asked flow", () => {
     assert.doesNotMatch(editedMessages.at(-1)?.text ?? "", /First\?/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:1:0`, 10, 1, 1);
-    assert.deepEqual(replies, [{ requestID: "que_test", answers: [["A"], ["B"]] }]);
+    assert.deepEqual(replies, [
+      { requestID: "que_test", answers: [["A"], ["B"]], serverUrl: "http://localhost:4096/" },
+    ]);
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
   });
 
+  test("stores source server URL for cross-process question replies", async () => {
+    const { bot } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_source", dir, replies);
+    ctx.serverUrl = new URL("http://localhost:5099/");
+
+    await handleQuestionAsked(questionEvent("que_source"), ctx);
+
+    const shortHash = createQuestionShortHash("que_source");
+    const pending = await ctx.pendingQuestions.loadPending(shortHash);
+    assert.equal(pending?.serverUrl, "http://localhost:5099/");
+  });
+
   test("toggles multiple selections and waits for Done before replying", async () => {
     const { bot, sentMessages, editedMessages } = createBot();
-    const replies: Array<{ requestID: string; answers: QuestionAnswer[] }> = [];
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
     const ctx = createContext(bot, "que_multiple", dir, replies);
 
     await handleQuestionAsked(multipleQuestionEvent(), ctx);
@@ -227,14 +242,16 @@ describe("question asked flow", () => {
     ]);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);
-    assert.deepEqual(replies, [{ requestID: "que_multiple", answers: [["B"]] }]);
+    assert.deepEqual(replies, [
+      { requestID: "que_multiple", answers: [["B"]], serverUrl: "http://localhost:4096/" },
+    ]);
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
   });
 
   test("adds custom multiple answers without replying until Done", async () => {
     const { bot, sentMessages } = createBot();
-    const replies: Array<{ requestID: string; answers: QuestionAnswer[] }> = [];
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
     const ctx = createContext(bot, "que_multiple_custom", dir, replies);
 
     await handleQuestionAsked(multipleQuestionEvent("que_multiple_custom"), ctx);
@@ -252,12 +269,14 @@ describe("question asked flow", () => {
     assert.match(sentMessages.at(-1)?.text ?? "", /Custom answer added/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);
-    assert.deepEqual(replies, [{ requestID: "que_multiple_custom", answers: [["Custom"]] }]);
+    assert.deepEqual(replies, [
+      { requestID: "que_multiple_custom", answers: [["Custom"]], serverUrl: "http://localhost:4096/" },
+    ]);
   });
 
   test("submits mixed multi-select and single-select questions in order", async () => {
     const { bot, editedMessages } = createBot();
-    const replies: Array<{ requestID: string; answers: QuestionAnswer[] }> = [];
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
     const ctx = createContext(bot, "que_mixed", dir, replies);
 
     await handleQuestionAsked(mixedQuestionEvent(), ctx);
@@ -271,6 +290,8 @@ describe("question asked flow", () => {
     assert.match(editedMessages.at(-1)?.text ?? "", /Next\?/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:1:0`, 10, 1, 1);
-    assert.deepEqual(replies, [{ requestID: "que_mixed", answers: [["A", "B"], ["C"]] }]);
+    assert.deepEqual(replies, [
+      { requestID: "que_mixed", answers: [["A", "B"], ["C"]], serverUrl: "http://localhost:4096/" },
+    ]);
   });
 });

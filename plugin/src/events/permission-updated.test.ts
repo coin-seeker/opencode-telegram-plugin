@@ -79,6 +79,7 @@ function createContext(
     sessionID: string;
     reply: PermissionReply;
     endpoint: "request" | "session";
+    serverUrl?: string;
   }>,
 ): EventHandlerContext {
   return {
@@ -101,8 +102,8 @@ function createContext(
       baseDir: join(dir, "permissions"),
     }),
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
-    async replyToPermission(requestID, sessionID, reply, endpoint) {
-      replies.push({ requestID, sessionID, reply, endpoint });
+    async replyToPermission(requestID, sessionID, reply, endpoint, serverUrl) {
+      replies.push({ requestID, sessionID, reply, endpoint, serverUrl });
     },
   };
 }
@@ -164,6 +165,7 @@ describe("permission updated flow", () => {
       sessionID: string;
       reply: PermissionReply;
       endpoint: "request" | "session";
+      serverUrl?: string;
     }> = [];
     const ctx = createContext(bot, join(dir, "asked"), replies);
 
@@ -172,13 +174,21 @@ describe("permission updated flow", () => {
     assert.match(sentMessages[0]?.text ?? "", /Permission requested/);
     assert.match(sentMessages[0]?.text ?? "", /\.env/);
     assert.match(JSON.stringify(sentMessages[0]?.options), /Allow once/);
-    assert.deepEqual((await ctx.pendingPermissions.loadPending(shortHash))?.patterns, [".env"]);
+    const pending = await ctx.pendingPermissions.loadPending(shortHash);
+    assert.deepEqual(pending?.patterns, [".env"]);
+    assert.equal(pending?.serverUrl, "http://localhost:4096/");
 
     const dispatcher = createPermissionDispatcher(ctx);
     await dispatcher.handleCallbackQuery(`p:${shortHash}:o`, 10);
 
     assert.deepEqual(replies, [
-      { requestID: "per_asked", sessionID: "ses_test", reply: "once", endpoint: "request" },
+      {
+        requestID: "per_asked",
+        sessionID: "ses_test",
+        reply: "once",
+        endpoint: "request",
+        serverUrl: "http://localhost:4096/",
+      },
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Allowed once/);
@@ -191,6 +201,7 @@ describe("permission updated flow", () => {
       sessionID: string;
       reply: PermissionReply;
       endpoint: "request" | "session";
+      serverUrl?: string;
     }> = [];
     const ctx = createContext(bot, join(dir, "updated"), replies);
 
@@ -200,7 +211,13 @@ describe("permission updated flow", () => {
     await dispatcher.handleCallbackQuery(`p:${shortHash}:r`, 10);
 
     assert.deepEqual(replies, [
-      { requestID: "per_updated", sessionID: "ses_test", reply: "reject", endpoint: "session" },
+      {
+        requestID: "per_updated",
+        sessionID: "ses_test",
+        reply: "reject",
+        endpoint: "session",
+        serverUrl: "http://localhost:4096/",
+      },
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Rejected/);
@@ -213,6 +230,7 @@ describe("permission updated flow", () => {
       sessionID: string;
       reply: PermissionReply;
       endpoint: "request" | "session";
+      serverUrl?: string;
     }> = [];
     const ctx = createContext(bot, join(dir, "expired"), replies);
     const shortHash = createPermissionShortHash("per_expired");

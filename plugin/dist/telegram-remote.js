@@ -471,6 +471,7 @@ async function handleNormalizedPermission(permission, ctx) {
     const pending = {
       requestID: permission.requestID,
       sessionID: permission.sessionID,
+      serverUrl: ctx.serverUrl.href,
       title: permission.title,
       permission: permission.permission,
       patterns: permission.patterns,
@@ -514,7 +515,13 @@ function createPermissionDispatcher(ctx) {
         return;
       }
       try {
-        await ctx.replyToPermission(pending.requestID, pending.sessionID, reply, pending.endpoint);
+        await ctx.replyToPermission(
+          pending.requestID,
+          pending.sessionID,
+          reply,
+          pending.endpoint,
+          pending.serverUrl
+        );
         await ctx.bot.editMessageRemoveKeyboard(messageId, `\u2705 Permission ${replyLabel(reply)}
 
 ${pending.permission}: ${pending.title}`);
@@ -719,7 +726,7 @@ async function completeIfReady(ctx, pending, shortHash) {
   const answers = pending.answersInProgress.map((answer) => answer ?? []);
   const messageId = pending.telegramMessageIds[0];
   try {
-    await ctx.replyToQuestion(pending.requestID, answers);
+    await ctx.replyToQuestion(pending.requestID, answers, pending.serverUrl);
     await ctx.bot.editMessageRemoveKeyboard(
       messageId,
       `\u2705 Answered:
@@ -759,6 +766,7 @@ async function handleQuestionAsked(event, ctx) {
   const pending = {
     requestID: request.id,
     sessionID: request.sessionID,
+    serverUrl: ctx.serverUrl.href,
     questions: request.questions,
     sentAt,
     expiresAt: sentAt + QUESTION_EXPIRY_MS,
@@ -1000,15 +1008,19 @@ async function sendIdleNotification(sessionId, ctx) {
 async function flushDeferredParentIfReady(parentID, ctx) {
   if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
   if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
-  if (ctx.sessionTitleService.getSessionStatus(parentID) !== "idle") {
-    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
-    ctx.logger.info("clearing deferred parent idle notification - parent resumed", {
+  const parentStatus = ctx.sessionTitleService.getSessionStatus(parentID);
+  if (parentStatus === "idle") {
+    ctx.logger.info("keeping deferred parent idle notification - waiting for parent to resume", {
       sessionId: parentID
     });
     return;
   }
-  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
-  await sendIdleNotification(parentID, ctx);
+  if (parentStatus !== void 0) {
+    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
+    ctx.logger.info("clearing deferred parent idle notification - parent resumed", {
+      sessionId: parentID
+    });
+  }
 }
 async function deferParentIdleIfDescendantsRunning(sessionId, ctx) {
   await hydrateDescendants(sessionId, ctx);
@@ -1021,8 +1033,8 @@ async function deferParentIdleIfDescendantsRunning(sessionId, ctx) {
 }
 async function handleSessionIdle(event, ctx) {
   const sessionId = event.properties.sessionID;
-  ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
   const parentID = await resolveParentID(sessionId, ctx);
+  ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
   if (typeof parentID === "string") {
     ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
     await flushDeferredParentIfReady(parentID, ctx);
@@ -1315,7 +1327,7 @@ var SessionTitleService = class {
     const existing = this.sessions.get(sessionId);
     this.sessions.set(sessionId, {
       title,
-      parentID: existing?.parentID ?? null,
+      parentID: existing?.parentID,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false
     });
@@ -1324,7 +1336,7 @@ var SessionTitleService = class {
     const existing = this.sessions.get(sessionId);
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
-      parentID: existing?.parentID ?? null,
+      parentID: existing?.parentID,
       status,
       idleNotificationPending: status === "idle" ? existing?.idleNotificationPending ?? false : false
     });
@@ -1350,7 +1362,7 @@ var SessionTitleService = class {
     const existing = this.sessions.get(sessionId);
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
-      parentID: existing?.parentID ?? null,
+      parentID: existing?.parentID,
       status: existing?.status ?? "idle",
       idleNotificationPending: true
     });
@@ -1370,6 +1382,17 @@ var SessionTitleService = class {
 
 // src/telegram-remote.ts
 var pluginDir = dirname4(fileURLToPath(import.meta.url));
+async function postToServer(serverUrl, path, body) {
+  const url = new URL(path, serverUrl);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (response.ok) return;
+  const text = await response.text();
+  throw new Error(`OpenCode request failed: ${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`);
+}
 var TelegramRemote = async (input) => {
   const logger = createLogger({ namespace: "telegram" });
   try {
@@ -1396,26 +1419,41 @@ var TelegramRemote = async (input) => {
     });
     const sessionTitleService = new SessionTitleService();
     const client = input.client;
-    const replyToQuestion = async (requestID, answers) => {
+    const replyToQuestion = async (requestID, answers, serverUrl = input.serverUrl.href) => {
+      const path = `/question/${encodeURIComponent(requestID)}/reply`;
+      if (serverUrl !== input.serverUrl.href) {
+        await postToServer(serverUrl, path, { answers });
+        return;
+      }
       await client._client.post({
-        url: `/question/${encodeURIComponent(requestID)}/reply`,
+        url: path,
         headers: { "Content-Type": "application/json" },
         body: { answers },
         throwOnError: true
       });
     };
-    const replyToPermission = async (requestID, sessionID, reply, endpoint) => {
+    const replyToPermission = async (requestID, sessionID, reply, endpoint, serverUrl = input.serverUrl.href) => {
       if (endpoint === "request") {
+        const path2 = `/permission/${encodeURIComponent(requestID)}/reply`;
+        if (serverUrl !== input.serverUrl.href) {
+          await postToServer(serverUrl, path2, { reply });
+          return;
+        }
         await client._client.post({
-          url: `/permission/${encodeURIComponent(requestID)}/reply`,
+          url: path2,
           headers: { "Content-Type": "application/json" },
           body: { reply },
           throwOnError: true
         });
         return;
       }
+      const path = `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`;
+      if (serverUrl !== input.serverUrl.href) {
+        await postToServer(serverUrl, path, { response: reply });
+        return;
+      }
       await client._client.post({
-        url: `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
+        url: path,
         headers: { "Content-Type": "application/json" },
         body: { response: reply },
         throwOnError: true

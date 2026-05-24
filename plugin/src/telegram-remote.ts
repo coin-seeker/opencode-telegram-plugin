@@ -34,13 +34,15 @@ import { SessionTitleService } from "./services/session-title-service.js";
 
 const pluginDir = dirname(fileURLToPath(import.meta.url));
 
+type OpencodePostBody =
+  | { answers: QuestionAnswer[] }
+  | { reply: PermissionReply }
+  | { response: PermissionReply };
+
 interface InternalOpencodeHttpClient {
   post(options: {
     url: string;
-    body:
-      | { answers: QuestionAnswer[] }
-      | { reply: PermissionReply }
-      | { response: PermissionReply };
+    body: OpencodePostBody;
     headers: { "Content-Type": string };
     throwOnError: true;
   }): Promise<{ data?: boolean }>;
@@ -49,6 +51,19 @@ interface InternalOpencodeHttpClient {
 type OpencodeClientWithInternalHttp = PluginInput["client"] & {
   _client: InternalOpencodeHttpClient;
 };
+
+async function postToServer(serverUrl: string, path: string, body: OpencodePostBody): Promise<void> {
+  const url = new URL(path, serverUrl);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (response.ok) return;
+
+  const text = await response.text();
+  throw new Error(`OpenCode request failed: ${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`);
+}
 
 export const TelegramRemote: Plugin = async (input: PluginInput) => {
   const logger = createLogger({ namespace: "telegram" });
@@ -79,9 +94,18 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
 
     const sessionTitleService = new SessionTitleService();
     const client = input.client as OpencodeClientWithInternalHttp;
-    const replyToQuestion = async (requestID: string, answers: QuestionAnswer[]): Promise<void> => {
+    const replyToQuestion = async (
+      requestID: string,
+      answers: QuestionAnswer[],
+      serverUrl = input.serverUrl.href,
+    ): Promise<void> => {
+      const path = `/question/${encodeURIComponent(requestID)}/reply`;
+      if (serverUrl !== input.serverUrl.href) {
+        await postToServer(serverUrl, path, { answers });
+        return;
+      }
       await client._client.post({
-        url: `/question/${encodeURIComponent(requestID)}/reply`,
+        url: path,
         headers: { "Content-Type": "application/json" },
         body: { answers },
         throwOnError: true,
@@ -92,18 +116,29 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       sessionID: string,
       reply: PermissionReply,
       endpoint: "request" | "session",
+      serverUrl = input.serverUrl.href,
     ): Promise<void> => {
       if (endpoint === "request") {
+        const path = `/permission/${encodeURIComponent(requestID)}/reply`;
+        if (serverUrl !== input.serverUrl.href) {
+          await postToServer(serverUrl, path, { reply });
+          return;
+        }
         await client._client.post({
-          url: `/permission/${encodeURIComponent(requestID)}/reply`,
+          url: path,
           headers: { "Content-Type": "application/json" },
           body: { reply },
           throwOnError: true,
         });
         return;
       }
+      const path = `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`;
+      if (serverUrl !== input.serverUrl.href) {
+        await postToServer(serverUrl, path, { response: reply });
+        return;
+      }
       await client._client.post({
-        url: `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
+        url: path,
         headers: { "Content-Type": "application/json" },
         body: { response: reply },
         throwOnError: true,

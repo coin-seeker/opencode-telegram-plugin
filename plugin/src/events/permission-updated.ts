@@ -111,6 +111,7 @@ async function handleNormalizedPermission(permission: NormalizedPermissionReques
     const pending: PendingPermissionState = {
       requestID: permission.requestID,
       sessionID: permission.sessionID,
+      serverUrl: ctx.serverUrl.href,
       title: permission.title,
       permission: permission.permission,
       patterns: permission.patterns,
@@ -158,7 +159,13 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
         return;
       }
       try {
-        await ctx.replyToPermission(pending.requestID, pending.sessionID, reply, pending.endpoint);
+        await ctx.replyToPermission(
+          pending.requestID,
+          pending.sessionID,
+          reply,
+          pending.endpoint,
+          pending.serverUrl,
+        );
         await ctx.bot.editMessageRemoveKeyboard(messageId, `✅ Permission ${replyLabel(reply)}\n\n${pending.permission}: ${pending.title}`);
         ctx.logger.info("permission reply sent", { requestID: pending.requestID, sessionID: pending.sessionID, reply });
       } catch (err) {

@@ -17,6 +17,7 @@ export interface AwaitingCustomAnswer {
 export interface PendingQuestionState {
   requestID: string;
   sessionID: string;
+  serverUrl?: string;
   questions: QuestionInfo[];
   sentAt: number;
   expiresAt: number;

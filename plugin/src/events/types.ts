@@ -25,11 +25,12 @@ export interface EventHandlerContext {
   pendingQuestions: PendingQuestionStore;
   pendingPermissions: PendingPermissionStore;
   idleRecheckDelayMs?: number;
-  replyToQuestion(requestID: string, answers: QuestionAnswer[]): Promise<void>;
+  replyToQuestion(requestID: string, answers: QuestionAnswer[], serverUrl?: string): Promise<void>;
   replyToPermission(
     requestID: string,
     sessionID: string,
     reply: PermissionReply,
     endpoint: "request" | "session",
+    serverUrl?: string,
   ): Promise<void>;
 }

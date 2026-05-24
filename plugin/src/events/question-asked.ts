@@ -147,7 +147,7 @@ async function completeIfReady(
   const answers = pending.answersInProgress.map((answer) => answer ?? []);
   const messageId = pending.telegramMessageIds[0];
   try {
-    await ctx.replyToQuestion(pending.requestID, answers);
+    await ctx.replyToQuestion(pending.requestID, answers, pending.serverUrl);
     await ctx.bot.editMessageRemoveKeyboard(
       messageId,
       `✅ Answered:\n${answerSummary(pending.questions, answers)}`,
@@ -198,6 +198,7 @@ export async function handleQuestionAsked(
   const pending: PendingQuestionState = {
     requestID: request.id,
     sessionID: request.sessionID,
+    serverUrl: ctx.serverUrl.href,
     questions: request.questions,
     sentAt,
     expiresAt: sentAt + QUESTION_EXPIRY_MS,

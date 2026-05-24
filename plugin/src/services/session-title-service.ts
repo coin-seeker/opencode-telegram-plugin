@@ -4,7 +4,7 @@ export type SessionStatusType = "busy" | "idle" | "retry";
 
 interface SessionInfoCacheEntry {
   title: string | null;
-  parentID: string | null;
+  parentID: string | null | undefined;
   status?: SessionStatusType;
   idleNotificationPending: boolean;
 }
@@ -26,7 +26,7 @@ export class SessionTitleService {
     const existing = this.sessions.get(sessionId);
     this.sessions.set(sessionId, {
       title,
-      parentID: existing?.parentID ?? null,
+      parentID: existing?.parentID,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
     });
@@ -36,7 +36,7 @@ export class SessionTitleService {
     const existing = this.sessions.get(sessionId);
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
-      parentID: existing?.parentID ?? null,
+      parentID: existing?.parentID,
       status,
       idleNotificationPending: status === "idle" ? (existing?.idleNotificationPending ?? false) : false,
     });
@@ -67,7 +67,7 @@ export class SessionTitleService {
     const existing = this.sessions.get(sessionId);
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
-      parentID: existing?.parentID ?? null,
+      parentID: existing?.parentID,
       status: existing?.status ?? "idle",
       idleNotificationPending: true,
     });

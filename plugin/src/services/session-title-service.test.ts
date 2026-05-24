@@ -41,6 +41,14 @@ describe("SessionTitleService", () => {
     assert.equal(service.getSessionTitle("missing"), null);
   });
 
+  test("setSessionStatus does not convert unknown parentID to known root", () => {
+    const service = new SessionTitleService();
+
+    service.setSessionStatus("first-seen", "idle");
+
+    assert.equal(service.getParentID("first-seen"), undefined);
+  });
+
   test("setSessionTitle preserves existing parentID", () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("child", "Old", "parent"));

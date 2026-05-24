@@ -10,7 +10,6 @@ import { createPendingPermissionStore, type PermissionReply } from "../lib/pendi
 import { createPendingQuestionStore, type QuestionAnswer } from "../lib/pending-questions.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import { handleSessionIdle } from "./session-idle.js";
-import { StartWorkCommandStore } from "./start-work.js";
 import type { EventHandlerContext } from "./types.js";
 
 function createLogger() {
@@ -66,7 +65,6 @@ function createBot() {
     },
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
-    setStartWorkDispatcher() {},
   };
   return { bot, sentMessages, sentOptions };
 }
@@ -105,11 +103,9 @@ function createContext(
       tokenHash: "tok",
       baseDir: join(dir, "permissions"),
     }),
-    startWorkCommands: new StartWorkCommandStore(),
     idleRecheckDelayMs: 20,
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
     async replyToPermission(_requestID: string, _sessionID: string, _reply: PermissionReply) {},
-    async runSessionCommand() {},
   };
 }
 
@@ -145,21 +141,6 @@ describe("session idle notifications", () => {
     ]);
     assert.equal(sentOptions[0], undefined);
     assert.equal(service.hasDeferredIdleNotification("parent"), false);
-  });
-
-  test("shows start-work button only when command arguments were detected", async () => {
-    const service = new SessionTitleService();
-    service.setSessionInfo(createSession("plan-parent", "Plan builder"));
-    const { bot, sentMessages, sentOptions } = createBot();
-    const ctx = createContext(bot, join(dir, "start-work-command"), service);
-    ctx.startWorkCommands.updateFromText("plan-parent", "Plan ready. Run /start-work boulder-789");
-
-    await handleSessionIdle(idleEvent("plan-parent"), ctx);
-
-    assert.deepEqual(sentMessages, [
-      "Agent has finished: Plan builder\n\nPlan is ready. Tap below to run /start-work boulder-789.",
-    ]);
-    assert.match(JSON.stringify(sentOptions[0]), /Run \/start-work/);
   });
 
   test("hydrates active checker children before sending root idle notification", async () => {

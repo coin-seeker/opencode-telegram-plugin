@@ -20,7 +20,6 @@ import {
   handlePermissionUpdated,
   isEventPermissionAsked,
 } from "./permission-updated.js";
-import { StartWorkCommandStore } from "./start-work.js";
 import type { EventHandlerContext } from "./types.js";
 
 function createLogger() {
@@ -68,7 +67,6 @@ function createBot() {
     },
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
-    setStartWorkDispatcher() {},
   };
   return { bot, sentMessages, editedMessages };
 }
@@ -102,12 +100,10 @@ function createContext(
       tokenHash: "tok",
       baseDir: join(dir, "permissions"),
     }),
-    startWorkCommands: new StartWorkCommandStore(),
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
     async replyToPermission(requestID, sessionID, reply, endpoint) {
       replies.push({ requestID, sessionID, reply, endpoint });
     },
-    async runSessionCommand() {},
   };
 }
 

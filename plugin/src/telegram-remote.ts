@@ -9,7 +9,6 @@ import { loadConfig } from "./config.js";
 import {
   createPermissionDispatcher,
   createQuestionDispatcher,
-  createStartWorkDispatcher,
   handlePermissionAsked,
   handlePermissionUpdated,
   handleQuestionAsked,
@@ -23,7 +22,6 @@ import {
   isEventQuestionAsked,
   isEventQuestionReplied,
   isEventSessionError,
-  StartWorkCommandStore,
 } from "./events/index.js";
 import type { EventHandlerContext } from "./events/types.js";
 import { loadPluginEnv } from "./lib/env-loader.js";
@@ -52,29 +50,6 @@ type OpencodeClientWithInternalHttp = PluginInput["client"] & {
   _client: InternalOpencodeHttpClient;
 };
 
-interface TextPartLike {
-  type: "text";
-  sessionID: string;
-  text: string;
-}
-
-function getTextPartFromMessagePartUpdated(
-  event: { type: string; properties?: Record<string, unknown> },
-): TextPartLike | undefined {
-  if (event.type !== "message.part.updated") return undefined;
-  const part = event.properties?.part;
-  if (!part || typeof part !== "object") return undefined;
-  const candidate = part as Partial<TextPartLike>;
-  if (
-    candidate.type !== "text" ||
-    typeof candidate.sessionID !== "string" ||
-    typeof candidate.text !== "string"
-  ) {
-    return undefined;
-  }
-  return { type: "text", sessionID: candidate.sessionID, text: candidate.text };
-}
-
 export const TelegramRemote: Plugin = async (input: PluginInput) => {
   const logger = createLogger({ namespace: "telegram" });
   try {
@@ -89,7 +64,6 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const claimsDir = join(tmpdir(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
-    const startWorkCommands = new StartWorkCommandStore();
     const lockResult = await acquireLock({ lockPath });
     const isLeader = lockResult.acquired;
 
@@ -132,17 +106,6 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
         url: `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
         headers: { "Content-Type": "application/json" },
         body: { response: reply },
-        throwOnError: true,
-      });
-    };
-    const runSessionCommand = async (
-      sessionID: string,
-      command: string,
-      args: string,
-    ): Promise<void> => {
-      await input.client.session.command({
-        path: { id: sessionID },
-        body: { command, arguments: args },
         throwOnError: true,
       });
     };
@@ -195,16 +158,13 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       tokenHash,
       pendingQuestions,
       pendingPermissions,
-      startWorkCommands,
       replyToQuestion,
       replyToPermission,
-      runSessionCommand,
     };
 
     if (isLeader) {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
-      bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
     }
 
     return {
@@ -223,17 +183,6 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
           default: {
-            const textPart = getTextPartFromMessagePartUpdated(extEvent);
-            if (textPart) {
-              const command = startWorkCommands.updateFromText(textPart.sessionID, textPart.text);
-              if (command) {
-                logger.info("start-work command detected", {
-                  sessionID: command.sessionID,
-                  arguments: command.arguments,
-                });
-              }
-              return;
-            }
             if (isEventPermissionAsked(extEvent)) {
               if (!isLeader) return;
               return handlePermissionAsked(extEvent, ctx);

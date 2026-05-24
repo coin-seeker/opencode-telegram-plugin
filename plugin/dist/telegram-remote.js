@@ -45,7 +45,6 @@ function createTelegramBot(opts) {
   let activeChatId = opts.initialChatId;
   let questionDispatcher;
   let permissionDispatcher;
-  let startWorkDispatcher;
   if (polling) {
     bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
@@ -97,13 +96,6 @@ This chat is now active for OpenCode notifications.`
       const messageId = ctx.callbackQuery.message?.message_id;
       if (!permissionDispatcher || messageId === void 0) return;
       await permissionDispatcher.handleCallbackQuery(data, messageId);
-    });
-    bot.callbackQuery(/^sw:(.+)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-      const data = ctx.callbackQuery.data;
-      const messageId = ctx.callbackQuery.message?.message_id;
-      if (!startWorkDispatcher || messageId === void 0) return;
-      await startWorkDispatcher.handleCallbackQuery(data, messageId);
     });
     bot.on("message:text", async (ctx) => {
       const replyToMessageId = ctx.message.reply_to_message?.message_id;
@@ -198,9 +190,6 @@ This chat is now active for OpenCode notifications.`
     },
     setPermissionDispatcher(dispatcher) {
       permissionDispatcher = dispatcher;
-    },
-    setStartWorkDispatcher(dispatcher) {
-      startWorkDispatcher = dispatcher;
     }
   };
 }
@@ -953,84 +942,6 @@ async function handleSessionError(event, ctx) {
   ctx.logger.info("session abort recorded", { sessionId: event.properties.sessionID ?? "global" });
 }
 
-// src/events/start-work.ts
-var CALLBACK_RE3 = /^sw:(.+)$/;
-var START_WORK_COMMAND = "start-work";
-var START_WORK_RE = /(?:^|[\s`])\/start-work(?:\s+([^\n`]+))?/g;
-var StartWorkCommandStore = class {
-  commands = /* @__PURE__ */ new Map();
-  updateFromText(sessionID, text) {
-    const command = extractStartWorkCommand(sessionID, text);
-    if (!command) return void 0;
-    this.commands.set(sessionID, command.arguments);
-    return command;
-  }
-  get(sessionID) {
-    const args = this.commands.get(sessionID);
-    if (args === void 0) return void 0;
-    return { sessionID, arguments: args };
-  }
-  delete(sessionID) {
-    this.commands.delete(sessionID);
-  }
-};
-function extractStartWorkCommand(sessionID, text) {
-  let latestArgs;
-  for (const match of text.matchAll(START_WORK_RE)) {
-    const args = (match[1] ?? "").trim();
-    if (args) latestArgs = args;
-  }
-  if (latestArgs === void 0) return void 0;
-  return { sessionID, arguments: latestArgs };
-}
-function startWorkCallbackData(sessionID) {
-  const data = `sw:${encodeURIComponent(sessionID)}`;
-  return Buffer.byteLength(data, "utf8") <= 64 ? data : void 0;
-}
-function startWorkKeyboard(sessionID) {
-  const callbackData = startWorkCallbackData(sessionID);
-  if (!callbackData) return void 0;
-  return [[{ text: "\u25B6\uFE0F Run /start-work", callback_data: callbackData }]];
-}
-function createStartWorkDispatcher(ctx) {
-  return {
-    async handleCallbackQuery(data, messageId) {
-      const match = CALLBACK_RE3.exec(data);
-      if (!match) return;
-      const sessionID = decodeURIComponent(match[1]);
-      const command = ctx.startWorkCommands.get(sessionID);
-      if (!command) {
-        await ctx.bot.editMessageRemoveKeyboard(
-          messageId,
-          `\u26A0\uFE0F No /start-work command was detected for this session.
-
-Session: ${sessionID}`
-        );
-        return;
-      }
-      try {
-        await ctx.runSessionCommand(sessionID, START_WORK_COMMAND, command.arguments);
-        await ctx.bot.editMessageRemoveKeyboard(
-          messageId,
-          `\u25B6\uFE0F Sent /start-work ${command.arguments} to opencode.
-
-Session: ${sessionID}`
-        );
-        ctx.startWorkCommands.delete(sessionID);
-        ctx.logger.info("start-work command sent", { sessionID });
-      } catch (err) {
-        await ctx.bot.editMessageRemoveKeyboard(
-          messageId,
-          `\u26A0\uFE0F Failed to send /start-work to opencode.
-
-Session: ${sessionID}`
-        );
-        ctx.logger.error("failed to send start-work command", { sessionID, error: String(err) });
-      }
-    }
-  };
-}
-
 // src/events/session-idle.ts
 var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
 function sleep(ms) {
@@ -1077,17 +988,9 @@ async function sendIdleNotification(sessionId, ctx) {
   });
   if (!claimed) return;
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const startWorkCommand = ctx.startWorkCommands.get(sessionId);
-  const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
-  const keyboard = startWorkCommand ? startWorkKeyboard(sessionId) : void 0;
-  const text = startWorkCommand ? `${message}
-
-Plan is ready. Tap below to run /start-work ${startWorkCommand.arguments}.` : message;
+  const text = title ? `Agent has finished: ${title}` : "Agent has finished.";
   try {
-    await ctx.bot.sendMessage(
-      text,
-      keyboard ? { reply_markup: { inline_keyboard: keyboard } } : void 0
-    );
+    await ctx.bot.sendMessage(text);
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
     ctx.logger.info("idle notification sent", { sessionId, title });
   } catch (err) {
@@ -1467,16 +1370,6 @@ var SessionTitleService = class {
 
 // src/telegram-remote.ts
 var pluginDir = dirname4(fileURLToPath(import.meta.url));
-function getTextPartFromMessagePartUpdated(event) {
-  if (event.type !== "message.part.updated") return void 0;
-  const part = event.properties?.part;
-  if (!part || typeof part !== "object") return void 0;
-  const candidate = part;
-  if (candidate.type !== "text" || typeof candidate.sessionID !== "string" || typeof candidate.text !== "string") {
-    return void 0;
-  }
-  return { type: "text", sessionID: candidate.sessionID, text: candidate.text };
-}
 var TelegramRemote = async (input) => {
   const logger = createLogger({ namespace: "telegram" });
   try {
@@ -1490,7 +1383,6 @@ var TelegramRemote = async (input) => {
     const claimsDir = join6(tmpdir4(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
-    const startWorkCommands = new StartWorkCommandStore();
     const lockResult = await acquireLock({ lockPath });
     const isLeader = lockResult.acquired;
     logger.info(
@@ -1526,13 +1418,6 @@ var TelegramRemote = async (input) => {
         url: `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
         headers: { "Content-Type": "application/json" },
         body: { response: reply },
-        throwOnError: true
-      });
-    };
-    const runSessionCommand = async (sessionID, command, args) => {
-      await input.client.session.command({
-        path: { id: sessionID },
-        body: { command, arguments: args },
         throwOnError: true
       });
     };
@@ -1580,15 +1465,12 @@ var TelegramRemote = async (input) => {
       tokenHash,
       pendingQuestions,
       pendingPermissions,
-      startWorkCommands,
       replyToQuestion,
-      replyToPermission,
-      runSessionCommand
+      replyToPermission
     };
     if (isLeader) {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
-      bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
     }
     return {
       event: async ({ event }) => {
@@ -1606,17 +1488,6 @@ var TelegramRemote = async (input) => {
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
           default: {
-            const textPart = getTextPartFromMessagePartUpdated(extEvent);
-            if (textPart) {
-              const command = startWorkCommands.updateFromText(textPart.sessionID, textPart.text);
-              if (command) {
-                logger.info("start-work command detected", {
-                  sessionID: command.sessionID,
-                  arguments: command.arguments
-                });
-              }
-              return;
-            }
             if (isEventPermissionAsked(extEvent)) {
               if (!isLeader) return;
               return handlePermissionAsked(extEvent, ctx);

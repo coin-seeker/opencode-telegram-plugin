@@ -1,7 +1,6 @@
 import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
 import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import { claimOnce } from "../lib/claim.js";
-import { startWorkKeyboard } from "./start-work.js";
 import type { EventHandlerContext } from "./types.js";
 
 const ROOT_IDLE_RECHECK_DELAY_MS = 2_500;
@@ -64,17 +63,9 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
   if (!claimed) return;
 
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const startWorkCommand = ctx.startWorkCommands.get(sessionId);
-  const message = title ? `Agent has finished: ${title}` : "Agent has finished.";
-  const keyboard = startWorkCommand ? startWorkKeyboard(sessionId) : undefined;
-  const text = startWorkCommand
-    ? `${message}\n\nPlan is ready. Tap below to run /start-work ${startWorkCommand.arguments}.`
-    : message;
+  const text = title ? `Agent has finished: ${title}` : "Agent has finished.";
   try {
-    await ctx.bot.sendMessage(
-      text,
-      keyboard ? { reply_markup: { inline_keyboard: keyboard } } : undefined,
-    );
+    await ctx.bot.sendMessage(text);
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
     ctx.logger.info("idle notification sent", { sessionId, title });
   } catch (err) {

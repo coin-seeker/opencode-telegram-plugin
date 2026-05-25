@@ -5,8 +5,14 @@ export type SessionStatusType = "busy" | "idle" | "retry";
 interface SessionInfoCacheEntry {
   title: string | null;
   parentID: string | null | undefined;
+  agent?: string;
   status?: SessionStatusType;
   idleNotificationPending: boolean;
+}
+
+function agentFromSession(info: Session): string | undefined {
+  const candidate = info as Session & { agent?: unknown };
+  return typeof candidate.agent === "string" ? candidate.agent : undefined;
 }
 
 export class SessionTitleService {
@@ -17,6 +23,7 @@ export class SessionTitleService {
     this.sessions.set(info.id, {
       title: info.title || null,
       parentID: info.parentID ?? null,
+      agent: agentFromSession(info) ?? existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
     });
@@ -27,6 +34,18 @@ export class SessionTitleService {
     this.sessions.set(sessionId, {
       title,
       parentID: existing?.parentID,
+      agent: existing?.agent,
+      status: existing?.status,
+      idleNotificationPending: existing?.idleNotificationPending ?? false,
+    });
+  }
+
+  setSessionAgent(sessionId: string, agent: string): void {
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title: existing?.title ?? null,
+      parentID: existing?.parentID,
+      agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
     });
@@ -37,8 +56,10 @@ export class SessionTitleService {
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
       parentID: existing?.parentID,
+      agent: existing?.agent,
       status,
-      idleNotificationPending: status === "idle" ? (existing?.idleNotificationPending ?? false) : false,
+      idleNotificationPending:
+        status === "idle" ? (existing?.idleNotificationPending ?? false) : false,
     });
   }
 
@@ -48,6 +69,10 @@ export class SessionTitleService {
 
   getParentID(sessionId: string): string | null | undefined {
     return this.sessions.get(sessionId)?.parentID;
+  }
+
+  getSessionAgent(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.agent;
   }
 
   getSessionStatus(sessionId: string): SessionStatusType | undefined {
@@ -68,6 +93,7 @@ export class SessionTitleService {
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
       parentID: existing?.parentID,
+      agent: existing?.agent,
       status: existing?.status ?? "idle",
       idleNotificationPending: true,
     });

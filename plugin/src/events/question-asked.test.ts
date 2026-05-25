@@ -8,6 +8,7 @@ import type { EventQuestionAsked } from "@opencode-ai/sdk/v2";
 import type { TelegramBotManager } from "../bot.js";
 import { createPendingPermissionStore } from "../lib/pending-permissions.js";
 import { createPendingQuestionStore, createQuestionShortHash } from "../lib/pending-questions.js";
+import { createPendingStartWorkStore } from "../lib/pending-start-work.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import { createQuestionDispatcher, handleQuestionAsked } from "./question-asked.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
@@ -57,6 +58,7 @@ function createBot() {
     },
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
+    setStartWorkDispatcher() {},
   };
   return { bot, sentMessages, editedMessages };
 }
@@ -86,10 +88,15 @@ function createContext(
       tokenHash: "tok",
       baseDir: join(dir, `permissions-${requestID}`),
     }),
+    pendingStartWorks: createPendingStartWorkStore({
+      tokenHash: "tok",
+      baseDir: join(dir, `start-work-${requestID}`),
+    }),
     async replyToQuestion(answeredRequestID, answers, serverUrl) {
       replies.push({ requestID: answeredRequestID, answers, serverUrl });
     },
     async replyToPermission() {},
+    async runSessionCommand() {},
   };
 }
 
@@ -270,7 +277,11 @@ describe("question asked flow", () => {
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);
     assert.deepEqual(replies, [
-      { requestID: "que_multiple_custom", answers: [["Custom"]], serverUrl: "http://localhost:4096/" },
+      {
+        requestID: "que_multiple_custom",
+        answers: [["Custom"]],
+        serverUrl: "http://localhost:4096/",
+      },
     ]);
   });
 

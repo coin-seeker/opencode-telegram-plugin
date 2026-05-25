@@ -1,5 +1,5 @@
-import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 import type { Session } from "@opencode-ai/sdk";
 import { SessionTitleService } from "./session-title-service.js";
 
@@ -56,6 +56,15 @@ describe("SessionTitleService", () => {
 
     assert.equal(service.getSessionTitle("child"), "New");
     assert.equal(service.getParentID("child"), "parent");
+  });
+
+  test("tracks the selected agent without losing it on later updates", () => {
+    const service = new SessionTitleService();
+    service.setSessionAgent("plan-session", "plan");
+    service.setSessionInfo(createSession("plan-session", "Plan title"));
+    service.setSessionStatus("plan-session", "idle");
+
+    assert.equal(service.getSessionAgent("plan-session"), "plan");
   });
 
   test("tracks unfinished children by parent", () => {

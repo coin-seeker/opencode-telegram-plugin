@@ -4,9 +4,9 @@
  */
 
 // src/telegram-remote.ts
-import { createHash as createHash4 } from "crypto";
-import { tmpdir as tmpdir4 } from "os";
-import { dirname as dirname4, join as join6 } from "path";
+import { createHash as createHash5 } from "crypto";
+import { tmpdir as tmpdir5 } from "os";
+import { dirname as dirname5, join as join7 } from "path";
 import { fileURLToPath } from "url";
 
 // src/bot.ts
@@ -45,6 +45,7 @@ function createTelegramBot(opts) {
   let activeChatId = opts.initialChatId;
   let questionDispatcher;
   let permissionDispatcher;
+  let startWorkDispatcher;
   if (polling) {
     bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
@@ -96,6 +97,13 @@ This chat is now active for OpenCode notifications.`
       const messageId = ctx.callbackQuery.message?.message_id;
       if (!permissionDispatcher || messageId === void 0) return;
       await permissionDispatcher.handleCallbackQuery(data, messageId);
+    });
+    bot.callbackQuery(/^sw:([^:]+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const data = ctx.callbackQuery.data;
+      const messageId = ctx.callbackQuery.message?.message_id;
+      if (!startWorkDispatcher || messageId === void 0) return;
+      await startWorkDispatcher.handleCallbackQuery(data, messageId);
     });
     bot.on("message:text", async (ctx) => {
       const replyToMessageId = ctx.message.reply_to_message?.message_id;
@@ -190,6 +198,9 @@ This chat is now active for OpenCode notifications.`
     },
     setPermissionDispatcher(dispatcher) {
       permissionDispatcher = dispatcher;
+    },
+    setStartWorkDispatcher(dispatcher) {
+      startWorkDispatcher = dispatcher;
     }
   };
 }
@@ -950,6 +961,163 @@ async function handleSessionError(event, ctx) {
   ctx.logger.info("session abort recorded", { sessionId: event.properties.sessionID ?? "global" });
 }
 
+// src/lib/pending-start-work.ts
+import { createHash as createHash4 } from "crypto";
+import { mkdir as mkdir4, readdir as readdir4, readFile as readFile3, rename as rename3, unlink as unlink4, writeFile as writeFile3 } from "fs/promises";
+import { tmpdir as tmpdir3 } from "os";
+import { dirname as dirname3, join as join4 } from "path";
+function hasCode4(err, code) {
+  return "code" in err && err.code === code;
+}
+function pendingFilePath3(dir, shortHash) {
+  return join4(dir, `${shortHash}.json`);
+}
+function parsePending3(text) {
+  const parsed = JSON.parse(text);
+  if (typeof parsed.sessionID !== "string")
+    throw new Error("Invalid pending start-work: sessionID");
+  if (parsed.serverUrl !== void 0 && typeof parsed.serverUrl !== "string")
+    throw new Error("Invalid pending start-work: serverUrl");
+  if (parsed.title !== void 0 && typeof parsed.title !== "string")
+    throw new Error("Invalid pending start-work: title");
+  if (typeof parsed.sentAt !== "number") throw new Error("Invalid pending start-work: sentAt");
+  if (typeof parsed.expiresAt !== "number")
+    throw new Error("Invalid pending start-work: expiresAt");
+  if (typeof parsed.telegramMessageId !== "number")
+    throw new Error("Invalid pending start-work: telegramMessageId");
+  return parsed;
+}
+async function listPendingFiles3(dir) {
+  try {
+    const entries = await readdir4(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+  } catch (err) {
+    if (err instanceof Error && hasCode4(err, "ENOENT")) return [];
+    throw err;
+  }
+}
+function shortHashFromFileName3(fileName) {
+  return fileName.slice(0, -".json".length);
+}
+function createPendingStartWorkStore(opts) {
+  const dir = opts.baseDir ?? join4(tmpdir3(), `opencoder-telegram-pending-start-work-${opts.tokenHash}`);
+  return {
+    dir,
+    async savePending(shortHash, data) {
+      const filePath = pendingFilePath3(dir, shortHash);
+      await mkdir4(dirname3(filePath), { recursive: true });
+      const tmpPath = `${filePath}.tmp.${process.pid}`;
+      await writeFile3(tmpPath, JSON.stringify(data, null, 2), "utf8");
+      await rename3(tmpPath, filePath);
+    },
+    async loadPending(shortHash) {
+      try {
+        return parsePending3(await readFile3(pendingFilePath3(dir, shortHash), "utf8"));
+      } catch (err) {
+        if (err instanceof Error && hasCode4(err, "ENOENT")) return void 0;
+        throw err;
+      }
+    },
+    async deletePending(shortHash) {
+      try {
+        await unlink4(pendingFilePath3(dir, shortHash));
+      } catch (err) {
+        if (!(err instanceof Error) || !hasCode4(err, "ENOENT")) throw err;
+      }
+    },
+    async sweepExpired() {
+      const expired = [];
+      for (const fileName of await listPendingFiles3(dir)) {
+        const shortHash = shortHashFromFileName3(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data && data.expiresAt < Date.now()) {
+          expired.push(data);
+          await this.deletePending(shortHash);
+        }
+      }
+      return expired;
+    }
+  };
+}
+function createStartWorkShortHash(sessionID) {
+  return createHash4("sha256").update(sessionID).digest("base64url").slice(0, 10);
+}
+
+// src/events/start-work.ts
+var CALLBACK_RE3 = /^sw:([^:]+)$/;
+var START_WORK_COMMAND = "start-work";
+var START_WORK_EXPIRY_MS = 24 * 60 * 6e4;
+function startWorkKeyboard(shortHash) {
+  const callbackData = `sw:${shortHash}`;
+  if (Buffer.byteLength(callbackData, "utf8") > 64)
+    throw new Error("Telegram callback_data exceeds 64 bytes");
+  return [[{ text: "\u25B6\uFE0F Run /start-work", callback_data: callbackData }]];
+}
+function planCompleteMessage(title) {
+  return title ? `plan \uC791\uC131\uC774 \uB05D\uB0AC\uC5B4\uC694.
+
+${title}` : "plan \uC791\uC131\uC774 \uB05D\uB0AC\uC5B4\uC694.";
+}
+function createPendingStartWork(sessionID, title, serverUrl, telegramMessageId) {
+  const sentAt = Date.now();
+  return {
+    sessionID,
+    serverUrl,
+    title: title ?? void 0,
+    sentAt,
+    expiresAt: sentAt + START_WORK_EXPIRY_MS,
+    telegramMessageId
+  };
+}
+function startWorkShortHash(sessionID) {
+  return createStartWorkShortHash(sessionID);
+}
+async function expirePending3(ctx, shortHash, pending, messageId) {
+  await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 /start-work request expired");
+  await ctx.pendingStartWorks.deletePending(shortHash);
+  ctx.logger.info("pending start-work expired", { sessionID: pending.sessionID });
+}
+function createStartWorkDispatcher(ctx) {
+  return {
+    async handleCallbackQuery(data, messageId) {
+      const match = CALLBACK_RE3.exec(data);
+      if (!match) return;
+      const shortHash = match[1];
+      const pending = await ctx.pendingStartWorks.loadPending(shortHash);
+      if (!pending) {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, "This /start-work request has expired.");
+        return;
+      }
+      if (pending.expiresAt < Date.now()) {
+        await expirePending3(ctx, shortHash, pending, messageId);
+        return;
+      }
+      try {
+        await ctx.runSessionCommand(pending.sessionID, START_WORK_COMMAND, pending.serverUrl);
+        const label = pending.title ?? pending.sessionID;
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          `\u25B6\uFE0F Sent /start-work to opencode.
+
+Session: ${label}`
+        );
+        ctx.logger.info("start-work command sent", { sessionID: pending.sessionID });
+      } catch (err) {
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "\u26A0\uFE0F Failed to send /start-work to opencode"
+        );
+        ctx.logger.error("failed to send start-work command", {
+          sessionID: pending.sessionID,
+          error: String(err)
+        });
+      } finally {
+        await ctx.pendingStartWorks.deletePending(shortHash);
+      }
+    }
+  };
+}
+
 // src/events/session-idle.ts
 var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
 function sleep(ms) {
@@ -996,9 +1164,21 @@ async function sendIdleNotification(sessionId, ctx) {
   });
   if (!claimed) return;
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const text = title ? `Agent has finished: ${title}` : "Agent has finished.";
+  const isPlanSession = ctx.sessionTitleService.getSessionAgent(sessionId) === "plan";
+  const text = isPlanSession ? planCompleteMessage(title) : title ? `Agent has finished: ${title}` : "Agent has finished.";
   try {
-    await ctx.bot.sendMessage(text);
+    if (isPlanSession) {
+      const shortHash = startWorkShortHash(sessionId);
+      const message = await ctx.bot.sendMessage(text, {
+        reply_markup: { inline_keyboard: startWorkKeyboard(shortHash) }
+      });
+      await ctx.pendingStartWorks.savePending(
+        shortHash,
+        createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id)
+      );
+    } else {
+      await ctx.bot.sendMessage(text);
+    }
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
     ctx.logger.info("idle notification sent", { sessionId, title });
   } catch (err) {
@@ -1076,14 +1256,14 @@ async function handleSessionUpdated(event, ctx) {
 // src/lib/env-loader.ts
 import { existsSync } from "fs";
 import { homedir } from "os";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 import dotenv from "dotenv";
 function loadPluginEnv(opts) {
   const paths = [
-    join4(opts.pluginDir, "../../.env"),
-    join4(opts.pluginDir, "..", ".env"),
-    join4(opts.pluginDir, ".env"),
-    join4(opts.homeDir ?? homedir(), ".config/opencode/telegram-remote/.env")
+    join5(opts.pluginDir, "../../.env"),
+    join5(opts.pluginDir, "..", ".env"),
+    join5(opts.pluginDir, ".env"),
+    join5(opts.homeDir ?? homedir(), ".config/opencode/telegram-remote/.env")
   ];
   const loadedFrom = [];
   const values = {};
@@ -1101,10 +1281,10 @@ function loadPluginEnv(opts) {
 }
 
 // src/lib/lock.ts
-import { open as open2, readFile as readFile3, stat as stat2, unlink as unlink4 } from "fs/promises";
+import { open as open2, readFile as readFile4, stat as stat2, unlink as unlink5 } from "fs/promises";
 import { hostname } from "os";
 var DEFAULT_TTL_MS2 = 5 * 60 * 1e3;
-function hasCode4(err, code) {
+function hasCode5(err, code) {
   return "code" in err && err.code === code;
 }
 function parseLockData(text) {
@@ -1123,7 +1303,7 @@ function isPidAlive(pid) {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    if (err instanceof Error && hasCode4(err, "ESRCH")) return false;
+    if (err instanceof Error && hasCode5(err, "ESRCH")) return false;
     return true;
   }
 }
@@ -1144,7 +1324,7 @@ async function createLock(lockPath, pid) {
       if (released) return;
       released = true;
       try {
-        await unlink4(lockPath);
+        await unlink5(lockPath);
       } catch {
       }
     }
@@ -1154,7 +1334,7 @@ async function inspectExisting(lockPath, ttlMs) {
   let ownerPid;
   let dead = false;
   try {
-    const text = await readFile3(lockPath, "utf8");
+    const text = await readFile4(lockPath, "utf8");
     const data = parseLockData(text);
     if (data) {
       ownerPid = data.pid;
@@ -1180,7 +1360,7 @@ async function acquireLock(opts) {
     try {
       return { acquired: true, handle: await createLock(opts.lockPath, pid) };
     } catch (err) {
-      if (!(err instanceof Error) || !hasCode4(err, "EEXIST")) {
+      if (!(err instanceof Error) || !hasCode5(err, "EEXIST")) {
         return { acquired: false, reason: err instanceof Error ? err.message : String(err) };
       }
       const existing = await inspectExisting(opts.lockPath, ttlMs);
@@ -1188,7 +1368,7 @@ async function acquireLock(opts) {
         return { acquired: false, reason: existing.reason, ownerPid: existing.ownerPid };
       }
       try {
-        await unlink4(opts.lockPath);
+        await unlink5(opts.lockPath);
       } catch {
         return { acquired: false, reason: "failed to remove stale lock", ownerPid: existing.ownerPid };
       }
@@ -1199,7 +1379,7 @@ async function acquireLock(opts) {
 
 // src/lib/logger.ts
 import { appendFile } from "fs/promises";
-import { tmpdir as tmpdir3 } from "os";
+import { tmpdir as tmpdir4 } from "os";
 var DEFAULT_BUFFER_LIMIT = 4096;
 var DEFAULT_FLUSH_INTERVAL_MS = 2e3;
 function safeJson(data) {
@@ -1210,7 +1390,7 @@ function safeJson(data) {
   }
 }
 function createLogger(opts = {}) {
-  const filePath = opts.filePath ?? `${tmpdir3()}/opencoder-telegram.log`;
+  const filePath = opts.filePath ?? `${tmpdir4()}/opencoder-telegram.log`;
   const namespace = opts.namespace ?? "default";
   const bufferLimit = opts.bufferLimit ?? DEFAULT_BUFFER_LIMIT;
   const flushIntervalMs = opts.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
@@ -1268,10 +1448,10 @@ function createLogger(opts = {}) {
 }
 
 // src/lib/state-store.ts
-import { mkdir as mkdir4, readFile as readFile4, rename as rename3, writeFile as writeFile3 } from "fs/promises";
+import { mkdir as mkdir5, readFile as readFile5, rename as rename4, writeFile as writeFile4 } from "fs/promises";
 import { homedir as homedir2 } from "os";
-import { dirname as dirname3, join as join5 } from "path";
-function hasCode5(err, code) {
+import { dirname as dirname4, join as join6 } from "path";
+function hasCode6(err, code) {
   return "code" in err && err.code === code;
 }
 function parseState(text) {
@@ -1283,28 +1463,28 @@ function parseState(text) {
   return state;
 }
 function createStateStore(opts = {}) {
-  const filePath = opts.filePath ?? join5(homedir2(), ".config/opencode/telegram-remote/state.json");
+  const filePath = opts.filePath ?? join6(homedir2(), ".config/opencode/telegram-remote/state.json");
   return {
     async read() {
       try {
-        return parseState(await readFile4(filePath, "utf8"));
+        return parseState(await readFile5(filePath, "utf8"));
       } catch (err) {
-        if (err instanceof Error && hasCode5(err, "ENOENT")) return {};
+        if (err instanceof Error && hasCode6(err, "ENOENT")) return {};
         throw err;
       }
     },
     async write(patch) {
       const existing = await this.read();
       const next = { ...existing, ...patch, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-      await mkdir4(dirname3(filePath), { recursive: true });
+      await mkdir5(dirname4(filePath), { recursive: true });
       const tmpPath = `${filePath}.tmp.${process.pid}`;
-      await writeFile3(tmpPath, JSON.stringify(next, null, 2), "utf8");
+      await writeFile4(tmpPath, JSON.stringify(next, null, 2), "utf8");
       try {
-        await rename3(tmpPath, filePath);
+        await rename4(tmpPath, filePath);
       } catch (err) {
-        if (!(err instanceof Error) || !hasCode5(err, "ENOENT")) throw err;
-        await writeFile3(tmpPath, JSON.stringify(next, null, 2), "utf8");
-        await rename3(tmpPath, filePath);
+        if (!(err instanceof Error) || !hasCode6(err, "ENOENT")) throw err;
+        await writeFile4(tmpPath, JSON.stringify(next, null, 2), "utf8");
+        await rename4(tmpPath, filePath);
       }
       return next;
     }
@@ -1312,6 +1492,10 @@ function createStateStore(opts = {}) {
 }
 
 // src/services/session-title-service.ts
+function agentFromSession(info) {
+  const candidate = info;
+  return typeof candidate.agent === "string" ? candidate.agent : void 0;
+}
 var SessionTitleService = class {
   sessions = /* @__PURE__ */ new Map();
   setSessionInfo(info) {
@@ -1319,6 +1503,7 @@ var SessionTitleService = class {
     this.sessions.set(info.id, {
       title: info.title || null,
       parentID: info.parentID ?? null,
+      agent: agentFromSession(info) ?? existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false
     });
@@ -1328,6 +1513,17 @@ var SessionTitleService = class {
     this.sessions.set(sessionId, {
       title,
       parentID: existing?.parentID,
+      agent: existing?.agent,
+      status: existing?.status,
+      idleNotificationPending: existing?.idleNotificationPending ?? false
+    });
+  }
+  setSessionAgent(sessionId, agent) {
+    const existing = this.sessions.get(sessionId);
+    this.sessions.set(sessionId, {
+      title: existing?.title ?? null,
+      parentID: existing?.parentID,
+      agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false
     });
@@ -1337,6 +1533,7 @@ var SessionTitleService = class {
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
       parentID: existing?.parentID,
+      agent: existing?.agent,
       status,
       idleNotificationPending: status === "idle" ? existing?.idleNotificationPending ?? false : false
     });
@@ -1346,6 +1543,9 @@ var SessionTitleService = class {
   }
   getParentID(sessionId) {
     return this.sessions.get(sessionId)?.parentID;
+  }
+  getSessionAgent(sessionId) {
+    return this.sessions.get(sessionId)?.agent;
   }
   getSessionStatus(sessionId) {
     return this.sessions.get(sessionId)?.status;
@@ -1363,6 +1563,7 @@ var SessionTitleService = class {
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
       parentID: existing?.parentID,
+      agent: existing?.agent,
       status: existing?.status ?? "idle",
       idleNotificationPending: true
     });
@@ -1381,7 +1582,7 @@ var SessionTitleService = class {
 };
 
 // src/telegram-remote.ts
-var pluginDir = dirname4(fileURLToPath(import.meta.url));
+var pluginDir = dirname5(fileURLToPath(import.meta.url));
 async function postToServer(serverUrl, path, body) {
   const url = new URL(path, serverUrl);
   const response = await fetch(url, {
@@ -1391,7 +1592,22 @@ async function postToServer(serverUrl, path, body) {
   });
   if (response.ok) return;
   const text = await response.text();
-  throw new Error(`OpenCode request failed: ${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`);
+  throw new Error(
+    `OpenCode request failed: ${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`
+  );
+}
+function getSessionAgentFromMessage(event) {
+  const info = event.properties.info;
+  if (info.role !== "user") return void 0;
+  return { sessionID: info.sessionID, agent: info.agent };
+}
+function getSessionAgentFromNextStep(event) {
+  if (event.type !== "session.next.step.started") return void 0;
+  const props = event.properties;
+  if (!props) return void 0;
+  if (typeof props.sessionID !== "string") return void 0;
+  if (typeof props.agent !== "string") return void 0;
+  return { sessionID: props.sessionID, agent: props.agent };
 }
 var TelegramRemote = async (input) => {
   const logger = createLogger({ namespace: "telegram" });
@@ -1401,11 +1617,12 @@ var TelegramRemote = async (input) => {
     const config = loadConfig({ logger, env: process.env });
     const stateStore = createStateStore();
     const initialState = await stateStore.read();
-    const tokenHash = createHash4("sha256").update(config.botToken).digest("hex").slice(0, 16);
-    const lockPath = join6(tmpdir4(), `opencoder-telegram-${tokenHash}.lock`);
-    const claimsDir = join6(tmpdir4(), `opencoder-telegram-claims-${tokenHash}`);
+    const tokenHash = createHash5("sha256").update(config.botToken).digest("hex").slice(0, 16);
+    const lockPath = join7(tmpdir5(), `opencoder-telegram-${tokenHash}.lock`);
+    const claimsDir = join7(tmpdir5(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
+    const pendingStartWorks = createPendingStartWorkStore({ tokenHash });
     const lockResult = await acquireLock({ lockPath });
     const isLeader = lockResult.acquired;
     logger.info(
@@ -1459,6 +1676,19 @@ var TelegramRemote = async (input) => {
         throwOnError: true
       });
     };
+    const runSessionCommand = async (sessionID, command, serverUrl = input.serverUrl.href) => {
+      const path = `/session/${encodeURIComponent(sessionID)}/command`;
+      const body = { command, arguments: "" };
+      if (serverUrl !== input.serverUrl.href) {
+        await postToServer(serverUrl, path, body);
+        return;
+      }
+      await input.client.session.command({
+        path: { id: sessionID },
+        body,
+        throwOnError: true
+      });
+    };
     const bot = createTelegramBot({
       config,
       stateStore,
@@ -1503,12 +1733,15 @@ var TelegramRemote = async (input) => {
       tokenHash,
       pendingQuestions,
       pendingPermissions,
+      pendingStartWorks,
       replyToQuestion,
-      replyToPermission
+      replyToPermission,
+      runSessionCommand
     };
     if (isLeader) {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
+      bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
     }
     return {
       event: async ({ event }) => {
@@ -1523,9 +1756,20 @@ var TelegramRemote = async (input) => {
             return handleSessionCreated(event, ctx);
           case "session.updated":
             return handleSessionUpdated(event, ctx);
+          case "message.updated": {
+            const messageAgent = getSessionAgentFromMessage(event);
+            if (messageAgent)
+              ctx.sessionTitleService.setSessionAgent(messageAgent.sessionID, messageAgent.agent);
+            return;
+          }
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
           default: {
+            const stepAgent = getSessionAgentFromNextStep(extEvent);
+            if (stepAgent) {
+              ctx.sessionTitleService.setSessionAgent(stepAgent.sessionID, stepAgent.agent);
+              return;
+            }
             if (isEventPermissionAsked(extEvent)) {
               if (!isLeader) return;
               return handlePermissionAsked(extEvent, ctx);

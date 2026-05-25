@@ -13,6 +13,7 @@ import {
   type PermissionReply,
 } from "../lib/pending-permissions.js";
 import { createPendingQuestionStore, type QuestionAnswer } from "../lib/pending-questions.js";
+import { createPendingStartWorkStore } from "../lib/pending-start-work.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import {
   createPermissionDispatcher,
@@ -67,6 +68,7 @@ function createBot() {
     },
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
+    setStartWorkDispatcher() {},
   };
   return { bot, sentMessages, editedMessages };
 }
@@ -101,10 +103,15 @@ function createContext(
       tokenHash: "tok",
       baseDir: join(dir, "permissions"),
     }),
+    pendingStartWorks: createPendingStartWorkStore({
+      tokenHash: "tok",
+      baseDir: join(dir, "start-work"),
+    }),
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
     async replyToPermission(requestID, sessionID, reply, endpoint, serverUrl) {
       replies.push({ requestID, sessionID, reply, endpoint, serverUrl });
     },
+    async runSessionCommand() {},
   };
 }
 

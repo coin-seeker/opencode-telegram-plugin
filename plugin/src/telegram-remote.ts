@@ -3,12 +3,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
-import type { Event } from "@opencode-ai/sdk";
+import type { Event, EventMessageUpdated } from "@opencode-ai/sdk";
 import { createTelegramBot } from "./bot.js";
 import { loadConfig } from "./config.js";
 import {
   createPermissionDispatcher,
   createQuestionDispatcher,
+  createStartWorkDispatcher,
   handlePermissionAsked,
   handlePermissionUpdated,
   handleQuestionAsked,
@@ -29,6 +30,7 @@ import { acquireLock } from "./lib/lock.js";
 import { createLogger } from "./lib/logger.js";
 import { createPendingPermissionStore, type PermissionReply } from "./lib/pending-permissions.js";
 import { createPendingQuestionStore, type QuestionAnswer } from "./lib/pending-questions.js";
+import { createPendingStartWorkStore } from "./lib/pending-start-work.js";
 import { createStateStore } from "./lib/state-store.js";
 import { SessionTitleService } from "./services/session-title-service.js";
 
@@ -37,7 +39,8 @@ const pluginDir = dirname(fileURLToPath(import.meta.url));
 type OpencodePostBody =
   | { answers: QuestionAnswer[] }
   | { reply: PermissionReply }
-  | { response: PermissionReply };
+  | { response: PermissionReply }
+  | { command: string; arguments: string };
 
 interface InternalOpencodeHttpClient {
   post(options: {
@@ -52,7 +55,11 @@ type OpencodeClientWithInternalHttp = PluginInput["client"] & {
   _client: InternalOpencodeHttpClient;
 };
 
-async function postToServer(serverUrl: string, path: string, body: OpencodePostBody): Promise<void> {
+async function postToServer(
+  serverUrl: string,
+  path: string,
+  body: OpencodePostBody,
+): Promise<void> {
   const url = new URL(path, serverUrl);
   const response = await fetch(url, {
     method: "POST",
@@ -62,7 +69,29 @@ async function postToServer(serverUrl: string, path: string, body: OpencodePostB
   if (response.ok) return;
 
   const text = await response.text();
-  throw new Error(`OpenCode request failed: ${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`);
+  throw new Error(
+    `OpenCode request failed: ${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`,
+  );
+}
+
+function getSessionAgentFromMessage(
+  event: EventMessageUpdated,
+): { sessionID: string; agent: string } | undefined {
+  const info = event.properties.info;
+  if (info.role !== "user") return undefined;
+  return { sessionID: info.sessionID, agent: info.agent };
+}
+
+function getSessionAgentFromNextStep(event: {
+  type: string;
+  properties?: Record<string, unknown>;
+}): { sessionID: string; agent: string } | undefined {
+  if (event.type !== "session.next.step.started") return undefined;
+  const props = event.properties;
+  if (!props) return undefined;
+  if (typeof props.sessionID !== "string") return undefined;
+  if (typeof props.agent !== "string") return undefined;
+  return { sessionID: props.sessionID, agent: props.agent };
 }
 
 export const TelegramRemote: Plugin = async (input: PluginInput) => {
@@ -79,6 +108,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const claimsDir = join(tmpdir(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
+    const pendingStartWorks = createPendingStartWorkStore({ tokenHash });
     const lockResult = await acquireLock({ lockPath });
     const isLeader = lockResult.acquired;
 
@@ -144,6 +174,23 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
         throwOnError: true,
       });
     };
+    const runSessionCommand = async (
+      sessionID: string,
+      command: string,
+      serverUrl = input.serverUrl.href,
+    ): Promise<void> => {
+      const path = `/session/${encodeURIComponent(sessionID)}/command`;
+      const body = { command, arguments: "" };
+      if (serverUrl !== input.serverUrl.href) {
+        await postToServer(serverUrl, path, body);
+        return;
+      }
+      await input.client.session.command({
+        path: { id: sessionID },
+        body,
+        throwOnError: true,
+      });
+    };
     const bot = createTelegramBot({
       config,
       stateStore,
@@ -193,13 +240,16 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       tokenHash,
       pendingQuestions,
       pendingPermissions,
+      pendingStartWorks,
       replyToQuestion,
       replyToPermission,
+      runSessionCommand,
     };
 
     if (isLeader) {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
+      bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
     }
 
     return {
@@ -215,9 +265,20 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
             return handleSessionCreated(event, ctx);
           case "session.updated":
             return handleSessionUpdated(event, ctx);
+          case "message.updated": {
+            const messageAgent = getSessionAgentFromMessage(event);
+            if (messageAgent)
+              ctx.sessionTitleService.setSessionAgent(messageAgent.sessionID, messageAgent.agent);
+            return;
+          }
           case "permission.updated":
             return handlePermissionUpdated(event, ctx);
           default: {
+            const stepAgent = getSessionAgentFromNextStep(extEvent);
+            if (stepAgent) {
+              ctx.sessionTitleService.setSessionAgent(stepAgent.sessionID, stepAgent.agent);
+              return;
+            }
             if (isEventPermissionAsked(extEvent)) {
               if (!isLeader) return;
               return handlePermissionAsked(extEvent, ctx);

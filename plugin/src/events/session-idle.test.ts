@@ -8,6 +8,10 @@ import type { EventSessionIdle, Session } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
 import { createPendingPermissionStore, type PermissionReply } from "../lib/pending-permissions.js";
 import { createPendingQuestionStore, type QuestionAnswer } from "../lib/pending-questions.js";
+import {
+  createPendingStartWorkStore,
+  createStartWorkShortHash,
+} from "../lib/pending-start-work.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import { handleSessionIdle } from "./session-idle.js";
 import type { EventHandlerContext } from "./types.js";
@@ -65,6 +69,7 @@ function createBot() {
     },
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
+    setStartWorkDispatcher() {},
   };
   return { bot, sentMessages, sentOptions };
 }
@@ -104,9 +109,14 @@ function createContext(
       tokenHash: "tok",
       baseDir: join(dir, "permissions"),
     }),
+    pendingStartWorks: createPendingStartWorkStore({
+      tokenHash: "tok",
+      baseDir: join(dir, "start-work"),
+    }),
     idleRecheckDelayMs: 20,
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
     async replyToPermission(_requestID: string, _sessionID: string, _reply: PermissionReply) {},
+    async runSessionCommand() {},
   };
 }
 
@@ -153,9 +163,15 @@ describe("session idle notifications", () => {
     service.setSessionInfo(createSession("parent-fetch", "Parent"));
     const { bot, sentMessages } = createBot();
     const child = createSession("child-fetch", "Child", "parent-fetch");
-    const ctx = createContext(bot, join(dir, "first-seen-child"), service, {}, {
-      "child-fetch": child,
-    });
+    const ctx = createContext(
+      bot,
+      join(dir, "first-seen-child"),
+      service,
+      {},
+      {
+        "child-fetch": child,
+      },
+    );
 
     await handleSessionIdle(idleEvent("child-fetch"), ctx);
 
@@ -191,5 +207,32 @@ describe("session idle notifications", () => {
     await parentIdle;
 
     assert.deepEqual(sentMessages, []);
+  });
+
+  test("shows start-work button only when a root plan session finishes", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("plan-session", "Remove earnings estimate"));
+    service.setSessionAgent("plan-session", "plan");
+    const { bot, sentMessages, sentOptions } = createBot();
+    const ctx = createContext(bot, join(dir, "plan-complete"), service);
+
+    await handleSessionIdle(idleEvent("plan-session"), ctx);
+
+    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nRemove earnings estimate"]);
+    assert.match(JSON.stringify(sentOptions[0]), /Run \/start-work/);
+    assert.ok(await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-session")));
+  });
+
+  test("does not show start-work button for non-plan root completion", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("build-session", "Build task"));
+    service.setSessionAgent("build-session", "build");
+    const { bot, sentMessages, sentOptions } = createBot();
+    const ctx = createContext(bot, join(dir, "non-plan-complete"), service);
+
+    await handleSessionIdle(idleEvent("build-session"), ctx);
+
+    assert.deepEqual(sentMessages, ["Agent has finished: Build task"]);
+    assert.equal(sentOptions[0], undefined);
   });
 });

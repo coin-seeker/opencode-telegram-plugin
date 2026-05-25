@@ -27,6 +27,10 @@ export interface TelegramPermissionDispatcher {
   handleCallbackQuery(data: string, messageId: number): Promise<void>;
 }
 
+export interface TelegramStartWorkDispatcher {
+  handleCallbackQuery(data: string, messageId: number): Promise<void>;
+}
+
 export interface TelegramBotManager {
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -43,6 +47,7 @@ export interface TelegramBotManager {
   getActiveChatId(): Promise<number | undefined>;
   setQuestionDispatcher(dispatcher: TelegramQuestionDispatcher): void;
   setPermissionDispatcher(dispatcher: TelegramPermissionDispatcher): void;
+  setStartWorkDispatcher(dispatcher: TelegramStartWorkDispatcher): void;
 }
 
 export interface CreateBotOptions {
@@ -59,6 +64,7 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
   let activeChatId: number | undefined = opts.initialChatId;
   let questionDispatcher: TelegramQuestionDispatcher | undefined;
   let permissionDispatcher: TelegramPermissionDispatcher | undefined;
+  let startWorkDispatcher: TelegramStartWorkDispatcher | undefined;
 
   if (polling) {
     bot.use(async (ctx, next) => {
@@ -115,6 +121,14 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       const messageId = ctx.callbackQuery.message?.message_id;
       if (!permissionDispatcher || messageId === undefined) return;
       await permissionDispatcher.handleCallbackQuery(data, messageId);
+    });
+
+    bot.callbackQuery(/^sw:([^:]+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const data = ctx.callbackQuery.data;
+      const messageId = ctx.callbackQuery.message?.message_id;
+      if (!startWorkDispatcher || messageId === undefined) return;
+      await startWorkDispatcher.handleCallbackQuery(data, messageId);
     });
 
     bot.on("message:text", async (ctx) => {
@@ -212,6 +226,9 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
     },
     setPermissionDispatcher(dispatcher) {
       permissionDispatcher = dispatcher;
+    },
+    setStartWorkDispatcher(dispatcher) {
+      startWorkDispatcher = dispatcher;
     },
   };
 }

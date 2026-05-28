@@ -1405,7 +1405,7 @@ function createSessionsDispatcher(deps) {
       return;
     }
     if (sessions.length === 0) {
-      await bot.sendMessage("\uD65C\uC131 \uC138\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", { parse_mode: "HTML" });
+      await bot.sendMessage("\uC138\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", { parse_mode: "HTML" });
       return;
     }
     const capturedAt = Date.now();
@@ -1425,14 +1425,14 @@ function createSessionsDispatcher(deps) {
     const lines = entries.map((entry) => {
       const agent = entry.agent ? escapeHtml(entry.agent) : "?";
       const title = truncateForTelegram(escapeHtml(entry.title), MAX_TITLE_CHARS);
-      const status = entry.status ?? "unknown";
-      return `${entry.index}. [${agent}] ${title} \u2014 ${status}`;
+      const status = entry.status ? ` \u2014 ${escapeHtml(entry.status)}` : "";
+      return `${entry.index}. [${agent}] ${title}${status}`;
     });
     let body = lines.join("\n");
     if (body.length > MAX_BODY_CHARS) {
       body = body.slice(0, MAX_BODY_CHARS) + "\u2026";
     }
-    const text = `<b>\uD65C\uC131 \uC138\uC158 (top ${entries.length})</b>
+    const text = `<b>\uCD5C\uADFC \uC138\uC158 (top ${entries.length})</b>
 ${body}
 
 <i>/status N \uB610\uB294 /start_work N \uC73C\uB85C \uC870\uC791</i>`;

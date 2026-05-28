@@ -138,7 +138,7 @@ describe("sessions-command dispatcher", () => {
     await dispatcher({ chatId: 42, userId: 1, bot: makeBot(sendCalls) });
 
     assert.equal(sendCalls.length, 1);
-    assert.equal(sendCalls[0]?.text, "활성 세션이 없습니다.");
+    assert.equal(sendCalls[0]?.text, "세션이 없습니다.");
     assert.equal(saveCalls.length, 0);
   });
 
@@ -205,7 +205,7 @@ describe("sessions-command dispatcher", () => {
     const text = sendCalls[0]?.text ?? "";
     assert.ok(text.includes("20."), "should include '20.'");
     assert.ok(!text.includes("21."), "should NOT include '21.'");
-    assert.ok(text.includes("top 20"));
+    assert.ok(text.includes("최근 세션 (top 20)"));
   });
 
   test("child sessions are excluded from the rendered snapshot", async () => {
@@ -320,7 +320,7 @@ describe("sessions-command dispatcher", () => {
     assert.equal(Object.prototype.hasOwnProperty.call(data, "message"), false);
   });
 
-  test("missing agent renders as '?' and missing status renders as 'unknown'", async () => {
+  test("missing agent renders as '?' and missing status omits suffix", async () => {
     const sendCalls: SendCall[] = [];
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
@@ -337,7 +337,8 @@ describe("sessions-command dispatcher", () => {
 
     const text = sendCalls[0]?.text ?? "";
     assert.ok(text.includes("[?]"), "missing agent should be '?' ");
-    assert.ok(text.includes("unknown"), "missing status should be 'unknown'");
+    assert.ok(!text.includes("unknown"), "missing status should not render 'unknown'");
+    assert.ok(!text.includes("Title 1 —"), "missing status should not render a dangling separator");
   });
 
   test("session list failure: sends load failure and does not save snapshot", async () => {

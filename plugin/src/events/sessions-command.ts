@@ -86,7 +86,7 @@ export function createSessionsDispatcher(
     }
 
     if (sessions.length === 0) {
-      await bot.sendMessage("활성 세션이 없습니다.", { parse_mode: "HTML" });
+      await bot.sendMessage("세션이 없습니다.", { parse_mode: "HTML" });
       return;
     }
 
@@ -109,8 +109,8 @@ export function createSessionsDispatcher(
     const lines = entries.map((entry) => {
       const agent = entry.agent ? escapeHtml(entry.agent) : "?";
       const title = truncateForTelegram(escapeHtml(entry.title), MAX_TITLE_CHARS);
-      const status = entry.status ?? "unknown";
-      return `${entry.index}. [${agent}] ${title} — ${status}`;
+      const status = entry.status ? ` — ${escapeHtml(entry.status)}` : "";
+      return `${entry.index}. [${agent}] ${title}${status}`;
     });
 
     let body = lines.join("\n");
@@ -118,7 +118,7 @@ export function createSessionsDispatcher(
       body = body.slice(0, MAX_BODY_CHARS) + "…";
     }
 
-    const text = `<b>활성 세션 (top ${entries.length})</b>\n${body}\n\n<i>/status N 또는 /start_work N 으로 조작</i>`;
+    const text = `<b>최근 세션 (top ${entries.length})</b>\n${body}\n\n<i>/status N 또는 /start_work N 으로 조작</i>`;
     await bot.sendMessage(text, { parse_mode: "HTML" });
     deps.logger.info("sessions listed", { chatId, count: entries.length });
   };

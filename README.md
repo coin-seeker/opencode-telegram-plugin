@@ -190,7 +190,7 @@ When a condition fails, a specific Korean reason is returned.
 
 #### Cross-Process Visibility
 
-`/sessions` is handled by the **leader process** and fetches the current session list on demand. If OpenCode is running in multiple windows, it shows sessions visible to the leader's OpenCode server at the time the command is run.
+Every OpenCode process writes root-session metadata to a shared local registry under `~/.config/opencode/telegram-remote/session-registry/`. `/sessions` is handled by the **leader process**, but it merges the leader's live session list with that shared registry so recent root sessions from other OpenCode windows are still visible.
 
 > **Note**: Telegram bot commands use underscores: `/start_work` (Telegram) maps internally to opencode's `/start-work` slash command.
 

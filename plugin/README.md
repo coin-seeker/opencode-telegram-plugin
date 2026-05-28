@@ -59,7 +59,7 @@ Keep this file private. Never commit or share your Telegram bot token.
 - Permission approve/reject buttons from Telegram.
 - Multi-session-safe Telegram polling through a file-lock leader model.
 - Log file output instead of stdout terminal spam.
-- Remote session listing via `/sessions`, `/status N`, `/start_work N`, `/help` slash commands.
+- Cross-process remote session listing via `/sessions`, `/status N`, `/start_work N`, `/help` slash commands.
 - Safety-gated remote `/start-work` execution: verifies agent=plan, idle status, incomplete plan, and no active boulder before dispatching.
 
 ## Logs

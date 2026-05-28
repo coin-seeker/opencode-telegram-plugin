@@ -14,6 +14,7 @@ import {
 } from "../lib/pending-permissions.js";
 import { createPendingQuestionStore, type QuestionAnswer } from "../lib/pending-questions.js";
 import { createPendingStartWorkStore } from "../lib/pending-start-work.js";
+import type { SessionRegistryStore } from "../lib/session-registry.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import {
   createPermissionDispatcher,
@@ -79,6 +80,16 @@ function createBot() {
   return { bot, sentMessages, editedMessages };
 }
 
+function createSessionRegistry(): SessionRegistryStore {
+  return {
+    async upsertSession() {},
+    async updateSession() {},
+    async listSessions() {
+      return [];
+    },
+  };
+}
+
 function createContext(
   bot: TelegramBotManager,
   dir: string,
@@ -113,6 +124,7 @@ function createContext(
       tokenHash: "tok",
       baseDir: join(dir, "start-work"),
     }),
+    sessionRegistry: createSessionRegistry(),
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
     async replyToPermission(requestID, sessionID, reply, endpoint, serverUrl) {
       replies.push({ requestID, sessionID, reply, endpoint, serverUrl });

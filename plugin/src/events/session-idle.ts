@@ -1,6 +1,7 @@
 import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
 import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import { claimOnce } from "../lib/claim.js";
+import { registryEntryFromSession } from "../lib/session-registry.js";
 import {
   createPendingStartWork,
   planCompleteMessage,
@@ -26,6 +27,13 @@ async function resolveParentID(
     const result = await ctx.client.session.get({ path: { id: sessionId } });
     if (result.data) {
       ctx.sessionTitleService.setSessionInfo(result.data);
+      await ctx.sessionRegistry.upsertSession(
+        registryEntryFromSession(
+          result.data,
+          ctx.serverUrl.href,
+          ctx.sessionTitleService.getSessionStatus(sessionId),
+        ),
+      );
       return ctx.sessionTitleService.getParentID(sessionId);
     }
     ctx.logger.warn("session parentID cache miss fetch returned no data", { sessionId });
@@ -48,6 +56,9 @@ async function hydrateDescendants(
     const result = await ctx.client.session.children({ path: { id: sessionId } });
     for (const child of result.data ?? []) {
       ctx.sessionTitleService.setSessionInfo(child);
+      await ctx.sessionRegistry.upsertSession(
+        registryEntryFromSession(child, ctx.serverUrl.href, ctx.sessionTitleService.getSessionStatus(child.id)),
+      );
       await hydrateDescendants(child.id, ctx, seen);
     }
   } catch (err) {
@@ -136,6 +147,7 @@ export async function handleSessionIdle(
   const sessionId = event.properties.sessionID;
   const parentID = await resolveParentID(sessionId, ctx);
   ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
+  await ctx.sessionRegistry.updateSession(sessionId, { status: "idle", updatedAt: Date.now() });
   if (typeof parentID === "string") {
     ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
     await flushDeferredParentIfReady(parentID, ctx);
@@ -172,6 +184,7 @@ export async function handleSessionStatus(
   const sessionId = event.properties.sessionID;
   const statusType = event.properties.status.type;
   ctx.sessionTitleService.setSessionStatus(sessionId, statusType);
+  await ctx.sessionRegistry.updateSession(sessionId, { status: statusType, updatedAt: Date.now() });
   if (statusType === "idle") {
     await handleSessionIdle(event, ctx);
   }

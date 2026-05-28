@@ -34,9 +34,11 @@ import type { EventHandlerContext } from "./events/types.js";
 import { loadPluginEnv } from "./lib/env-loader.js";
 import { acquireLock } from "./lib/lock.js";
 import { createLogger } from "./lib/logger.js";
+import { normalizeOpenCodeServerUrl } from "./lib/opencode-http.js";
 import { createPendingPermissionStore, type PermissionReply } from "./lib/pending-permissions.js";
 import { createPendingQuestionStore, type QuestionAnswer } from "./lib/pending-questions.js";
 import { createPendingStartWorkStore } from "./lib/pending-start-work.js";
+import { createSessionRegistryStore } from "./lib/session-registry.js";
 import { createSnapshotStore } from "./lib/session-snapshot.js";
 import { createStateStore } from "./lib/state-store.js";
 import { SessionTitleService } from "./services/session-title-service.js";
@@ -67,18 +69,18 @@ async function postToServer(
   path: string,
   body: OpencodePostBody,
 ): Promise<void> {
-  const url = new URL(path, serverUrl);
+  const safeServerUrl = normalizeOpenCodeServerUrl(serverUrl);
+  if (!safeServerUrl) throw new Error("Invalid OpenCode server URL");
+  const url = new URL(path, safeServerUrl);
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    redirect: "error",
   });
   if (response.ok) return;
 
-  const text = await response.text();
-  throw new Error(
-    `OpenCode request failed: ${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`,
-  );
+  throw new Error(`OpenCode request failed: ${response.status} ${response.statusText}`);
 }
 
 function getSessionAgentFromMessage(
@@ -113,6 +115,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const tokenHash = createHash("sha256").update(config.botToken).digest("hex").slice(0, 16);
     const configDir = join(homedir(), ".config/opencode/telegram-remote");
     const snapshotStore = createSnapshotStore({ configDir, tokenHash, logger });
+    const sessionRegistry = createSessionRegistryStore({ configDir, tokenHash, logger });
     const lockPath = join(tmpdir(), `opencoder-telegram-${tokenHash}.lock`);
     const claimsDir = join(tmpdir(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
@@ -250,6 +253,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       pendingQuestions,
       pendingPermissions,
       pendingStartWorks,
+      sessionRegistry,
       replyToQuestion,
       replyToPermission,
       runSessionCommand,
@@ -262,15 +266,23 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       bot.setSessionsDispatcher(createSessionsDispatcher({
         client: input.client,
         sessionTitleService,
+        sessionRegistry,
         snapshotStore,
         serverUrl: input.serverUrl.href,
         logger,
       }));
-      bot.setStatusDispatcher(createStatusDispatcher({ snapshotStore, sessionTitleService, client: input.client, logger }));
+      bot.setStatusDispatcher(createStatusDispatcher({
+        snapshotStore,
+        sessionTitleService,
+        client: input.client,
+        logger,
+        serverUrl: input.serverUrl.href,
+      }));
       bot.setStartWorkCommandDispatcher(createStartWorkCommandDispatcher({
         snapshotStore,
         sessionTitleService,
         client: input.client,
+        serverUrl: input.serverUrl.href,
         runSessionCommand,
         logger,
       }));
@@ -297,6 +309,11 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
             if (messageAgent) {
               ctx.sessionTitleService.setSessionAgent(messageAgent.sessionID, messageAgent.agent);
               ctx.sessionTitleService.setServerUrl(messageAgent.sessionID, input.serverUrl.href);
+              await ctx.sessionRegistry.updateSession(messageAgent.sessionID, {
+                agent: messageAgent.agent,
+                serverUrl: input.serverUrl.href,
+                updatedAt: Date.now(),
+              });
             }
             return;
           }
@@ -306,6 +323,12 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
             const stepAgent = getSessionAgentFromNextStep(extEvent);
             if (stepAgent) {
               ctx.sessionTitleService.setSessionAgent(stepAgent.sessionID, stepAgent.agent);
+              ctx.sessionTitleService.setServerUrl(stepAgent.sessionID, input.serverUrl.href);
+              await ctx.sessionRegistry.updateSession(stepAgent.sessionID, {
+                agent: stepAgent.agent,
+                serverUrl: input.serverUrl.href,
+                updatedAt: Date.now(),
+              });
               return;
             }
             if (isEventPermissionAsked(extEvent)) {

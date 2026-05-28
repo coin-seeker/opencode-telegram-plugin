@@ -9,6 +9,7 @@ import type { TelegramBotManager } from "../bot.js";
 import { createPendingPermissionStore } from "../lib/pending-permissions.js";
 import { createPendingQuestionStore, createQuestionShortHash } from "../lib/pending-questions.js";
 import { createPendingStartWorkStore } from "../lib/pending-start-work.js";
+import type { SessionRegistryStore } from "../lib/session-registry.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import { createQuestionDispatcher, handleQuestionAsked } from "./question-asked.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
@@ -67,6 +68,16 @@ function createBot() {
   return { bot, sentMessages, editedMessages };
 }
 
+function createSessionRegistry(): SessionRegistryStore {
+  return {
+    async upsertSession() {},
+    async updateSession() {},
+    async listSessions() {
+      return [];
+    },
+  };
+}
+
 function createContext(
   bot: TelegramBotManager,
   requestID: string,
@@ -96,6 +107,7 @@ function createContext(
       tokenHash: "tok",
       baseDir: join(dir, `start-work-${requestID}`),
     }),
+    sessionRegistry: createSessionRegistry(),
     async replyToQuestion(answeredRequestID, answers, serverUrl) {
       replies.push({ requestID: answeredRequestID, answers, serverUrl });
     },

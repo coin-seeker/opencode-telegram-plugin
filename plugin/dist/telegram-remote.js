@@ -6,7 +6,7 @@
 // src/telegram-remote.ts
 import { createHash as createHash5 } from "crypto";
 import { homedir as homedir3, tmpdir as tmpdir5 } from "os";
-import { dirname as dirname6, join as join9 } from "path";
+import { dirname as dirname6, join as join10 } from "path";
 import { fileURLToPath } from "url";
 
 // src/bot.ts
@@ -1017,9 +1017,313 @@ async function handleQuestionReplied(event, ctx) {
   }
 }
 
+// src/lib/session-registry.ts
+import { chmod, mkdir as mkdir4, readFile as readFile3, readdir as readdir4, rename as rename3, unlink as unlink4, writeFile as writeFile3 } from "fs/promises";
+import { join as join4 } from "path";
+
+// src/lib/opencode-http.ts
+var ALLOWED_HOSTNAMES = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
+function asRecord(value) {
+  if (!value || typeof value !== "object") return void 0;
+  return value;
+}
+function isStatusType(value) {
+  return value === "idle" || value === "busy" || value === "retry";
+}
+function normalizeOpenCodeServerUrl(value) {
+  if (!value) return void 0;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return void 0;
+    if (url.username || url.password) return void 0;
+    if (url.search || url.hash) return void 0;
+    if (url.pathname !== "/" && url.pathname !== "") return void 0;
+    if (!ALLOWED_HOSTNAMES.has(url.hostname)) return void 0;
+    return url.href;
+  } catch {
+    return void 0;
+  }
+}
+function requireOpenCodeServerUrl(serverUrl) {
+  const normalized = normalizeOpenCodeServerUrl(serverUrl);
+  if (!normalized) throw new Error("Invalid OpenCode server URL");
+  return normalized;
+}
+function endpoint(serverUrl, path) {
+  return new URL(path, requireOpenCodeServerUrl(serverUrl));
+}
+function isDifferentServerUrl(sourceServerUrl, currentServerUrl) {
+  const source = normalizeOpenCodeServerUrl(sourceServerUrl);
+  const current = normalizeOpenCodeServerUrl(currentServerUrl);
+  if (!source || !current) return false;
+  return source !== current;
+}
+function normalizeSession(value) {
+  const record = asRecord(value);
+  if (!record || typeof record.directory !== "string") return void 0;
+  const session = { directory: record.directory };
+  if (typeof record.id === "string") session.id = record.id;
+  if (typeof record.title === "string") session.title = record.title;
+  if (typeof record.parentID === "string" || record.parentID === null) {
+    session.parentID = record.parentID;
+  }
+  if (typeof record.agent === "string") session.agent = record.agent;
+  return session;
+}
+function normalizeSessionList(value) {
+  if (!Array.isArray(value)) return [];
+  const sessions = [];
+  for (const raw of value) {
+    const record = asRecord(raw);
+    const time = asRecord(record?.time);
+    if (!record) continue;
+    if (typeof record.id !== "string") continue;
+    if (typeof record.title !== "string") continue;
+    if (!time || typeof time.updated !== "number") continue;
+    const session = {
+      id: record.id,
+      title: record.title,
+      time: { updated: time.updated }
+    };
+    if (typeof record.parentID === "string" || record.parentID === null) {
+      session.parentID = record.parentID;
+    }
+    if (typeof record.agent === "string") session.agent = record.agent;
+    sessions.push(session);
+  }
+  return sessions;
+}
+function normalizeStatusMap(value) {
+  const record = asRecord(value);
+  if (!record) return {};
+  const out = {};
+  for (const [sessionId, rawStatus] of Object.entries(record)) {
+    const status = asRecord(rawStatus);
+    if (status && isStatusType(status.type)) out[sessionId] = { type: status.type };
+  }
+  return out;
+}
+function normalizeMessages(value) {
+  if (!Array.isArray(value)) return [];
+  const messages = [];
+  for (const rawMessage of value) {
+    const message = asRecord(rawMessage);
+    const info = asRecord(message?.info);
+    if (!message || !info || typeof info.role !== "string" || !Array.isArray(message.parts)) continue;
+    const parts = [];
+    for (const rawPart of message.parts) {
+      const part = asRecord(rawPart);
+      if (!part || typeof part.type !== "string") continue;
+      const normalized = { type: part.type };
+      if (typeof part.text === "string") normalized.text = part.text;
+      parts.push(normalized);
+    }
+    messages.push({ info: { role: info.role }, parts });
+  }
+  return messages;
+}
+async function fetchJson(serverUrl, path, fetcher) {
+  const response = await fetcher(endpoint(serverUrl, path), { redirect: "error" });
+  if (response.status === 404) return { data: void 0, response: { status: response.status } };
+  if (!response.ok) {
+    throw new Error(`OpenCode request failed: ${response.status} ${response.statusText}`);
+  }
+  return { data: await response.json(), response: { status: response.status } };
+}
+async function getRemoteSession(serverUrl, sessionId, fetcher = fetch) {
+  const result = await fetchJson(serverUrl, `/session/${encodeURIComponent(sessionId)}`, fetcher);
+  return { data: normalizeSession(result.data), response: result.response };
+}
+async function getRemoteStatusMap(serverUrl, fetcher = fetch) {
+  const result = await fetchJson(serverUrl, "/session/status", fetcher);
+  return normalizeStatusMap(result.data);
+}
+async function getRemoteSessions(serverUrl, fetcher = fetch) {
+  const result = await fetchJson(serverUrl, "/session", fetcher);
+  return normalizeSessionList(result.data);
+}
+async function getRemoteMessages(serverUrl, sessionId, limit, fetcher = fetch) {
+  const url = endpoint(serverUrl, `/session/${encodeURIComponent(sessionId)}/message`);
+  url.searchParams.set("limit", String(limit));
+  const response = await fetcher(url, { redirect: "error" });
+  if (response.status === 404) return [];
+  if (!response.ok) {
+    throw new Error(`OpenCode request failed: ${response.status} ${response.statusText}`);
+  }
+  return normalizeMessages(await response.json());
+}
+
+// src/lib/session-registry.ts
+function filenameForSession(sessionId) {
+  return Buffer.from(sessionId).toString("base64url") + ".json";
+}
+function hasCode4(err, code) {
+  return err instanceof Error && "code" in err && err.code === code;
+}
+function normalizeEntry(entry) {
+  const serverUrl = normalizeOpenCodeServerUrl(entry.serverUrl);
+  if (!serverUrl) throw new Error("invalid registry serverUrl");
+  const out = {
+    sessionId: entry.sessionId,
+    title: entry.title,
+    parentID: entry.parentID,
+    serverUrl,
+    updatedAt: entry.updatedAt
+  };
+  if (entry.agent !== void 0) out.agent = entry.agent;
+  if (entry.status !== void 0) out.status = entry.status;
+  return out;
+}
+function isRegistryFile(value) {
+  if (!value || typeof value !== "object") return false;
+  const file = value;
+  if (file.version !== 1) return false;
+  const entry = file.entry;
+  if (!entry || typeof entry !== "object") return false;
+  const e = entry;
+  if (typeof e.sessionId !== "string") return false;
+  if (typeof e.title !== "string") return false;
+  if (e.parentID !== null && typeof e.parentID !== "string") return false;
+  if (e.agent !== void 0 && typeof e.agent !== "string") return false;
+  if (e.status !== void 0 && e.status !== "idle" && e.status !== "busy" && e.status !== "retry") {
+    return false;
+  }
+  if (typeof e.serverUrl !== "string") return false;
+  if (!normalizeOpenCodeServerUrl(e.serverUrl)) return false;
+  if (typeof e.updatedAt !== "number") return false;
+  return true;
+}
+function agentFromSession(session) {
+  const candidate = session;
+  return typeof candidate.agent === "string" ? candidate.agent : void 0;
+}
+function registryEntryFromSession(session, serverUrl, status) {
+  const entry = {
+    sessionId: session.id,
+    title: session.title,
+    parentID: session.parentID ?? null,
+    serverUrl,
+    updatedAt: session.time.updated
+  };
+  const agent = agentFromSession(session);
+  if (agent !== void 0) entry.agent = agent;
+  if (status !== void 0) entry.status = status;
+  return entry;
+}
+function createSessionRegistryStore(opts) {
+  const registryDir = join4(opts.configDir, "session-registry", opts.tokenHash);
+  function filePath(sessionId) {
+    return join4(registryDir, filenameForSession(sessionId));
+  }
+  async function readEntry(sessionId) {
+    let text;
+    try {
+      text = await readFile3(filePath(sessionId), "utf8");
+    } catch (err) {
+      if (hasCode4(err, "ENOENT")) return null;
+      opts.logger.error("session-registry: failed to read file", {
+        sessionId,
+        error: String(err)
+      });
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      if (!isRegistryFile(parsed)) return null;
+      return normalizeEntry(parsed.entry);
+    } catch (err) {
+      opts.logger.error("session-registry: corrupted JSON", { sessionId, error: String(err) });
+      return null;
+    }
+  }
+  async function writeEntry(entry) {
+    await mkdir4(registryDir, { recursive: true });
+    try {
+      await chmod(registryDir, 448);
+    } catch (err) {
+      opts.logger.error("session-registry: failed to chmod dir", { error: String(err) });
+    }
+    const payload = { version: 1, entry: normalizeEntry(entry) };
+    const target = filePath(entry.sessionId);
+    const tmp = `${target}.tmp.${process.pid}.${Date.now()}`;
+    await writeFile3(tmp, JSON.stringify(payload, null, 2), "utf8");
+    try {
+      await rename3(tmp, target);
+    } catch (err) {
+      try {
+        await unlink4(tmp);
+      } catch {
+      }
+      throw err;
+    }
+    await chmod(target, 384);
+  }
+  async function upsertSession(entry) {
+    const existing = await readEntry(entry.sessionId);
+    await writeEntry({
+      ...existing,
+      ...entry,
+      agent: entry.agent ?? existing?.agent,
+      status: entry.status ?? existing?.status
+    });
+  }
+  async function updateSession(sessionId, patch) {
+    const existing = await readEntry(sessionId);
+    if (!existing) return;
+    await writeEntry({
+      ...existing,
+      ...patch,
+      sessionId,
+      title: patch.title ?? existing.title,
+      parentID: patch.parentID ?? existing.parentID,
+      serverUrl: patch.serverUrl ?? existing.serverUrl,
+      updatedAt: patch.updatedAt ?? Date.now()
+    });
+  }
+  async function listSessions() {
+    let names;
+    try {
+      names = await readdir4(registryDir);
+    } catch (err) {
+      if (hasCode4(err, "ENOENT")) return [];
+      opts.logger.error("session-registry: failed to list dir", { error: String(err) });
+      return [];
+    }
+    const entries = [];
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      let text;
+      try {
+        text = await readFile3(join4(registryDir, name), "utf8");
+      } catch (err) {
+        opts.logger.error("session-registry: failed to read listed file", {
+          file: name,
+          error: String(err)
+        });
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(text);
+        if (isRegistryFile(parsed)) entries.push(normalizeEntry(parsed.entry));
+      } catch (err) {
+        opts.logger.error("session-registry: corrupted listed file", {
+          file: name,
+          error: String(err)
+        });
+      }
+    }
+    return entries;
+  }
+  return { upsertSession, updateSession, listSessions };
+}
+
 // src/events/session-created.ts
 async function handleSessionCreated(event, ctx) {
-  ctx.sessionTitleService.setSessionInfo(event.properties.info);
+  const info = event.properties.info;
+  ctx.sessionTitleService.setSessionInfo(info);
+  await ctx.sessionRegistry.upsertSession(
+    registryEntryFromSession(info, ctx.serverUrl.href, ctx.sessionTitleService.getSessionStatus(info.id))
+  );
 }
 
 // src/lib/abort-tracker.ts
@@ -1061,14 +1365,14 @@ async function handleSessionError(event, ctx) {
 
 // src/lib/pending-start-work.ts
 import { createHash as createHash4 } from "crypto";
-import { mkdir as mkdir4, readdir as readdir4, readFile as readFile3, rename as rename3, unlink as unlink4, writeFile as writeFile3 } from "fs/promises";
+import { mkdir as mkdir5, readdir as readdir5, readFile as readFile4, rename as rename4, unlink as unlink5, writeFile as writeFile4 } from "fs/promises";
 import { tmpdir as tmpdir3 } from "os";
-import { dirname as dirname3, join as join4 } from "path";
-function hasCode4(err, code) {
+import { dirname as dirname3, join as join5 } from "path";
+function hasCode5(err, code) {
   return "code" in err && err.code === code;
 }
 function pendingFilePath3(dir, shortHash) {
-  return join4(dir, `${shortHash}.json`);
+  return join5(dir, `${shortHash}.json`);
 }
 function parsePending3(text) {
   const parsed = JSON.parse(text);
@@ -1087,10 +1391,10 @@ function parsePending3(text) {
 }
 async function listPendingFiles3(dir) {
   try {
-    const entries = await readdir4(dir, { withFileTypes: true });
+    const entries = await readdir5(dir, { withFileTypes: true });
     return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
   } catch (err) {
-    if (err instanceof Error && hasCode4(err, "ENOENT")) return [];
+    if (err instanceof Error && hasCode5(err, "ENOENT")) return [];
     throw err;
   }
 }
@@ -1098,29 +1402,29 @@ function shortHashFromFileName3(fileName) {
   return fileName.slice(0, -".json".length);
 }
 function createPendingStartWorkStore(opts) {
-  const dir = opts.baseDir ?? join4(tmpdir3(), `opencoder-telegram-pending-start-work-${opts.tokenHash}`);
+  const dir = opts.baseDir ?? join5(tmpdir3(), `opencoder-telegram-pending-start-work-${opts.tokenHash}`);
   return {
     dir,
     async savePending(shortHash, data) {
       const filePath = pendingFilePath3(dir, shortHash);
-      await mkdir4(dirname3(filePath), { recursive: true });
+      await mkdir5(dirname3(filePath), { recursive: true });
       const tmpPath = `${filePath}.tmp.${process.pid}`;
-      await writeFile3(tmpPath, JSON.stringify(data, null, 2), "utf8");
-      await rename3(tmpPath, filePath);
+      await writeFile4(tmpPath, JSON.stringify(data, null, 2), "utf8");
+      await rename4(tmpPath, filePath);
     },
     async loadPending(shortHash) {
       try {
-        return parsePending3(await readFile3(pendingFilePath3(dir, shortHash), "utf8"));
+        return parsePending3(await readFile4(pendingFilePath3(dir, shortHash), "utf8"));
       } catch (err) {
-        if (err instanceof Error && hasCode4(err, "ENOENT")) return void 0;
+        if (err instanceof Error && hasCode5(err, "ENOENT")) return void 0;
         throw err;
       }
     },
     async deletePending(shortHash) {
       try {
-        await unlink4(pendingFilePath3(dir, shortHash));
+        await unlink5(pendingFilePath3(dir, shortHash));
       } catch (err) {
-        if (!(err instanceof Error) || !hasCode4(err, "ENOENT")) throw err;
+        if (!(err instanceof Error) || !hasCode5(err, "ENOENT")) throw err;
       }
     },
     async sweepExpired() {
@@ -1228,6 +1532,13 @@ async function resolveParentID(sessionId, ctx) {
     const result = await ctx.client.session.get({ path: { id: sessionId } });
     if (result.data) {
       ctx.sessionTitleService.setSessionInfo(result.data);
+      await ctx.sessionRegistry.upsertSession(
+        registryEntryFromSession(
+          result.data,
+          ctx.serverUrl.href,
+          ctx.sessionTitleService.getSessionStatus(sessionId)
+        )
+      );
       return ctx.sessionTitleService.getParentID(sessionId);
     }
     ctx.logger.warn("session parentID cache miss fetch returned no data", { sessionId });
@@ -1244,6 +1555,9 @@ async function hydrateDescendants(sessionId, ctx, seen = /* @__PURE__ */ new Set
     const result = await ctx.client.session.children({ path: { id: sessionId } });
     for (const child of result.data ?? []) {
       ctx.sessionTitleService.setSessionInfo(child);
+      await ctx.sessionRegistry.upsertSession(
+        registryEntryFromSession(child, ctx.serverUrl.href, ctx.sessionTitleService.getSessionStatus(child.id))
+      );
       await hydrateDescendants(child.id, ctx, seen);
     }
   } catch (err) {
@@ -1313,6 +1627,7 @@ async function handleSessionIdle(event, ctx) {
   const sessionId = event.properties.sessionID;
   const parentID = await resolveParentID(sessionId, ctx);
   ctx.sessionTitleService.setSessionStatus(sessionId, "idle");
+  await ctx.sessionRegistry.updateSession(sessionId, { status: "idle", updatedAt: Date.now() });
   if (typeof parentID === "string") {
     ctx.logger.info("suppressing child session idle notification", { sessionId, parentID });
     await flushDeferredParentIfReady(parentID, ctx);
@@ -1340,6 +1655,7 @@ async function handleSessionStatus(event, ctx) {
   const sessionId = event.properties.sessionID;
   const statusType = event.properties.status.type;
   ctx.sessionTitleService.setSessionStatus(sessionId, statusType);
+  await ctx.sessionRegistry.updateSession(sessionId, { status: statusType, updatedAt: Date.now() });
   if (statusType === "idle") {
     await handleSessionIdle(event, ctx);
   }
@@ -1349,6 +1665,9 @@ async function handleSessionStatus(event, ctx) {
 async function handleSessionUpdated(event, ctx) {
   const info = event.properties.info;
   ctx.sessionTitleService.setSessionInfo(info);
+  await ctx.sessionRegistry.upsertSession(
+    registryEntryFromSession(info, ctx.serverUrl.href, ctx.sessionTitleService.getSessionStatus(info.id))
+  );
 }
 
 // src/lib/html-escape.ts
@@ -1370,12 +1689,54 @@ function stripCodeFences(input) {
 var MAX_BODY_CHARS = 3900;
 var MAX_TITLE_CHARS = 55;
 var MAX_SESSIONS = 20;
-function agentFromSession(session) {
+function agentFromSession2(session) {
   const candidate = session;
   return typeof candidate.agent === "string" ? candidate.agent : void 0;
 }
 function isRootSession(session) {
   return session.parentID === void 0 || session.parentID === null;
+}
+function isRootRegistryEntry(entry) {
+  return entry.parentID === null;
+}
+function isRootRemoteSession(session) {
+  return session.parentID === void 0 || session.parentID === null;
+}
+function addRegistryRecord(combined, entry, status) {
+  combined.set(entry.sessionId, {
+    sessionId: entry.sessionId,
+    title: entry.title,
+    agent: entry.agent,
+    status: status ?? entry.status ?? "idle",
+    serverUrl: entry.serverUrl,
+    updatedAt: entry.updatedAt
+  });
+}
+async function addRemoteServerRecords(combined, serverUrl, deps) {
+  const [remoteSessions, remoteStatusMap] = await Promise.all([
+    getRemoteSessions(serverUrl, deps.opencodeFetch),
+    getRemoteStatusMap(serverUrl, deps.opencodeFetch)
+  ]);
+  for (const session of remoteSessions.filter(isRootRemoteSession)) {
+    const status = remoteStatusMap[session.id]?.type ?? "idle";
+    combined.set(session.id, {
+      sessionId: session.id,
+      title: session.title,
+      agent: session.agent,
+      status,
+      serverUrl,
+      updatedAt: session.time.updated
+    });
+    await deps.sessionRegistry.upsertSession({
+      sessionId: session.id,
+      title: session.title,
+      parentID: session.parentID ?? null,
+      agent: session.agent,
+      status,
+      serverUrl,
+      updatedAt: session.time.updated
+    });
+  }
 }
 function createSessionsDispatcher(deps) {
   return async ({ chatId, bot }) => {
@@ -1389,16 +1750,42 @@ function createSessionsDispatcher(deps) {
       for (const session of listResult.data ?? []) {
         deps.sessionTitleService.setSessionInfo(session);
         deps.sessionTitleService.setServerUrl(session.id, deps.serverUrl);
-        const status = statusMap[session.id]?.type;
+        const status = statusMap[session.id]?.type ?? "idle";
+        await deps.sessionRegistry.upsertSession(
+          registryEntryFromSession(session, deps.serverUrl, status)
+        );
         if (status !== void 0) deps.sessionTitleService.setSessionStatus(session.id, status);
       }
-      sessions = (listResult.data ?? []).filter(isRootSession).sort((a, b) => b.time.updated - a.time.updated).slice(0, MAX_SESSIONS).map((session) => ({
-        sessionId: session.id,
-        title: session.title,
-        agent: agentFromSession(session),
-        status: statusMap[session.id]?.type,
-        serverUrl: deps.serverUrl
-      }));
+      const registrySessions = await deps.sessionRegistry.listSessions();
+      const combined = /* @__PURE__ */ new Map();
+      const remoteServerUrls = /* @__PURE__ */ new Set();
+      for (const entry of registrySessions.filter(isRootRegistryEntry)) {
+        const serverUrl = normalizeOpenCodeServerUrl(entry.serverUrl);
+        if (!serverUrl) continue;
+        if (isDifferentServerUrl(serverUrl, deps.serverUrl)) {
+          remoteServerUrls.add(serverUrl);
+          continue;
+        }
+        addRegistryRecord(combined, { ...entry, serverUrl }, statusMap[entry.sessionId]?.type);
+      }
+      for (const serverUrl of remoteServerUrls) {
+        try {
+          await addRemoteServerRecords(combined, serverUrl, deps);
+        } catch (err) {
+          deps.logger.error("sessions remote server refresh failed", { serverUrl, error: String(err) });
+        }
+      }
+      for (const session of (listResult.data ?? []).filter(isRootSession)) {
+        combined.set(session.id, {
+          sessionId: session.id,
+          title: session.title,
+          agent: agentFromSession2(session),
+          status: statusMap[session.id]?.type ?? "idle",
+          serverUrl: deps.serverUrl,
+          updatedAt: session.time.updated
+        });
+      }
+      sessions = [...combined.values()].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_SESSIONS);
     } catch (err) {
       await bot.sendMessage("\uC138\uC158 \uBAA9\uB85D\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", { parse_mode: "HTML" });
       deps.logger.error("sessions list failed", { chatId, error: String(err) });
@@ -1417,7 +1804,7 @@ function createSessionsDispatcher(deps) {
         capturedAt
       };
       if (session.agent !== void 0) entry.agent = session.agent;
-      if (session.status !== void 0) entry.status = session.status;
+      entry.status = session.status;
       if (session.serverUrl !== void 0) entry.serverUrl = session.serverUrl;
       return entry;
     });
@@ -1425,7 +1812,7 @@ function createSessionsDispatcher(deps) {
     const lines = entries.map((entry) => {
       const agent = entry.agent ? escapeHtml(entry.agent) : "?";
       const title = truncateForTelegram(escapeHtml(entry.title), MAX_TITLE_CHARS);
-      const status = entry.status ? ` \u2014 ${escapeHtml(entry.status)}` : "";
+      const status = ` \u2014 ${escapeHtml(entry.status ?? "idle")}`;
       return `${entry.index}. [${agent}] ${title}${status}`;
     });
     let body = lines.join("\n");
@@ -1442,13 +1829,13 @@ ${body}
 }
 
 // src/lib/plan-readiness.ts
-import { access, readFile as readFile4, readdir as readdir5, stat as stat2 } from "fs/promises";
-import { join as join5 } from "path";
+import { access, readFile as readFile5, readdir as readdir6, stat as stat2 } from "fs/promises";
+import { join as join6 } from "path";
 async function checkPlanReadiness(args) {
   const { projectRoot } = args;
-  const omoDir = join5(projectRoot, ".omo");
-  const plansDir = join5(omoDir, "plans");
-  const boulderPath = join5(omoDir, "boulder.json");
+  const omoDir = join6(projectRoot, ".omo");
+  const plansDir = join6(omoDir, "plans");
+  const boulderPath = join6(omoDir, "boulder.json");
   try {
     await access(omoDir);
   } catch {
@@ -1469,7 +1856,7 @@ async function checkPlanReadiness(args) {
   }
   let planFiles = [];
   try {
-    const entries = await readdir5(plansDir);
+    const entries = await readdir6(plansDir);
     planFiles = entries.filter((e) => e.endsWith(".md"));
   } catch {
     return {
@@ -1487,14 +1874,14 @@ async function checkPlanReadiness(args) {
   }
   const stats = await Promise.all(
     planFiles.map(async (f) => {
-      const full = join5(plansDir, f);
+      const full = join6(plansDir, f);
       const s = await stat2(full);
       return { path: full, name: f, mtime: s.mtime.getTime() };
     })
   );
   stats.sort((a, b) => b.mtime - a.mtime);
   const latest = stats[0];
-  const content = await readFile4(latest.path, "utf8");
+  const content = await readFile5(latest.path, "utf8");
   const totalMatches = content.match(/^- \[[ xX]\]/gm) ?? [];
   const completedMatches = content.match(/^- \[[xX]\]/gm) ?? [];
   const total = totalMatches.length;
@@ -1525,7 +1912,7 @@ async function recheckSessionIdle(client, sessionId) {
   const result = await client.session.status();
   const statuses = result.data ?? {};
   const sessionStatus = statuses[sessionId];
-  return sessionStatus?.type === "idle";
+  return (sessionStatus?.type ?? "idle") === "idle";
 }
 
 // src/events/status-command.ts
@@ -1624,25 +2011,65 @@ function createStatusDispatcher(deps) {
       });
       return;
     }
-    const [getResult, statusResult, messagesResult] = await Promise.all([
-      deps.client.session.get({ path: { id: entry.sessionId } }),
-      deps.client.session.status(),
-      deps.client.session.messages({
-        path: { id: entry.sessionId },
-        query: { limit: MESSAGES_LIMIT }
-      })
-    ]);
-    const session = getResult.data;
-    const responseStatus = getResult.response?.status;
+    const rawSourceServerUrl = entry.serverUrl ?? deps.sessionTitleService.getServerUrl(entry.sessionId);
+    const sourceServerUrl = normalizeOpenCodeServerUrl(rawSourceServerUrl);
+    if (rawSourceServerUrl && !sourceServerUrl) {
+      await bot.sendMessage("\uC138\uC158 \uC11C\uBC84 \uC815\uBCF4\uAC00 \uC720\uD6A8\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694", {
+        parse_mode: "HTML"
+      });
+      deps.logger.error("status invalid server url", { chatId, sessionId: entry.sessionId });
+      return;
+    }
+    const useRemoteServer = isDifferentServerUrl(sourceServerUrl, deps.serverUrl);
+    let session;
+    let responseStatus;
+    let sessionStatus = "idle";
+    let messages = [];
+    if (sourceServerUrl && useRemoteServer) {
+      try {
+        const getResult = await getRemoteSession(sourceServerUrl, entry.sessionId, deps.opencodeFetch);
+        session = getResult.data;
+        responseStatus = getResult.response.status;
+        if (!session || responseStatus === 404) {
+          await bot.sendMessage("\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694", {
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [statusMap, remoteMessages] = await Promise.all([
+          getRemoteStatusMap(sourceServerUrl, deps.opencodeFetch),
+          getRemoteMessages(sourceServerUrl, entry.sessionId, MESSAGES_LIMIT, deps.opencodeFetch)
+        ]);
+        sessionStatus = statusMap[entry.sessionId]?.type ?? "idle";
+        messages = remoteMessages;
+      } catch (err) {
+        await bot.sendMessage("\uC138\uC158 \uC0C1\uD0DC\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694", {
+          parse_mode: "HTML"
+        });
+        deps.logger.error("status remote lookup failed", { chatId, sessionId: entry.sessionId, error: String(err) });
+        return;
+      }
+    } else {
+      const [getResult, statusResult, messagesResult] = await Promise.all([
+        deps.client.session.get({ path: { id: entry.sessionId } }),
+        deps.client.session.status(),
+        deps.client.session.messages({
+          path: { id: entry.sessionId },
+          query: { limit: MESSAGES_LIMIT }
+        })
+      ]);
+      session = normalizeSession(getResult.data);
+      responseStatus = getResult.response?.status;
+      const statusMap = normalizeStatusMap(statusResult.data);
+      sessionStatus = statusMap[entry.sessionId]?.type ?? "idle";
+      messages = normalizeMessages(messagesResult.data);
+    }
     if (!session || responseStatus === 404) {
       await bot.sendMessage("\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694", {
         parse_mode: "HTML"
       });
       return;
     }
-    const statusMap = statusResult.data ?? {};
-    const sessionStatus = statusMap[entry.sessionId]?.type ?? "unknown";
-    const messages = messagesResult.data ?? [];
     const projectRoot = resolveProjectRoot(session);
     const planReady = await checkPlanReadiness({ projectRoot });
     const userSnippet = buildSnippet(findLastByRole(messages, "user"));
@@ -1672,9 +2099,8 @@ function createStatusDispatcher(deps) {
 }
 
 // src/events/start-work-command.ts
-function agentFromSession2(session) {
-  const candidate = session;
-  return typeof candidate.agent === "string" ? candidate.agent : void 0;
+function agentFromSession3(session) {
+  return session.agent;
 }
 function resolveProjectRoot2(session) {
   return session.directory;
@@ -1726,24 +2152,41 @@ function createStartWorkCommandDispatcher(deps) {
       return;
     }
     const sessionId = entry.sessionId;
+    const rawSourceServerUrl = entry.serverUrl ?? deps.sessionTitleService.getServerUrl(sessionId);
+    const sourceServerUrl = normalizeOpenCodeServerUrl(rawSourceServerUrl);
+    if (rawSourceServerUrl && !sourceServerUrl) {
+      await sendPlain(bot, "\uC138\uC158 \uC11C\uBC84 \uC815\uBCF4\uAC00 \uC720\uD6A8\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
+      deps.logger.error("start-work invalid server url", { sessionId });
+      return;
+    }
+    const useRemoteServer = isDifferentServerUrl(sourceServerUrl, deps.serverUrl);
     let session;
     try {
-      const result = await deps.client.session.get({ path: { id: sessionId } });
-      if (!result.data) {
-        await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
-        return;
+      if (sourceServerUrl && useRemoteServer) {
+        const result = await getRemoteSession(sourceServerUrl, sessionId, deps.opencodeFetch);
+        if (!result.data || result.response.status === 404) {
+          await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+          return;
+        }
+        session = result.data;
+      } else {
+        const result = await deps.client.session.get({ path: { id: sessionId } });
+        if (!result.data) {
+          await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+          return;
+        }
+        session = result.data;
       }
-      session = result.data;
     } catch (err) {
       if (err instanceof Error && isSessionNotFoundError(err)) {
         await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
         return;
       }
-      await sendPlain(bot, `\uC138\uC158 \uD655\uC778 \uC2E4\uD328: ${String(err)}`);
+      await sendPlain(bot, "\uC138\uC158 \uD655\uC778 \uC2E4\uD328. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
       deps.logger.error("start-work session lookup failed", { sessionId, error: String(err) });
       return;
     }
-    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession2(session);
+    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession3(session) ?? entry.agent;
     if (agent !== "plan") {
       await sendPlain(
         bot,
@@ -1751,7 +2194,14 @@ function createStartWorkCommandDispatcher(deps) {
       );
       return;
     }
-    const idle = await recheckSessionIdle(deps.client, sessionId);
+    let idle;
+    try {
+      idle = sourceServerUrl && useRemoteServer ? ((await getRemoteStatusMap(sourceServerUrl, deps.opencodeFetch))[sessionId]?.type ?? "idle") === "idle" : await recheckSessionIdle(deps.client, sessionId);
+    } catch (err) {
+      await sendPlain(bot, "\uC138\uC158 \uC0C1\uD0DC \uD655\uC778 \uC2E4\uD328. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
+      deps.logger.error("start-work idle recheck failed", { sessionId, error: String(err) });
+      return;
+    }
     if (!idle) {
       await sendPlain(bot, `${index}\uBC88 \uC138\uC158\uC774 idle \uC0C1\uD0DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4. \uC791\uC5C5 \uC644\uB8CC\uB97C \uAE30\uB2E4\uB9AC\uC138\uC694`);
       return;
@@ -1762,15 +2212,14 @@ function createStartWorkCommandDispatcher(deps) {
       return;
     }
     try {
-      const serverUrl = deps.sessionTitleService.getServerUrl(sessionId);
-      await deps.runSessionCommand(sessionId, "start-work", serverUrl);
+      await deps.runSessionCommand(sessionId, "start-work", sourceServerUrl);
       await sendHtml(
         bot,
         `${index}\uBC88 \uC138\uC158\uC5D0 opencode /start-work \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1 \uC644\uB8CC. (${escapeHtml(entry.title)})`
       );
       deps.logger.info("start-work dispatched", { chatId, sessionId, index });
     } catch (err) {
-      await sendHtml(bot, "opencode /start-work \uC804\uC1A1 \uC2E4\uD328: " + String(err));
+      await sendHtml(bot, "opencode /start-work \uC804\uC1A1 \uC2E4\uD328");
       deps.logger.error("start-work dispatch failed", { sessionId, error: String(err) });
     }
   };
@@ -1807,14 +2256,14 @@ function createHelpDispatcher(deps) {
 // src/lib/env-loader.ts
 import { existsSync } from "fs";
 import { homedir } from "os";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 import dotenv from "dotenv";
 function loadPluginEnv(opts) {
   const paths = [
-    join6(opts.pluginDir, "../../.env"),
-    join6(opts.pluginDir, "..", ".env"),
-    join6(opts.pluginDir, ".env"),
-    join6(opts.homeDir ?? homedir(), ".config/opencode/telegram-remote/.env")
+    join7(opts.pluginDir, "../../.env"),
+    join7(opts.pluginDir, "..", ".env"),
+    join7(opts.pluginDir, ".env"),
+    join7(opts.homeDir ?? homedir(), ".config/opencode/telegram-remote/.env")
   ];
   const loadedFrom = [];
   const values = {};
@@ -1832,10 +2281,10 @@ function loadPluginEnv(opts) {
 }
 
 // src/lib/lock.ts
-import { open as open2, readFile as readFile5, stat as stat3, unlink as unlink5 } from "fs/promises";
+import { open as open2, readFile as readFile6, stat as stat3, unlink as unlink6 } from "fs/promises";
 import { hostname } from "os";
 var DEFAULT_TTL_MS2 = 5 * 60 * 1e3;
-function hasCode5(err, code) {
+function hasCode6(err, code) {
   return "code" in err && err.code === code;
 }
 function parseLockData(text) {
@@ -1854,7 +2303,7 @@ function isPidAlive(pid) {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    if (err instanceof Error && hasCode5(err, "ESRCH")) return false;
+    if (err instanceof Error && hasCode6(err, "ESRCH")) return false;
     return true;
   }
 }
@@ -1875,7 +2324,7 @@ async function createLock(lockPath, pid) {
       if (released) return;
       released = true;
       try {
-        await unlink5(lockPath);
+        await unlink6(lockPath);
       } catch {
       }
     }
@@ -1885,7 +2334,7 @@ async function inspectExisting(lockPath, ttlMs) {
   let ownerPid;
   let dead = false;
   try {
-    const text = await readFile5(lockPath, "utf8");
+    const text = await readFile6(lockPath, "utf8");
     const data = parseLockData(text);
     if (data) {
       ownerPid = data.pid;
@@ -1911,7 +2360,7 @@ async function acquireLock(opts) {
     try {
       return { acquired: true, handle: await createLock(opts.lockPath, pid) };
     } catch (err) {
-      if (!(err instanceof Error) || !hasCode5(err, "EEXIST")) {
+      if (!(err instanceof Error) || !hasCode6(err, "EEXIST")) {
         return { acquired: false, reason: err instanceof Error ? err.message : String(err) };
       }
       const existing = await inspectExisting(opts.lockPath, ttlMs);
@@ -1919,7 +2368,7 @@ async function acquireLock(opts) {
         return { acquired: false, reason: existing.reason, ownerPid: existing.ownerPid };
       }
       try {
-        await unlink5(opts.lockPath);
+        await unlink6(opts.lockPath);
       } catch {
         return { acquired: false, reason: "failed to remove stale lock", ownerPid: existing.ownerPid };
       }
@@ -1999,10 +2448,10 @@ function createLogger(opts = {}) {
 }
 
 // src/lib/session-snapshot.ts
-import { chmod, mkdir as mkdir5, readFile as readFile6, rename as rename4, unlink as unlink6, writeFile as writeFile4 } from "fs/promises";
-import { dirname as dirname4, join as join7 } from "path";
+import { chmod as chmod2, mkdir as mkdir6, readFile as readFile7, rename as rename5, unlink as unlink7, writeFile as writeFile5 } from "fs/promises";
+import { dirname as dirname4, join as join8 } from "path";
 var TTL_MS = 60 * 60 * 1e3;
-function hasCode6(err, code) {
+function hasCode7(err, code) {
   return err instanceof Error && "code" in err && err.code === code;
 }
 function isSnapshotFile(value) {
@@ -2021,11 +2470,14 @@ function isSnapshotFile(value) {
     if (typeof e.capturedAt !== "number") return false;
     if (e.agent !== void 0 && typeof e.agent !== "string") return false;
     if (e.status !== void 0 && typeof e.status !== "string") return false;
-    if (e.serverUrl !== void 0 && typeof e.serverUrl !== "string") return false;
+    if (e.serverUrl !== void 0) {
+      if (typeof e.serverUrl !== "string") return false;
+      if (!normalizeOpenCodeServerUrl(e.serverUrl)) return false;
+    }
   }
   return true;
 }
-function normalizeEntry(entry) {
+function normalizeEntry2(entry) {
   const out = {
     index: entry.index,
     sessionId: entry.sessionId,
@@ -2034,22 +2486,25 @@ function normalizeEntry(entry) {
   };
   if (entry.agent !== void 0) out.agent = entry.agent;
   if (entry.status !== void 0) out.status = entry.status;
-  if (entry.serverUrl !== void 0) out.serverUrl = entry.serverUrl;
+  if (entry.serverUrl !== void 0) {
+    const serverUrl = normalizeOpenCodeServerUrl(entry.serverUrl);
+    if (serverUrl !== void 0) out.serverUrl = serverUrl;
+  }
   return out;
 }
 function createSnapshotStore(opts) {
   const { configDir, tokenHash, logger } = opts;
-  const snapshotsDir = join7(configDir, "snapshots");
+  const snapshotsDir = join8(configDir, "snapshots");
   const writeLocks = /* @__PURE__ */ new Map();
   function snapshotFilePath(chatId) {
-    return join7(snapshotsDir, `${tokenHash}-${chatId}.json`);
+    return join8(snapshotsDir, `${tokenHash}-${chatId}.json`);
   }
   async function performSave(chatId, entries) {
     const filePath = snapshotFilePath(chatId);
     const parent = dirname4(filePath);
-    await mkdir5(parent, { recursive: true });
+    await mkdir6(parent, { recursive: true });
     try {
-      await chmod(parent, 448);
+      await chmod2(parent, 448);
     } catch (err) {
       logger.error("snapshot: failed to chmod parent dir", {
         path: parent,
@@ -2060,20 +2515,20 @@ function createSnapshotStore(opts) {
       version: 1,
       chatId,
       createdAt: Date.now(),
-      entries: entries.map(normalizeEntry)
+      entries: entries.map(normalizeEntry2)
     };
     const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-    await writeFile4(tmpPath, JSON.stringify(payload, null, 2), "utf8");
+    await writeFile5(tmpPath, JSON.stringify(payload, null, 2), "utf8");
     try {
-      await rename4(tmpPath, filePath);
+      await rename5(tmpPath, filePath);
     } catch (err) {
       try {
-        await unlink6(tmpPath);
+        await unlink7(tmpPath);
       } catch {
       }
       throw err;
     }
-    await chmod(filePath, 384);
+    await chmod2(filePath, 384);
   }
   async function saveSnapshot(chatId, entries) {
     const prev = writeLocks.get(chatId) ?? Promise.resolve();
@@ -2092,9 +2547,9 @@ function createSnapshotStore(opts) {
     const filePath = snapshotFilePath(chatId);
     let text;
     try {
-      text = await readFile6(filePath, "utf8");
+      text = await readFile7(filePath, "utf8");
     } catch (err) {
-      if (hasCode6(err, "ENOENT")) return null;
+      if (hasCode7(err, "ENOENT")) return null;
       logger.error("snapshot: failed to read file", {
         path: filePath,
         error: err instanceof Error ? err.message : String(err)
@@ -2117,9 +2572,9 @@ function createSnapshotStore(opts) {
     }
     if (parsed.createdAt + TTL_MS < Date.now()) {
       try {
-        await unlink6(filePath);
+        await unlink7(filePath);
       } catch (err) {
-        if (!hasCode6(err, "ENOENT")) {
+        if (!hasCode7(err, "ENOENT")) {
           logger.error("snapshot: failed to unlink expired file", {
             path: filePath,
             error: err instanceof Error ? err.message : String(err)
@@ -2128,16 +2583,16 @@ function createSnapshotStore(opts) {
       }
       return null;
     }
-    return parsed.entries.map(normalizeEntry);
+    return parsed.entries.map(normalizeEntry2);
   }
   return { saveSnapshot, loadSnapshot, snapshotFilePath };
 }
 
 // src/lib/state-store.ts
-import { mkdir as mkdir6, readFile as readFile7, rename as rename5, writeFile as writeFile5 } from "fs/promises";
+import { mkdir as mkdir7, readFile as readFile8, rename as rename6, writeFile as writeFile6 } from "fs/promises";
 import { homedir as homedir2 } from "os";
-import { dirname as dirname5, join as join8 } from "path";
-function hasCode7(err, code) {
+import { dirname as dirname5, join as join9 } from "path";
+function hasCode8(err, code) {
   return "code" in err && err.code === code;
 }
 function parseState(text) {
@@ -2149,28 +2604,28 @@ function parseState(text) {
   return state;
 }
 function createStateStore(opts = {}) {
-  const filePath = opts.filePath ?? join8(homedir2(), ".config/opencode/telegram-remote/state.json");
+  const filePath = opts.filePath ?? join9(homedir2(), ".config/opencode/telegram-remote/state.json");
   return {
     async read() {
       try {
-        return parseState(await readFile7(filePath, "utf8"));
+        return parseState(await readFile8(filePath, "utf8"));
       } catch (err) {
-        if (err instanceof Error && hasCode7(err, "ENOENT")) return {};
+        if (err instanceof Error && hasCode8(err, "ENOENT")) return {};
         throw err;
       }
     },
     async write(patch) {
       const existing = await this.read();
       const next = { ...existing, ...patch, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-      await mkdir6(dirname5(filePath), { recursive: true });
+      await mkdir7(dirname5(filePath), { recursive: true });
       const tmpPath = `${filePath}.tmp.${process.pid}`;
-      await writeFile5(tmpPath, JSON.stringify(next, null, 2), "utf8");
+      await writeFile6(tmpPath, JSON.stringify(next, null, 2), "utf8");
       try {
-        await rename5(tmpPath, filePath);
+        await rename6(tmpPath, filePath);
       } catch (err) {
-        if (!(err instanceof Error) || !hasCode7(err, "ENOENT")) throw err;
-        await writeFile5(tmpPath, JSON.stringify(next, null, 2), "utf8");
-        await rename5(tmpPath, filePath);
+        if (!(err instanceof Error) || !hasCode8(err, "ENOENT")) throw err;
+        await writeFile6(tmpPath, JSON.stringify(next, null, 2), "utf8");
+        await rename6(tmpPath, filePath);
       }
       return next;
     }
@@ -2178,7 +2633,7 @@ function createStateStore(opts = {}) {
 }
 
 // src/services/session-title-service.ts
-function agentFromSession3(info) {
+function agentFromSession4(info) {
   const candidate = info;
   return typeof candidate.agent === "string" ? candidate.agent : void 0;
 }
@@ -2189,7 +2644,7 @@ var SessionTitleService = class {
     this.sessions.set(info.id, {
       title: info.title || null,
       parentID: info.parentID ?? null,
-      agent: agentFromSession3(info) ?? existing?.agent,
+      agent: agentFromSession4(info) ?? existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
       lastSeenAt: Date.now(),
@@ -2317,17 +2772,17 @@ var SessionTitleService = class {
 // src/telegram-remote.ts
 var pluginDir = dirname6(fileURLToPath(import.meta.url));
 async function postToServer(serverUrl, path, body) {
-  const url = new URL(path, serverUrl);
+  const safeServerUrl = normalizeOpenCodeServerUrl(serverUrl);
+  if (!safeServerUrl) throw new Error("Invalid OpenCode server URL");
+  const url = new URL(path, safeServerUrl);
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    redirect: "error"
   });
   if (response.ok) return;
-  const text = await response.text();
-  throw new Error(
-    `OpenCode request failed: ${response.status} ${response.statusText}${text ? ` - ${text}` : ""}`
-  );
+  throw new Error(`OpenCode request failed: ${response.status} ${response.statusText}`);
 }
 function getSessionAgentFromMessage(event) {
   const info = event.properties.info;
@@ -2351,10 +2806,11 @@ var TelegramRemote = async (input) => {
     const stateStore = createStateStore();
     const initialState = await stateStore.read();
     const tokenHash = createHash5("sha256").update(config.botToken).digest("hex").slice(0, 16);
-    const configDir = join9(homedir3(), ".config/opencode/telegram-remote");
+    const configDir = join10(homedir3(), ".config/opencode/telegram-remote");
     const snapshotStore = createSnapshotStore({ configDir, tokenHash, logger });
-    const lockPath = join9(tmpdir5(), `opencoder-telegram-${tokenHash}.lock`);
-    const claimsDir = join9(tmpdir5(), `opencoder-telegram-claims-${tokenHash}`);
+    const sessionRegistry = createSessionRegistryStore({ configDir, tokenHash, logger });
+    const lockPath = join10(tmpdir5(), `opencoder-telegram-${tokenHash}.lock`);
+    const claimsDir = join10(tmpdir5(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
     const pendingStartWorks = createPendingStartWorkStore({ tokenHash });
@@ -2384,8 +2840,8 @@ var TelegramRemote = async (input) => {
         throwOnError: true
       });
     };
-    const replyToPermission = async (requestID, sessionID, reply, endpoint, serverUrl = input.serverUrl.href) => {
-      if (endpoint === "request") {
+    const replyToPermission = async (requestID, sessionID, reply, endpoint2, serverUrl = input.serverUrl.href) => {
+      if (endpoint2 === "request") {
         const path2 = `/permission/${encodeURIComponent(requestID)}/reply`;
         if (serverUrl !== input.serverUrl.href) {
           await postToServer(serverUrl, path2, { reply });
@@ -2469,6 +2925,7 @@ var TelegramRemote = async (input) => {
       pendingQuestions,
       pendingPermissions,
       pendingStartWorks,
+      sessionRegistry,
       replyToQuestion,
       replyToPermission,
       runSessionCommand
@@ -2480,15 +2937,23 @@ var TelegramRemote = async (input) => {
       bot.setSessionsDispatcher(createSessionsDispatcher({
         client: input.client,
         sessionTitleService,
+        sessionRegistry,
         snapshotStore,
         serverUrl: input.serverUrl.href,
         logger
       }));
-      bot.setStatusDispatcher(createStatusDispatcher({ snapshotStore, sessionTitleService, client: input.client, logger }));
+      bot.setStatusDispatcher(createStatusDispatcher({
+        snapshotStore,
+        sessionTitleService,
+        client: input.client,
+        logger,
+        serverUrl: input.serverUrl.href
+      }));
       bot.setStartWorkCommandDispatcher(createStartWorkCommandDispatcher({
         snapshotStore,
         sessionTitleService,
         client: input.client,
+        serverUrl: input.serverUrl.href,
         runSessionCommand,
         logger
       }));
@@ -2514,6 +2979,11 @@ var TelegramRemote = async (input) => {
             if (messageAgent) {
               ctx.sessionTitleService.setSessionAgent(messageAgent.sessionID, messageAgent.agent);
               ctx.sessionTitleService.setServerUrl(messageAgent.sessionID, input.serverUrl.href);
+              await ctx.sessionRegistry.updateSession(messageAgent.sessionID, {
+                agent: messageAgent.agent,
+                serverUrl: input.serverUrl.href,
+                updatedAt: Date.now()
+              });
             }
             return;
           }
@@ -2523,6 +2993,12 @@ var TelegramRemote = async (input) => {
             const stepAgent = getSessionAgentFromNextStep(extEvent);
             if (stepAgent) {
               ctx.sessionTitleService.setSessionAgent(stepAgent.sessionID, stepAgent.agent);
+              ctx.sessionTitleService.setServerUrl(stepAgent.sessionID, input.serverUrl.href);
+              await ctx.sessionRegistry.updateSession(stepAgent.sessionID, {
+                agent: stepAgent.agent,
+                serverUrl: input.serverUrl.href,
+                updatedAt: Date.now()
+              });
               return;
             }
             if (isEventPermissionAsked(extEvent)) {

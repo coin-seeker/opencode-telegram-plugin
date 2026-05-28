@@ -1,0 +1,160 @@
+import type { Session } from "@opencode-ai/sdk";
+import type { TelegramBotManager } from "../bot.js";
+import { escapeHtml } from "../lib/html-escape.js";
+import type { PlanReadinessResult } from "../lib/plan-readiness.js";
+import { checkPlanReadiness, recheckSessionIdle } from "../lib/plan-readiness.js";
+import type { SnapshotStore } from "../lib/session-snapshot.js";
+import type { SessionWithAgent } from "../lib/sdk-augmentation.js";
+import type { OpencodeClient } from "../events/types.js";
+
+export type StartWorkCommandDispatcher = (ctx: {
+  chatId: number;
+  userId: number;
+  bot: TelegramBotManager;
+  args: string[];
+}) => Promise<void>;
+
+type PlanReadinessFailureReason = Exclude<PlanReadinessResult, { ready: true }>["reason"];
+
+interface HttpStatusError extends Error {
+  status?: number;
+  statusCode?: number;
+  response?: {
+    status?: number;
+  };
+}
+
+function agentFromSession(session: Session): string | undefined {
+  const candidate: SessionWithAgent = session;
+  return typeof candidate.agent === "string" ? candidate.agent : undefined;
+}
+
+function resolveProjectRoot(session: Session): string {
+  return session.directory;
+}
+
+function readinessMessage(reason: PlanReadinessFailureReason): string {
+  switch (reason) {
+    case "no-omo-dir":
+      return ".omo/ 디렉토리가 없습니다. plan 작성이 선행되어야 합니다";
+    case "no-plans":
+      return ".omo/plans/ 에 plan 파일이 없습니다";
+    case "plan-empty":
+      return "plan 파일에 체크박스가 없습니다 (헤더만 존재)";
+    case "all-plans-complete":
+      return "plan 의 모든 task 가 완료되었습니다. 새 plan 작성 필요";
+    case "boulder-active":
+      return ".omo/boulder.json 이 이미 존재합니다. 기존 작업이 진행 중이거나 archive 가 필요합니다";
+  }
+}
+
+function isSessionNotFoundError(err: Error): boolean {
+  const httpError = err as HttpStatusError;
+  return (
+    httpError.status === 404 ||
+    httpError.statusCode === 404 ||
+    httpError.response?.status === 404 ||
+    err.message.includes("404")
+  );
+}
+
+async function sendHtml(bot: TelegramBotManager, text: string): Promise<void> {
+  await bot.sendMessage(text, { parse_mode: "HTML" });
+}
+
+async function sendPlain(bot: TelegramBotManager, text: string): Promise<void> {
+  await bot.sendMessage(text);
+}
+
+export function createStartWorkCommandDispatcher(deps: {
+  snapshotStore: SnapshotStore;
+  sessionTitleService: {
+    getServerUrl(id: string): string | undefined;
+    getSessionAgent(id: string): string | undefined;
+  };
+  client: OpencodeClient;
+  runSessionCommand: (sessionId: string, command: string, serverUrl?: string) => Promise<void>;
+  logger: {
+    info(msg: string, data?: Record<string, unknown>): void;
+    error(msg: string, data?: Record<string, unknown>): void;
+  };
+}): StartWorkCommandDispatcher {
+  return async ({ chatId, bot, args }) => {
+    const rawIndex = args[0]?.trim();
+    if (!rawIndex) {
+      await sendPlain(bot, "사용법: /start_work <번호>. 먼저 /sessions 로 목록 확인");
+      return;
+    }
+
+    const index = Number(rawIndex);
+    if (Number.isNaN(index)) {
+      await sendPlain(bot, `잘못된 입력: ${rawIndex}은 숫자여야 합니다`);
+      return;
+    }
+
+    const snapshot = await deps.snapshotStore.loadSnapshot(chatId);
+    if (snapshot === null) {
+      await sendPlain(bot, "세션 목록이 없습니다. 먼저 /sessions 실행");
+      return;
+    }
+
+    const entry = snapshot.find((candidate) => candidate.index === index);
+    if (!entry) {
+      await sendPlain(bot, `${index}번 세션 없음 (목록 크기: ${snapshot.length})`);
+      return;
+    }
+
+    const sessionId = entry.sessionId;
+    let session: Session;
+    try {
+      const result = await deps.client.session.get({ path: { id: sessionId } });
+      if (!result.data) {
+        await sendPlain(bot, "세션이 더 이상 존재하지 않습니다");
+        return;
+      }
+      session = result.data;
+    } catch (err) {
+      if (err instanceof Error && isSessionNotFoundError(err)) {
+        await sendPlain(bot, "세션이 더 이상 존재하지 않습니다");
+        return;
+      }
+      await sendPlain(bot, `세션 확인 실패: ${String(err)}`);
+      deps.logger.error("start-work session lookup failed", { sessionId, error: String(err) });
+      return;
+    }
+
+    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession(session);
+    if (agent !== "plan") {
+      await sendPlain(
+        bot,
+        `${index}번 세션의 에이전트는 'plan' 이 아닙니다 (현재: ${agent ?? "unknown"}). /start_work 는 plan 세션에서만 가능합니다`,
+      );
+      return;
+    }
+
+    const idle = await recheckSessionIdle(deps.client, sessionId);
+    if (!idle) {
+      await sendPlain(bot, `${index}번 세션이 idle 상태가 아닙니다. 작업 완료를 기다리세요`);
+      return;
+    }
+
+    const readiness = await checkPlanReadiness({ projectRoot: resolveProjectRoot(session) });
+    if (!readiness.ready) {
+      await sendPlain(bot, readinessMessage(readiness.reason));
+      return;
+    }
+
+    try {
+      const serverUrl = deps.sessionTitleService.getServerUrl(sessionId);
+      await deps.runSessionCommand(sessionId, "start-work", serverUrl);
+      await sendHtml(
+        bot,
+        `${index}번 세션에 opencode /start-work 슬래시 커맨드 전송 완료. (${escapeHtml(entry.title)})`,
+      );
+      deps.logger.info("start-work dispatched", { chatId, sessionId, index });
+    } catch (err) {
+      await sendHtml(bot, "opencode /start-work 전송 실패: " + String(err));
+      deps.logger.error("start-work dispatch failed", { sessionId, error: String(err) });
+    }
+  };
+}

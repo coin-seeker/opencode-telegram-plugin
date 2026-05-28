@@ -170,7 +170,7 @@ Control OpenCode sessions directly from Telegram.
 
 | Command | Description |
 |---------|-------------|
-| `/sessions` | List active root sessions (most-recent first, top 20) |
+| `/sessions` | List recent root sessions (most-recent first, top 20) |
 | `/status <N>` | Show session #N details: agent, status, last messages, plan progress, boulder state |
 | `/start_work <N>` | Trigger `/start-work` on session #N (safety-gated) |
 | `/help` | Show command reference |

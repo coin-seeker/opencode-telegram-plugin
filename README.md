@@ -164,6 +164,36 @@ The plugin reacts to these OpenCode events:
 
 The plugin also consumes `session.created` and `session.updated` internally to cache session titles and parent/child relationships.
 
+### Slash Commands
+
+Control OpenCode sessions directly from Telegram.
+
+| Command | Description |
+|---------|-------------|
+| `/sessions` | List active root sessions (most-recent first, top 20) |
+| `/status <N>` | Show session #N details: agent, status, last messages, plan progress, boulder state |
+| `/start_work <N>` | Trigger `/start-work` on session #N (safety-gated) |
+| `/help` | Show command reference |
+
+Session numbers come from the most recent `/sessions` call. The mapping snapshot expires after 1 hour — re-run `/sessions` to refresh.
+
+#### Safety Gates for `/start_work`
+
+`/start_work <N>` only dispatches opencode's `/start-work` command when ALL conditions are met:
+
+1. `agent === 'plan'` — session must be a planning session
+2. `status === 'idle'` — re-validated via live API call (TOCTOU-safe)
+3. An incomplete `.omo/plans/*.md` plan file exists in the session's project
+4. No `.omo/boulder.json` file exists (prevents duplicate execution)
+
+When a condition fails, a specific Korean reason is returned.
+
+#### Cross-Process Visibility
+
+`/sessions` reflects only the sessions observed by the **leader process**. If OpenCode is running in multiple windows, sessions from non-leader windows may not appear. The leader primes its cache from `session.list()` on startup, so all sessions on the same OpenCode server are visible after a restart.
+
+> **Note**: Telegram bot commands use underscores: `/start_work` (Telegram) maps internally to opencode's `/start-work` slash command.
+
 ### Answering OpenCode Questions from Telegram
 
 When OpenCode asks a question, the bot sends the question with inline buttons.

@@ -9,6 +9,8 @@ interface SessionInfoCacheEntry {
   agent?: string;
   status?: SessionStatusType;
   idleNotificationPending: boolean;
+  lastSeenAt: number;
+  serverUrl?: string;
 }
 
 function agentFromSession(info: Session): string | undefined {
@@ -27,6 +29,8 @@ export class SessionTitleService {
       agent: agentFromSession(info) ?? existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      lastSeenAt: Date.now(),
+      serverUrl: existing?.serverUrl,
     });
   }
 
@@ -38,6 +42,8 @@ export class SessionTitleService {
       agent: existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      lastSeenAt: Date.now(),
+      serverUrl: existing?.serverUrl,
     });
   }
 
@@ -49,6 +55,8 @@ export class SessionTitleService {
       agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      lastSeenAt: Date.now(),
+      serverUrl: existing?.serverUrl,
     });
   }
 
@@ -61,7 +69,65 @@ export class SessionTitleService {
       status,
       idleNotificationPending:
         status === "idle" ? (existing?.idleNotificationPending ?? false) : false,
+      lastSeenAt: Date.now(),
+      serverUrl: existing?.serverUrl,
     });
+  }
+
+  setServerUrl(sessionId: string, serverUrl: string): void {
+    const existing = this.sessions.get(sessionId);
+    if (existing?.serverUrl) return;
+
+    const lastSeenAt = existing?.lastSeenAt ?? Date.now();
+    this.sessions.set(sessionId, {
+      ...(existing ?? {
+        title: null,
+        parentID: undefined,
+        idleNotificationPending: false,
+        lastSeenAt,
+      }),
+      lastSeenAt,
+      serverUrl,
+    });
+  }
+
+  getServerUrl(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.serverUrl;
+  }
+
+  getRootSessionsByRecency(limit: number): Array<{
+    sessionId: string;
+    title: string | null;
+    agent: string | undefined;
+    status: SessionStatusType | undefined;
+    serverUrl: string | undefined;
+  }> {
+    const results: Array<{
+      sessionId: string;
+      title: string | null;
+      agent: string | undefined;
+      status: SessionStatusType | undefined;
+      serverUrl: string | undefined;
+    }> = [];
+
+    for (const [sessionId, entry] of this.sessions.entries()) {
+      if (entry.parentID !== null) continue;
+      results.push({
+        sessionId,
+        title: entry.title,
+        agent: entry.agent,
+        status: entry.status,
+        serverUrl: entry.serverUrl,
+      });
+    }
+
+    results.sort((a, b) => {
+      const lastSeenA = this.sessions.get(a.sessionId)?.lastSeenAt ?? 0;
+      const lastSeenB = this.sessions.get(b.sessionId)?.lastSeenAt ?? 0;
+      return lastSeenB - lastSeenA;
+    });
+
+    return results.slice(0, limit);
   }
 
   getSessionTitle(sessionId: string): string | null {
@@ -97,6 +163,8 @@ export class SessionTitleService {
       agent: existing?.agent,
       status: existing?.status ?? "idle",
       idleNotificationPending: true,
+      lastSeenAt: existing?.lastSeenAt ?? Date.now(),
+      serverUrl: existing?.serverUrl,
     });
   }
 

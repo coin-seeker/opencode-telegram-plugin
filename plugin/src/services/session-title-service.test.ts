@@ -58,6 +58,74 @@ describe("SessionTitleService", () => {
     assert.equal(service.getParentID("child"), "parent");
   });
 
+  test("sets lastSeenAt on setSessionTitle", () => {
+    const service = new SessionTitleService();
+    const before = Date.now();
+
+    service.setSessionTitle("s1", "Title");
+
+    const entry = service["sessions"].get("s1");
+    assert.ok(entry);
+    assert.ok(entry.lastSeenAt >= before);
+  });
+
+  test("sets lastSeenAt on setSessionStatus", () => {
+    const service = new SessionTitleService();
+    const before = Date.now();
+
+    service.setSessionStatus("s1", "idle");
+
+    const entry = service["sessions"].get("s1");
+    assert.ok(entry);
+    assert.ok(entry.lastSeenAt >= before);
+  });
+
+  test("setServerUrl is idempotent (first write wins)", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("s1", "Title"));
+
+    service.setServerUrl("s1", "http://first");
+    service.setServerUrl("s1", "http://second");
+
+    assert.equal(service.getServerUrl("s1"), "http://first");
+  });
+
+  test("getRootSessionsByRecency returns parentID===null sessions sorted desc, limited", () => {
+    const originalNow = Date.now;
+    let now = 1000;
+    Date.now = () => now;
+
+    try {
+      const service = new SessionTitleService();
+      service.setSessionInfo(createSession("root1", "Root1"));
+      now += 100;
+      service.setSessionInfo(createSession("child1", "Child1", "root1"));
+      now += 100;
+      service.setSessionInfo(createSession("root2", "Root2"));
+
+      const results = service.getRootSessionsByRecency(10);
+
+      assert.equal(results.length, 2);
+      assert.deepEqual(
+        results.map((result) => result.sessionId),
+        ["root2", "root1"],
+      );
+      assert.ok(results.every((result) => result.sessionId !== "child1"));
+      assert.deepEqual(
+        service.getRootSessionsByRecency(1).map((result) => result.sessionId),
+        ["root2"],
+      );
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("getRootSessionsByRecency empty map returns []", () => {
+    const service = new SessionTitleService();
+
+    assert.deepEqual(service.getRootSessionsByRecency(10), []);
+  });
+
   test("tracks the selected agent without losing it on later updates", () => {
     const service = new SessionTitleService();
     service.setSessionAgent("plan-session", "plan");

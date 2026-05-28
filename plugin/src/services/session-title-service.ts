@@ -1,4 +1,5 @@
 import type { Session } from "@opencode-ai/sdk";
+import type { SessionWithAgent } from "../lib/sdk-augmentation";
 
 export type SessionStatusType = "busy" | "idle" | "retry";
 
@@ -11,7 +12,7 @@ interface SessionInfoCacheEntry {
 }
 
 function agentFromSession(info: Session): string | undefined {
-  const candidate = info as Session & { agent?: unknown };
+  const candidate = info as SessionWithAgent;
   return typeof candidate.agent === "string" ? candidate.agent : undefined;
 }
 

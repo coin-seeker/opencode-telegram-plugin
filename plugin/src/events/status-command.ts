@@ -1,0 +1,203 @@
+import type { Message, Part } from "@opencode-ai/sdk";
+import type { TelegramBotManager } from "../bot.js";
+import { escapeHtml, stripCodeFences, truncateForTelegram } from "../lib/html-escape.js";
+import { checkPlanReadiness, type PlanReadinessResult } from "../lib/plan-readiness.js";
+import type { SnapshotStore } from "../lib/session-snapshot.js";
+import type { OpencodeClient } from "./types.js";
+
+export type StatusDispatcher = (ctx: {
+  chatId: number;
+  userId: number;
+  bot: TelegramBotManager;
+  args: string[];
+}) => Promise<void>;
+
+interface StatusLogger {
+  info(msg: string, data?: Record<string, unknown>): void;
+  error(msg: string, data?: Record<string, unknown>): void;
+}
+
+interface StatusSessionTitleService {
+  getServerUrl(id: string): string | undefined;
+}
+
+export interface StatusDispatcherDeps {
+  snapshotStore: SnapshotStore;
+  sessionTitleService: StatusSessionTitleService;
+  client: OpencodeClient;
+  logger: StatusLogger;
+}
+
+const SNIPPET_MAX_CHARS = 80;
+const MESSAGES_LIMIT = 10;
+const EMPTY_MESSAGE = "메시지 없음";
+
+interface SessionLike {
+  directory: string;
+  title?: string;
+  parentID?: string;
+}
+
+function resolveProjectRoot(session: { directory: string }): string {
+  if (!session.directory) throw new Error("session directory missing");
+  return session.directory;
+}
+
+interface MessageEnvelope {
+  info: Message;
+  parts: Array<Part>;
+}
+
+function extractTextFromParts(parts: Array<Part>): string {
+  const pieces: string[] = [];
+  for (const part of parts) {
+    if (part.type === "text" && typeof part.text === "string") {
+      pieces.push(part.text);
+    }
+  }
+  return pieces.join(" ");
+}
+
+function buildSnippet(envelope: MessageEnvelope | undefined): string {
+  if (!envelope) return EMPTY_MESSAGE;
+  try {
+    const raw = extractTextFromParts(envelope.parts);
+    const cleaned = stripCodeFences(raw);
+    const truncated = truncateForTelegram(cleaned, SNIPPET_MAX_CHARS);
+    if (!truncated) return EMPTY_MESSAGE;
+    return escapeHtml(truncated);
+  } catch {
+    return EMPTY_MESSAGE;
+  }
+}
+
+function findLastByRole(
+  messages: Array<MessageEnvelope>,
+  role: "user" | "assistant",
+): MessageEnvelope | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg && msg.info.role === role) return msg;
+  }
+  return undefined;
+}
+
+function planReadinessKorean(result: PlanReadinessResult): string {
+  if (result.ready) {
+    return `${result.completed}/${result.total} (${result.planName})`;
+  }
+  switch (result.reason) {
+    case "no-omo-dir":
+      return "`.omo/` 없음";
+    case "no-plans":
+      return "plan 파일 없음";
+    case "plan-empty":
+      return "체크박스 없음";
+    case "all-plans-complete": {
+      const match = result.detail.match(/(\d+)\/(\d+)/);
+      if (match) return `${match[1]}/${match[2]} 완료`;
+      return "완료";
+    }
+    case "boulder-active":
+      return "boulder 활성";
+  }
+}
+
+function planLine(result: PlanReadinessResult): string {
+  if (result.ready) {
+    return `<b>플랜 진행도</b>: ${result.completed}/${result.total} (${escapeHtml(result.planName)})`;
+  }
+  return `<b>플랜 상태</b>: ${planReadinessKorean(result)}`;
+}
+
+function boulderLine(result: PlanReadinessResult): string {
+  const active = !result.ready && result.reason === "boulder-active";
+  return active ? "<b>Boulder</b>: 활성" : "<b>Boulder</b>: 없음";
+}
+
+export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispatcher {
+  return async ({ chatId, bot, args }) => {
+    const rawN = args[0];
+    if (rawN === undefined || rawN === "") {
+      await bot.sendMessage("사용법: /status <번호>. 먼저 /sessions 로 목록 확인", {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+    const n = Number(rawN);
+    if (Number.isNaN(n)) {
+      await bot.sendMessage(`잘못된 입력: ${escapeHtml(rawN)}은 숫자여야 합니다`, {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    const snapshot = await deps.snapshotStore.loadSnapshot(chatId);
+    if (!snapshot) {
+      await bot.sendMessage("세션 목록이 없습니다. 먼저 /sessions 를 실행하세요.", {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    const entry = snapshot.find((e) => e.index === n);
+    if (!entry) {
+      await bot.sendMessage(`${n}번 세션 없음. 현재 목록 크기: ${snapshot.length}`, {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    const [getResult, statusResult, messagesResult] = await Promise.all([
+      deps.client.session.get({ path: { id: entry.sessionId } }),
+      deps.client.session.status(),
+      deps.client.session.messages({
+        path: { id: entry.sessionId },
+        query: { limit: MESSAGES_LIMIT },
+      }),
+    ]);
+
+    const session = getResult.data as SessionLike | undefined;
+    const responseStatus = getResult.response?.status;
+    if (!session || responseStatus === 404) {
+      await bot.sendMessage("세션이 더 이상 존재하지 않습니다. /sessions 재실행 필요", {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+
+    const statusMap = statusResult.data ?? {};
+    const sessionStatus = statusMap[entry.sessionId]?.type ?? "unknown";
+    const messages: Array<MessageEnvelope> = messagesResult.data ?? [];
+
+    const projectRoot = resolveProjectRoot(session);
+    const planReady = await checkPlanReadiness({ projectRoot });
+
+    const userSnippet = buildSnippet(findLastByRole(messages, "user"));
+    const assistantSnippet = buildSnippet(findLastByRole(messages, "assistant"));
+
+    const title = escapeHtml(session.title ?? "");
+    const agent = entry.agent ? escapeHtml(entry.agent) : "?";
+
+    const text = [
+      `<b>세션 #${n}</b>: ${title}`,
+      `에이전트: ${agent}`,
+      `상태: ${escapeHtml(sessionStatus)}`,
+      ``,
+      `<b>마지막 메시지</b>`,
+      `유저: ${userSnippet}`,
+      `에이전트: ${assistantSnippet}`,
+      ``,
+      planLine(planReady),
+      ``,
+      boulderLine(planReady),
+    ].join("\n");
+
+    await bot.sendMessage(text, { parse_mode: "HTML" });
+    deps.logger.info("status shown", {
+      chatId,
+      sessionId: entry.sessionId,
+      snapshotIndex: n,
+    });
+  };
+}

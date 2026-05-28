@@ -1,8 +1,10 @@
 export {
   createPermissionDispatcher,
   handlePermissionAsked,
+  handlePermissionReplied,
   handlePermissionUpdated,
   isEventPermissionAsked,
+  isEventPermissionReplied,
 } from "./permission-updated.js";
 export {
   createQuestionDispatcher,

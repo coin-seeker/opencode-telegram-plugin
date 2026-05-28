@@ -11,6 +11,7 @@ import {
   createQuestionDispatcher,
   createStartWorkDispatcher,
   handlePermissionAsked,
+  handlePermissionReplied,
   handlePermissionUpdated,
   handleQuestionAsked,
   handleQuestionReplied,
@@ -20,6 +21,7 @@ import {
   handleSessionStatus,
   handleSessionUpdated,
   isEventPermissionAsked,
+  isEventPermissionReplied,
   isEventQuestionAsked,
   isEventQuestionReplied,
   isEventSessionError,
@@ -292,6 +294,9 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
             }
             if (isEventQuestionReplied(extEvent)) {
               return handleQuestionReplied(extEvent, ctx);
+            }
+            if (isEventPermissionReplied(extEvent)) {
+              return handlePermissionReplied(extEvent, ctx);
             }
             return;
           }

@@ -508,6 +508,46 @@ async function handlePermissionUpdated(event, ctx) {
 async function handlePermissionAsked(event, ctx) {
   await handleNormalizedPermission(normalizeAsked(event.properties), ctx);
 }
+function isEventPermissionReplied(event) {
+  if (event.type !== "permission.replied") return false;
+  const props = event.properties;
+  if (!props) return false;
+  if (typeof props.sessionID !== "string") return false;
+  const hasId = typeof props.permissionID === "string" || typeof props.requestID === "string";
+  return hasId;
+}
+function externalReplyLabel(value) {
+  if (value === "once") return "Allowed once in opencode";
+  if (value === "always") return "Always allowed in opencode";
+  if (value === "reject") return "Rejected in opencode";
+  return "Already answered in opencode";
+}
+async function handlePermissionReplied(event, ctx) {
+  const requestID = event.properties.requestID ?? event.properties.permissionID;
+  if (!requestID) return;
+  const found = await ctx.pendingPermissions.findByRequestID(requestID);
+  if (!found) return;
+  const label = externalReplyLabel(event.properties.reply ?? event.properties.response);
+  try {
+    await ctx.bot.editMessageRemoveKeyboard(
+      found.data.telegramMessageId,
+      `\u2705 ${label}
+
+${found.data.permission}: ${found.data.title}`
+    );
+    ctx.logger.info("permission externally replied - cleared pending", {
+      requestID,
+      sessionID: event.properties.sessionID
+    });
+  } catch (err) {
+    ctx.logger.error("failed to edit externally replied permission", {
+      error: String(err),
+      requestID
+    });
+  } finally {
+    await ctx.pendingPermissions.deletePending(found.shortHash);
+  }
+}
 function createPermissionDispatcher(ctx) {
   return {
     async handleCallbackQuery(data, messageId) {
@@ -1783,6 +1823,9 @@ var TelegramRemote = async (input) => {
             }
             if (isEventQuestionReplied(extEvent)) {
               return handleQuestionReplied(extEvent, ctx);
+            }
+            if (isEventPermissionReplied(extEvent)) {
+              return handlePermissionReplied(extEvent, ctx);
             }
             return;
           }

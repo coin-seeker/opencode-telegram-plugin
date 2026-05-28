@@ -18,8 +18,10 @@ import { SessionTitleService } from "../services/session-title-service.js";
 import {
   createPermissionDispatcher,
   handlePermissionAsked,
+  handlePermissionReplied,
   handlePermissionUpdated,
   isEventPermissionAsked,
+  isEventPermissionReplied,
 } from "./permission-updated.js";
 import type { EventHandlerContext } from "./types.js";
 
@@ -228,6 +230,108 @@ describe("permission updated flow", () => {
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Rejected/);
+  });
+
+  test("detects v1 and v2 permission.replied events", () => {
+    assert.equal(
+      isEventPermissionReplied({
+        type: "permission.replied",
+        properties: { sessionID: "ses_test", permissionID: "per_v1", response: "once" },
+      }),
+      true,
+    );
+    assert.equal(
+      isEventPermissionReplied({
+        type: "permission.replied",
+        properties: { sessionID: "ses_test", requestID: "per_v2", reply: "reject" },
+      }),
+      true,
+    );
+    assert.equal(
+      isEventPermissionReplied({ type: "permission.replied", properties: { sessionID: "x" } }),
+      false,
+    );
+    assert.equal(
+      isEventPermissionReplied({ type: "something.else", properties: { requestID: "x", sessionID: "y" } }),
+      false,
+    );
+  });
+
+  test("clears pending permission when replied outside Telegram (v2 requestID)", async () => {
+    const { bot, editedMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "replied-v2"), []);
+    const shortHash = createPermissionShortHash("per_external");
+
+    await ctx.pendingPermissions.savePending(shortHash, {
+      requestID: "per_external",
+      sessionID: "ses_test",
+      title: "Read .env",
+      permission: "read",
+      patterns: [".env"],
+      always: [],
+      sentAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      telegramMessageId: 42,
+      endpoint: "request",
+    });
+
+    await handlePermissionReplied(
+      {
+        type: "permission.replied",
+        properties: { sessionID: "ses_test", requestID: "per_external", reply: "once" },
+      },
+      ctx,
+    );
+
+    assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
+    assert.equal(editedMessages.at(-1)?.messageId, 42);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Allowed once in opencode/);
+  });
+
+  test("clears pending permission when replied outside Telegram (v1 permissionID)", async () => {
+    const { bot, editedMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "replied-v1"), []);
+    const shortHash = createPermissionShortHash("per_legacy");
+
+    await ctx.pendingPermissions.savePending(shortHash, {
+      requestID: "per_legacy",
+      sessionID: "ses_test",
+      title: "Read .env",
+      permission: "read",
+      patterns: [".env"],
+      always: [],
+      sentAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      telegramMessageId: 55,
+      endpoint: "session",
+    });
+
+    await handlePermissionReplied(
+      {
+        type: "permission.replied",
+        properties: { sessionID: "ses_test", permissionID: "per_legacy", response: "reject" },
+      },
+      ctx,
+    );
+
+    assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
+    assert.equal(editedMessages.at(-1)?.messageId, 55);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Rejected in opencode/);
+  });
+
+  test("permission.replied for unknown requestID is a no-op", async () => {
+    const { bot, editedMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "replied-unknown"), []);
+
+    await handlePermissionReplied(
+      {
+        type: "permission.replied",
+        properties: { sessionID: "ses_test", requestID: "per_unknown", reply: "once" },
+      },
+      ctx,
+    );
+
+    assert.deepEqual(editedMessages, []);
   });
 
   test("expires pending permission callbacks", async () => {

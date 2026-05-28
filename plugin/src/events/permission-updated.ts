@@ -141,6 +141,62 @@ export async function handlePermissionAsked(event: EventPermissionAsked, ctx: Ev
   await handleNormalizedPermission(normalizeAsked(event.properties), ctx);
 }
 
+interface PermissionRepliedEvent {
+  type: "permission.replied";
+  properties: {
+    sessionID: string;
+    // v1 SDK uses `permissionID`, v2 SDK uses `requestID`. We accept either.
+    permissionID?: string;
+    requestID?: string;
+    // v1 uses `response`, v2 uses `reply`. We accept either.
+    response?: string;
+    reply?: string;
+  };
+}
+
+export function isEventPermissionReplied(event: { type: string; properties?: Record<string, unknown> }): event is PermissionRepliedEvent {
+  if (event.type !== "permission.replied") return false;
+  const props = event.properties;
+  if (!props) return false;
+  if (typeof props.sessionID !== "string") return false;
+  const hasId =
+    typeof (props as { permissionID?: unknown }).permissionID === "string" ||
+    typeof (props as { requestID?: unknown }).requestID === "string";
+  return hasId;
+}
+
+function externalReplyLabel(value: string | undefined): string {
+  if (value === "once") return "Allowed once in opencode";
+  if (value === "always") return "Always allowed in opencode";
+  if (value === "reject") return "Rejected in opencode";
+  return "Already answered in opencode";
+}
+
+export async function handlePermissionReplied(event: PermissionRepliedEvent, ctx: EventHandlerContext): Promise<void> {
+  const requestID = event.properties.requestID ?? event.properties.permissionID;
+  if (!requestID) return;
+  const found = await ctx.pendingPermissions.findByRequestID(requestID);
+  if (!found) return;
+  const label = externalReplyLabel(event.properties.reply ?? event.properties.response);
+  try {
+    await ctx.bot.editMessageRemoveKeyboard(
+      found.data.telegramMessageId,
+      `✅ ${label}\n\n${found.data.permission}: ${found.data.title}`,
+    );
+    ctx.logger.info("permission externally replied - cleared pending", {
+      requestID,
+      sessionID: event.properties.sessionID,
+    });
+  } catch (err) {
+    ctx.logger.error("failed to edit externally replied permission", {
+      error: String(err),
+      requestID,
+    });
+  } finally {
+    await ctx.pendingPermissions.deletePending(found.shortHash);
+  }
+}
+
 export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPermissionDispatcher {
   return {
     async handleCallbackQuery(data, messageId) {

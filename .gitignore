@@ -29,3 +29,7 @@ debug/*
 restart*
 
 nohup.out
+
+# OpenCode workspace state
+.omo/
+**/.omo/

@@ -190,7 +190,7 @@ When a condition fails, a specific Korean reason is returned.
 
 #### Cross-Process Visibility
 
-`/sessions` reflects only the sessions observed by the **leader process**. If OpenCode is running in multiple windows, sessions from non-leader windows may not appear. The leader primes its cache from `session.list()` on startup, so all sessions on the same OpenCode server are visible after a restart.
+`/sessions` is handled by the **leader process** and fetches the current session list on demand. If OpenCode is running in multiple windows, it shows sessions visible to the leader's OpenCode server at the time the command is run.
 
 > **Note**: Telegram bot commands use underscores: `/start_work` (Telegram) maps internally to opencode's `/start-work` slash command.
 

@@ -1370,9 +1370,40 @@ function stripCodeFences(input) {
 var MAX_BODY_CHARS = 3900;
 var MAX_TITLE_CHARS = 55;
 var MAX_SESSIONS = 20;
+function agentFromSession(session) {
+  const candidate = session;
+  return typeof candidate.agent === "string" ? candidate.agent : void 0;
+}
+function isRootSession(session) {
+  return session.parentID === void 0 || session.parentID === null;
+}
 function createSessionsDispatcher(deps) {
   return async ({ chatId, bot }) => {
-    const sessions = deps.sessionTitleService.getRootSessionsByRecency(MAX_SESSIONS);
+    let sessions;
+    try {
+      const [listResult, statusResult] = await Promise.all([
+        deps.client.session.list(),
+        deps.client.session.status()
+      ]);
+      const statusMap = statusResult.data ?? {};
+      for (const session of listResult.data ?? []) {
+        deps.sessionTitleService.setSessionInfo(session);
+        deps.sessionTitleService.setServerUrl(session.id, deps.serverUrl);
+        const status = statusMap[session.id]?.type;
+        if (status !== void 0) deps.sessionTitleService.setSessionStatus(session.id, status);
+      }
+      sessions = (listResult.data ?? []).filter(isRootSession).sort((a, b) => b.time.updated - a.time.updated).slice(0, MAX_SESSIONS).map((session) => ({
+        sessionId: session.id,
+        title: session.title,
+        agent: agentFromSession(session),
+        status: statusMap[session.id]?.type,
+        serverUrl: deps.serverUrl
+      }));
+    } catch (err) {
+      await bot.sendMessage("\uC138\uC158 \uBAA9\uB85D\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", { parse_mode: "HTML" });
+      deps.logger.error("sessions list failed", { chatId, error: String(err) });
+      return;
+    }
     if (sessions.length === 0) {
       await bot.sendMessage("\uD65C\uC131 \uC138\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", { parse_mode: "HTML" });
       return;
@@ -1382,7 +1413,7 @@ function createSessionsDispatcher(deps) {
       const entry = {
         index: i + 1,
         sessionId: session.sessionId,
-        title: session.title ?? "",
+        title: session.title,
         capturedAt
       };
       if (session.agent !== void 0) entry.agent = session.agent;
@@ -1641,7 +1672,7 @@ function createStatusDispatcher(deps) {
 }
 
 // src/events/start-work-command.ts
-function agentFromSession(session) {
+function agentFromSession2(session) {
   const candidate = session;
   return typeof candidate.agent === "string" ? candidate.agent : void 0;
 }
@@ -1712,7 +1743,7 @@ function createStartWorkCommandDispatcher(deps) {
       deps.logger.error("start-work session lookup failed", { sessionId, error: String(err) });
       return;
     }
-    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession(session);
+    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession2(session);
     if (agent !== "plan") {
       await sendPlain(
         bot,
@@ -2147,7 +2178,7 @@ function createStateStore(opts = {}) {
 }
 
 // src/services/session-title-service.ts
-function agentFromSession2(info) {
+function agentFromSession3(info) {
   const candidate = info;
   return typeof candidate.agent === "string" ? candidate.agent : void 0;
 }
@@ -2158,7 +2189,7 @@ var SessionTitleService = class {
     this.sessions.set(info.id, {
       title: info.title || null,
       parentID: info.parentID ?? null,
-      agent: agentFromSession2(info) ?? existing?.agent,
+      agent: agentFromSession3(info) ?? existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
       lastSeenAt: Date.now(),
@@ -2446,7 +2477,13 @@ var TelegramRemote = async (input) => {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
       bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
-      bot.setSessionsDispatcher(createSessionsDispatcher({ sessionTitleService, snapshotStore, logger }));
+      bot.setSessionsDispatcher(createSessionsDispatcher({
+        client: input.client,
+        sessionTitleService,
+        snapshotStore,
+        serverUrl: input.serverUrl.href,
+        logger
+      }));
       bot.setStatusDispatcher(createStatusDispatcher({ snapshotStore, sessionTitleService, client: input.client, logger }));
       bot.setStartWorkCommandDispatcher(createStartWorkCommandDispatcher({
         snapshotStore,
@@ -2456,16 +2493,6 @@ var TelegramRemote = async (input) => {
         logger
       }));
       bot.setHelpDispatcher(createHelpDispatcher({ logger }));
-      try {
-        const sessions = await input.client.session.list();
-        for (const s of sessions.data ?? []) {
-          sessionTitleService.setSessionInfo(s);
-          sessionTitleService.setServerUrl(s.id, input.serverUrl.href);
-        }
-        logger.info("cold-start cache primed", { count: (sessions.data ?? []).length });
-      } catch (err) {
-        logger.error("cold-start priming failed", { error: String(err) });
-      }
     }
     return {
       event: async ({ event }) => {

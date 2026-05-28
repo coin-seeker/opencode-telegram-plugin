@@ -259,7 +259,13 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
       bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
-      bot.setSessionsDispatcher(createSessionsDispatcher({ sessionTitleService, snapshotStore, logger }));
+      bot.setSessionsDispatcher(createSessionsDispatcher({
+        client: input.client,
+        sessionTitleService,
+        snapshotStore,
+        serverUrl: input.serverUrl.href,
+        logger,
+      }));
       bot.setStatusDispatcher(createStatusDispatcher({ snapshotStore, sessionTitleService, client: input.client, logger }));
       bot.setStartWorkCommandDispatcher(createStartWorkCommandDispatcher({
         snapshotStore,
@@ -269,17 +275,6 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
         logger,
       }));
       bot.setHelpDispatcher(createHelpDispatcher({ logger }));
-
-      try {
-        const sessions = await input.client.session.list();
-        for (const s of (sessions.data ?? [])) {
-          sessionTitleService.setSessionInfo(s);
-          sessionTitleService.setServerUrl(s.id, input.serverUrl.href);
-        }
-        logger.info("cold-start cache primed", { count: (sessions.data ?? []).length });
-      } catch (err) {
-        logger.error("cold-start priming failed", { error: String(err) });
-      }
     }
 
     return {

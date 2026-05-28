@@ -123,5 +123,5 @@ export async function recheckSessionIdle(
   const result = await client.session.status();
   const statuses = result.data ?? {};
   const sessionStatus = statuses[sessionId];
-  return sessionStatus?.type === "idle";
+  return (sessionStatus?.type ?? "idle") === "idle";
 }

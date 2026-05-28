@@ -1,10 +1,15 @@
-import type { Session } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
 import { escapeHtml } from "../lib/html-escape.js";
+import {
+  getRemoteSession,
+  getRemoteStatusMap,
+  isDifferentServerUrl,
+  normalizeOpenCodeServerUrl,
+  type OpenCodeFetcher,
+} from "../lib/opencode-http.js";
 import type { PlanReadinessResult } from "../lib/plan-readiness.js";
 import { checkPlanReadiness, recheckSessionIdle } from "../lib/plan-readiness.js";
 import type { SnapshotStore } from "../lib/session-snapshot.js";
-import type { SessionWithAgent } from "../lib/sdk-augmentation.js";
 import type { OpencodeClient } from "../events/types.js";
 
 export type StartWorkCommandDispatcher = (ctx: {
@@ -24,12 +29,16 @@ interface HttpStatusError extends Error {
   };
 }
 
-function agentFromSession(session: Session): string | undefined {
-  const candidate: SessionWithAgent = session;
-  return typeof candidate.agent === "string" ? candidate.agent : undefined;
+interface StartWorkSession {
+  directory: string;
+  agent?: string;
 }
 
-function resolveProjectRoot(session: Session): string {
+function agentFromSession(session: StartWorkSession): string | undefined {
+  return session.agent;
+}
+
+function resolveProjectRoot(session: StartWorkSession): string {
   return session.directory;
 }
 
@@ -73,6 +82,8 @@ export function createStartWorkCommandDispatcher(deps: {
     getSessionAgent(id: string): string | undefined;
   };
   client: OpencodeClient;
+  serverUrl?: string;
+  opencodeFetch?: OpenCodeFetcher;
   runSessionCommand: (sessionId: string, command: string, serverUrl?: string) => Promise<void>;
   logger: {
     info(msg: string, data?: Record<string, unknown>): void;
@@ -105,25 +116,42 @@ export function createStartWorkCommandDispatcher(deps: {
     }
 
     const sessionId = entry.sessionId;
-    let session: Session;
+    const rawSourceServerUrl = entry.serverUrl ?? deps.sessionTitleService.getServerUrl(sessionId);
+    const sourceServerUrl = normalizeOpenCodeServerUrl(rawSourceServerUrl);
+    if (rawSourceServerUrl && !sourceServerUrl) {
+      await sendPlain(bot, "세션 서버 정보가 유효하지 않습니다. /sessions 재실행 필요");
+      deps.logger.error("start-work invalid server url", { sessionId });
+      return;
+    }
+    const useRemoteServer = isDifferentServerUrl(sourceServerUrl, deps.serverUrl);
+    let session: StartWorkSession;
     try {
-      const result = await deps.client.session.get({ path: { id: sessionId } });
-      if (!result.data) {
-        await sendPlain(bot, "세션이 더 이상 존재하지 않습니다");
-        return;
+      if (sourceServerUrl && useRemoteServer) {
+        const result = await getRemoteSession(sourceServerUrl, sessionId, deps.opencodeFetch);
+        if (!result.data || result.response.status === 404) {
+          await sendPlain(bot, "세션이 더 이상 존재하지 않습니다");
+          return;
+        }
+        session = result.data;
+      } else {
+        const result = await deps.client.session.get({ path: { id: sessionId } });
+        if (!result.data) {
+          await sendPlain(bot, "세션이 더 이상 존재하지 않습니다");
+          return;
+        }
+        session = result.data;
       }
-      session = result.data;
     } catch (err) {
       if (err instanceof Error && isSessionNotFoundError(err)) {
         await sendPlain(bot, "세션이 더 이상 존재하지 않습니다");
         return;
       }
-      await sendPlain(bot, `세션 확인 실패: ${String(err)}`);
+      await sendPlain(bot, "세션 확인 실패. /sessions 재실행 필요");
       deps.logger.error("start-work session lookup failed", { sessionId, error: String(err) });
       return;
     }
 
-    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession(session);
+    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession(session) ?? entry.agent;
     if (agent !== "plan") {
       await sendPlain(
         bot,
@@ -132,7 +160,16 @@ export function createStartWorkCommandDispatcher(deps: {
       return;
     }
 
-    const idle = await recheckSessionIdle(deps.client, sessionId);
+    let idle: boolean;
+    try {
+      idle = sourceServerUrl && useRemoteServer
+        ? ((await getRemoteStatusMap(sourceServerUrl, deps.opencodeFetch))[sessionId]?.type ?? "idle") === "idle"
+        : await recheckSessionIdle(deps.client, sessionId);
+    } catch (err) {
+      await sendPlain(bot, "세션 상태 확인 실패. /sessions 재실행 필요");
+      deps.logger.error("start-work idle recheck failed", { sessionId, error: String(err) });
+      return;
+    }
     if (!idle) {
       await sendPlain(bot, `${index}번 세션이 idle 상태가 아닙니다. 작업 완료를 기다리세요`);
       return;
@@ -145,15 +182,14 @@ export function createStartWorkCommandDispatcher(deps: {
     }
 
     try {
-      const serverUrl = deps.sessionTitleService.getServerUrl(sessionId);
-      await deps.runSessionCommand(sessionId, "start-work", serverUrl);
+      await deps.runSessionCommand(sessionId, "start-work", sourceServerUrl);
       await sendHtml(
         bot,
         `${index}번 세션에 opencode /start-work 슬래시 커맨드 전송 완료. (${escapeHtml(entry.title)})`,
       );
       deps.logger.info("start-work dispatched", { chatId, sessionId, index });
     } catch (err) {
-      await sendHtml(bot, "opencode /start-work 전송 실패: " + String(err));
+      await sendHtml(bot, "opencode /start-work 전송 실패");
       deps.logger.error("start-work dispatch failed", { sessionId, error: String(err) });
     }
   };

@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { Session } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
+import type { OpenCodeFetcher } from "../lib/opencode-http.js";
 import type { SessionWithAgent } from "../lib/sdk-augmentation.js";
+import type { SessionRegistryEntry, SessionRegistryStore } from "../lib/session-registry.js";
 import type { SnapshotEntry, SnapshotStore } from "../lib/session-snapshot.js";
 import type { SessionStatusType } from "../services/session-title-service.js";
 import { createSessionsDispatcher } from "./sessions-command.js";
@@ -27,6 +29,11 @@ interface CacheCalls {
   infos: Session[];
   urls: Array<{ sessionId: string; serverUrl: string }>;
   statuses: Array<{ sessionId: string; status: SessionStatusType }>;
+}
+
+interface RegistryCalls {
+  upserts: SessionRegistryEntry[];
+  updates: Array<{ sessionId: string; patch: Partial<Omit<SessionRegistryEntry, "sessionId">> }>;
 }
 
 function makeBot(sendCalls: SendCall[]): TelegramBotManager {
@@ -77,6 +84,29 @@ function makeSessionTitleService(calls: CacheCalls) {
   };
 }
 
+function makeSessionRegistry(
+  entries: SessionRegistryEntry[] = [],
+  calls: RegistryCalls = { upserts: [], updates: [] },
+): SessionRegistryStore {
+  const byId = new Map(entries.map((entry) => [entry.sessionId, entry]));
+  return {
+    async upsertSession(entry) {
+      calls.upserts.push(entry);
+      const existing = byId.get(entry.sessionId);
+      byId.set(entry.sessionId, { ...existing, ...entry });
+    },
+    async updateSession(sessionId, patch) {
+      calls.updates.push({ sessionId, patch });
+      const existing = byId.get(sessionId);
+      if (!existing) return;
+      byId.set(sessionId, { ...existing, ...patch, sessionId });
+    },
+    async listSessions() {
+      return [...byId.values()];
+    },
+  };
+}
+
 function makeClient(opts: {
   sessions?: Session[];
   statuses?: Record<string, { type: SessionStatusType }>;
@@ -121,18 +151,43 @@ function makeCacheCalls(): CacheCalls {
 
 const serverUrl = "http://localhost:7777/";
 
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function createDispatcher(opts: {
+  client: OpencodeClient;
+  cacheCalls: CacheCalls;
+  saveCalls: SaveCall[];
+  logs: LogCall[];
+  registry?: SessionRegistryStore;
+  opencodeFetch?: OpenCodeFetcher;
+}) {
+  return createSessionsDispatcher({
+    client: opts.client,
+    sessionTitleService: makeSessionTitleService(opts.cacheCalls),
+    sessionRegistry: opts.registry ?? makeSessionRegistry(),
+    snapshotStore: makeSnapshotStore(opts.saveCalls),
+    serverUrl,
+    logger: makeLogger(opts.logs),
+    opencodeFetch: opts.opencodeFetch,
+  });
+}
+
 describe("sessions-command dispatcher", () => {
   test("empty sessions: sends 'no active sessions' and does not save snapshot", async () => {
     const sendCalls: SendCall[] = [];
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({ sessions: [] }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 42, userId: 1, bot: makeBot(sendCalls) });
@@ -148,7 +203,7 @@ describe("sessions-command dispatcher", () => {
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
     const sessions = makeSessions(3);
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({
         sessions,
         statuses: {
@@ -157,10 +212,9 @@ describe("sessions-command dispatcher", () => {
           ses_3: { type: "retry" },
         },
       }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls) });
@@ -179,23 +233,288 @@ describe("sessions-command dispatcher", () => {
     assert.equal(cacheCalls.statuses.length, 3);
   });
 
+  test("registry-only root sessions are included for cross-process visibility", async () => {
+    const sendCalls: SendCall[] = [];
+    const saveCalls: SaveCall[] = [];
+    const logs: LogCall[] = [];
+    const cacheCalls = makeCacheCalls();
+    const registry = makeSessionRegistry([
+      {
+        sessionId: "ses_other",
+        title: "Other Window",
+        parentID: null,
+        agent: "build",
+        status: "idle",
+        serverUrl: "http://localhost:8888/",
+        updatedAt: 2000,
+      },
+    ]);
+    const opencodeFetch: OpenCodeFetcher = async (url) => {
+      if (url.href === "http://localhost:8888/session") {
+        return jsonResponse([
+          {
+            id: "ses_other",
+            title: "Other Window",
+            parentID: null,
+            agent: "build",
+            time: { updated: 2000 },
+          },
+        ]);
+      }
+      if (url.href === "http://localhost:8888/session/status") {
+        return jsonResponse({ ses_other: { type: "busy" } });
+      }
+      return jsonResponse({}, 404);
+    };
+    const dispatcher = createDispatcher({
+      client: makeClient({ sessions: [] }),
+      cacheCalls,
+      saveCalls,
+      logs,
+      registry,
+      opencodeFetch,
+    });
+
+    await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls) });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.ok(text.includes("1. [build] Other Window — busy"));
+    assert.equal(saveCalls.length, 1);
+    assert.equal(saveCalls[0]?.entries[0]?.sessionId, "ses_other");
+    assert.equal(saveCalls[0]?.entries[0]?.serverUrl, "http://localhost:8888/");
+  });
+
+  test("remote registry server refresh includes root sessions not yet in registry", async () => {
+    const sendCalls: SendCall[] = [];
+    const saveCalls: SaveCall[] = [];
+    const logs: LogCall[] = [];
+    const cacheCalls = makeCacheCalls();
+    const registry = makeSessionRegistry([
+      {
+        sessionId: "ses_known_remote",
+        title: "Known Remote",
+        parentID: null,
+        agent: "build",
+        status: "busy",
+        serverUrl: "http://localhost:8888/",
+        updatedAt: 2000,
+      },
+    ]);
+    const opencodeFetch: OpenCodeFetcher = async (url) => {
+      if (url.href === "http://localhost:8888/session") {
+        return jsonResponse([
+          {
+            id: "ses_known_remote",
+            title: "Known Remote",
+            parentID: null,
+            agent: "build",
+            time: { updated: 2000 },
+          },
+          {
+            id: "ses_rollback",
+            title: "opencode 터미널 멈춤 롤백",
+            parentID: null,
+            agent: "build",
+            time: { updated: 3000 },
+          },
+        ]);
+      }
+      if (url.href === "http://localhost:8888/session/status") {
+        return jsonResponse({ ses_known_remote: { type: "busy" }, ses_rollback: { type: "busy" } });
+      }
+      return jsonResponse({}, 404);
+    };
+    const dispatcher = createDispatcher({
+      client: makeClient({ sessions: [] }),
+      cacheCalls,
+      saveCalls,
+      logs,
+      registry,
+      opencodeFetch,
+    });
+
+    await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls) });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.ok(text.includes("1. [build] opencode 터미널 멈춤 롤백 — busy"));
+    assert.ok(text.includes("2. [build] Known Remote — busy"));
+    assert.deepEqual(saveCalls[0]?.entries.map((entry) => entry.sessionId), ["ses_rollback", "ses_known_remote"]);
+  });
+
+  test("unreachable remote registry server entries are not rendered", async () => {
+    const sendCalls: SendCall[] = [];
+    const saveCalls: SaveCall[] = [];
+    const logs: LogCall[] = [];
+    const cacheCalls = makeCacheCalls();
+    const registry = makeSessionRegistry([
+      {
+        sessionId: "ses_stale_remote",
+        title: "Stale Remote",
+        parentID: null,
+        agent: "build",
+        status: "busy",
+        serverUrl: "http://localhost:8888/",
+        updatedAt: 2000,
+      },
+    ]);
+    const dispatcher = createDispatcher({
+      client: makeClient({ sessions: [] }),
+      cacheCalls,
+      saveCalls,
+      logs,
+      registry,
+      opencodeFetch: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+
+    await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls) });
+
+    assert.equal(sendCalls[0]?.text, "세션이 없습니다.");
+    assert.equal(saveCalls.length, 0);
+    assert.equal(logs[0]?.msg, "sessions remote server refresh failed");
+  });
+
+  test("registry-only sessions without status render and snapshot as idle", async () => {
+    const sendCalls: SendCall[] = [];
+    const saveCalls: SaveCall[] = [];
+    const logs: LogCall[] = [];
+    const cacheCalls = makeCacheCalls();
+    const registry = makeSessionRegistry([
+      {
+        sessionId: "ses_other_missing_status",
+        title: "Other Missing Status",
+        parentID: null,
+        agent: "build",
+        serverUrl: "http://localhost:8888/",
+        updatedAt: 2000,
+      },
+    ]);
+    const opencodeFetch: OpenCodeFetcher = async (url) => {
+      if (url.href === "http://localhost:8888/session") {
+        return jsonResponse([
+          {
+            id: "ses_other_missing_status",
+            title: "Other Missing Status",
+            parentID: null,
+            agent: "build",
+            time: { updated: 2000 },
+          },
+        ]);
+      }
+      if (url.href === "http://localhost:8888/session/status") {
+        return jsonResponse({});
+      }
+      return jsonResponse({}, 404);
+    };
+    const dispatcher = createDispatcher({
+      client: makeClient({ sessions: [] }),
+      cacheCalls,
+      saveCalls,
+      logs,
+      registry,
+      opencodeFetch,
+    });
+
+    await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls) });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.ok(text.includes("1. [build] Other Missing Status — idle"));
+    assert.equal(saveCalls[0]?.entries[0]?.status, "idle");
+  });
+
+  test("live sessions override stale registry entries with the same id", async () => {
+    const sendCalls: SendCall[] = [];
+    const saveCalls: SaveCall[] = [];
+    const logs: LogCall[] = [];
+    const cacheCalls = makeCacheCalls();
+    const registry = makeSessionRegistry([
+      {
+        sessionId: "ses_1",
+        title: "Stale Title",
+        parentID: null,
+        agent: "plan",
+        status: "busy",
+        serverUrl: "http://localhost:9999/",
+        updatedAt: 1,
+      },
+    ]);
+    const dispatcher = createDispatcher({
+      client: makeClient({
+        sessions: [makeSession(1, { title: "Live Title", agent: "build" })],
+        statuses: { ses_1: { type: "idle" } },
+      }),
+      cacheCalls,
+      saveCalls,
+      logs,
+      registry,
+    });
+
+    await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls) });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.ok(text.includes("1. [build] Live Title — idle"));
+    assert.ok(!text.includes("Stale Title"));
+    assert.equal(saveCalls[0]?.entries[0]?.serverUrl, serverUrl);
+  });
+
+  test("registry child sessions are excluded from the rendered snapshot", async () => {
+    const sendCalls: SendCall[] = [];
+    const saveCalls: SaveCall[] = [];
+    const logs: LogCall[] = [];
+    const cacheCalls = makeCacheCalls();
+    const registry = makeSessionRegistry([
+      {
+        sessionId: "ses_registry_root",
+        title: "Registry Root",
+        parentID: null,
+        agent: "build",
+        status: "idle",
+        serverUrl,
+        updatedAt: 2000,
+      },
+      {
+        sessionId: "ses_registry_child",
+        title: "Registry Child",
+        parentID: "ses_registry_root",
+        agent: "build",
+        status: "idle",
+        serverUrl,
+        updatedAt: 3000,
+      },
+    ]);
+    const dispatcher = createDispatcher({
+      client: makeClient({ sessions: [] }),
+      cacheCalls,
+      saveCalls,
+      logs,
+      registry,
+    });
+
+    await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls) });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.ok(text.includes("Registry Root"));
+    assert.ok(!text.includes("Registry Child"));
+    assert.equal(saveCalls[0]?.entries.length, 1);
+  });
+
   test("21 sessions: limit enforced after live session.list()", async () => {
     const sendCalls: SendCall[] = [];
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
     let listCalls = 0;
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({
         sessions: makeSessions(21),
         onList: () => {
           listCalls += 1;
         },
       }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls) });
@@ -213,17 +532,16 @@ describe("sessions-command dispatcher", () => {
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({
         sessions: [
           makeSession(1, { title: "Root" }),
           makeSession(2, { title: "Child", parentID: "ses_1" }),
         ],
       }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls) });
@@ -238,14 +556,13 @@ describe("sessions-command dispatcher", () => {
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({
         sessions: [makeSession(1, { title: "<script>alert(1)</script>" })],
       }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls) });
@@ -261,12 +578,11 @@ describe("sessions-command dispatcher", () => {
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({ sessions: makeSessions(2) }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls) });
@@ -280,12 +596,11 @@ describe("sessions-command dispatcher", () => {
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({ sessions: [] }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls) });
@@ -299,12 +614,11 @@ describe("sessions-command dispatcher", () => {
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({ sessions: makeSessions(3) }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 99, userId: 1, bot: makeBot(sendCalls) });
@@ -320,17 +634,16 @@ describe("sessions-command dispatcher", () => {
     assert.equal(Object.prototype.hasOwnProperty.call(data, "message"), false);
   });
 
-  test("missing agent renders as '?' and missing status omits suffix", async () => {
+  test("missing agent renders as '?' and missing status renders idle", async () => {
     const sendCalls: SendCall[] = [];
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({ sessions: [makeSession(1, { agent: undefined })] }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls) });
@@ -338,7 +651,7 @@ describe("sessions-command dispatcher", () => {
     const text = sendCalls[0]?.text ?? "";
     assert.ok(text.includes("[?]"), "missing agent should be '?' ");
     assert.ok(!text.includes("unknown"), "missing status should not render 'unknown'");
-    assert.ok(!text.includes("Title 1 —"), "missing status should not render a dangling separator");
+    assert.ok(text.includes("Title 1 — idle"), "missing status should render idle");
   });
 
   test("session list failure: sends load failure and does not save snapshot", async () => {
@@ -346,12 +659,11 @@ describe("sessions-command dispatcher", () => {
     const saveCalls: SaveCall[] = [];
     const logs: LogCall[] = [];
     const cacheCalls = makeCacheCalls();
-    const dispatcher = createSessionsDispatcher({
+    const dispatcher = createDispatcher({
       client: makeClient({ listError: new Error("boom") }),
-      sessionTitleService: makeSessionTitleService(cacheCalls),
-      snapshotStore: makeSnapshotStore(saveCalls),
-      serverUrl,
-      logger: makeLogger(logs),
+      cacheCalls,
+      saveCalls,
+      logs,
     });
 
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls) });

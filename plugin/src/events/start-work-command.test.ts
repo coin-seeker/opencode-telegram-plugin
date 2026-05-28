@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { Session } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
+import type { OpenCodeFetcher } from "../lib/opencode-http.js";
 import type { SnapshotEntry, SnapshotStore } from "../lib/session-snapshot.js";
 import type { SessionWithAgent } from "../lib/sdk-augmentation.js";
 import { createStartWorkCommandDispatcher } from "./start-work-command.js";
@@ -39,6 +40,8 @@ interface HarnessOptions {
   idle?: boolean;
   serviceAgent?: string;
   serverUrl?: string;
+  currentServerUrl?: string;
+  opencodeFetch?: OpenCodeFetcher;
   runError?: Error;
 }
 
@@ -94,6 +97,13 @@ function makeNotFoundError(): StatusError {
   return err;
 }
 
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 function makeClient(args: {
   session: Session;
   sessionGetError?: Error;
@@ -139,6 +149,8 @@ function makeHarness(options: HarnessOptions) {
       idle: options.idle ?? true,
       statusCalls,
     }),
+    serverUrl: options.currentServerUrl,
+    opencodeFetch: options.opencodeFetch,
     async runSessionCommand(sessionId, command, serverUrl) {
       if (options.runError) throw options.runError;
       commands.push({ sessionId, command, serverUrl });
@@ -335,7 +347,7 @@ describe("start-work-command dispatcher", () => {
     await harness.run(["1"]);
 
     assert.deepEqual(harness.commands, [
-      { sessionId: "ses_plan", command: "start-work", serverUrl: "http://localhost:7777" },
+      { sessionId: "ses_plan", command: "start-work", serverUrl: "http://localhost:7777/" },
     ]);
     assert.equal(
       harness.sendCalls[0]?.text,
@@ -345,6 +357,117 @@ describe("start-work-command dispatcher", () => {
     assert.equal(harness.infoLogs[0]?.msg, "start-work dispatched");
     assert.equal(harness.infoLogs[0]?.data?.sessionId, "ses_plan");
     assert.equal(harness.statusCalls.count, 1);
+  });
+
+  test("registry snapshot server URL is used for remote session lookup, idle recheck, and dispatch", async () => {
+    const projectRoot = await createReadyProject(dir, "remote-server");
+    const requested: string[] = [];
+    const opencodeFetch: OpenCodeFetcher = async (url) => {
+      requested.push(url.href);
+      if (url.pathname === "/session/ses_remote_plan") {
+        return jsonResponse({ id: "ses_remote_plan", directory: projectRoot, agent: "plan" });
+      }
+      if (url.pathname === "/session/status") {
+        return jsonResponse({ ses_remote_plan: { type: "idle" } });
+      }
+      return jsonResponse({ message: "not found" }, 404);
+    };
+    const harness = makeHarness({
+      projectRoot,
+      currentServerUrl: "http://127.0.0.1:7777/",
+      opencodeFetch,
+      snapshot: [
+        makeEntry({
+          sessionId: "ses_remote_plan",
+          title: "Remote Plan",
+          agent: "plan",
+          serverUrl: "http://127.0.0.1:8888/",
+        }),
+      ],
+    });
+
+    await harness.run(["1"]);
+
+    assert.equal(harness.statusCalls.count, 0);
+    assert.deepEqual(requested.sort(), [
+      "http://127.0.0.1:8888/session/ses_remote_plan",
+      "http://127.0.0.1:8888/session/status",
+    ].sort());
+    assert.deepEqual(harness.commands, [
+      { sessionId: "ses_remote_plan", command: "start-work", serverUrl: "http://127.0.0.1:8888/" },
+    ]);
+    assert.equal(
+      harness.sendCalls[0]?.text,
+      "1번 세션에 opencode /start-work 슬래시 커맨드 전송 완료. (Remote Plan)",
+    );
+  });
+
+  test("remote idle recheck failure returns graceful status-check message", async () => {
+    const projectRoot = await createReadyProject(dir, "remote-status-failure");
+    const requested: string[] = [];
+    const opencodeFetch: OpenCodeFetcher = async (url) => {
+      requested.push(url.href);
+      if (url.pathname === "/session/ses_remote_plan") {
+        return jsonResponse({ id: "ses_remote_plan", directory: projectRoot, agent: "plan" });
+      }
+      if (url.pathname === "/session/status") {
+        return jsonResponse({ secret: "do-not-leak" }, 500);
+      }
+      return jsonResponse({ message: "not found" }, 404);
+    };
+    const harness = makeHarness({
+      projectRoot,
+      currentServerUrl: "http://127.0.0.1:7777/",
+      opencodeFetch,
+      snapshot: [
+        makeEntry({
+          sessionId: "ses_remote_plan",
+          title: "Remote Plan",
+          agent: "plan",
+          serverUrl: "http://127.0.0.1:8888/",
+        }),
+      ],
+    });
+
+    await harness.run(["1"]);
+
+    assert.deepEqual(requested.sort(), [
+      "http://127.0.0.1:8888/session/ses_remote_plan",
+      "http://127.0.0.1:8888/session/status",
+    ].sort());
+    assert.equal(harness.commands.length, 0);
+    assert.equal(harness.sendCalls[0]?.text, "세션 상태 확인 실패. /sessions 재실행 필요");
+    assert.ok(!((harness.sendCalls[0]?.text ?? "").includes("do-not-leak")));
+    assert.equal(harness.errorLogs[0]?.msg, "start-work idle recheck failed");
+  });
+
+  test("invalid snapshot server URL is rejected before lookup", async () => {
+    const projectRoot = await createReadyProject(dir, "invalid-server-url");
+    let fetchCalled = false;
+    const harness = makeHarness({
+      projectRoot,
+      currentServerUrl: "http://127.0.0.1:7777/",
+      opencodeFetch: async () => {
+        fetchCalled = true;
+        return jsonResponse({});
+      },
+      snapshot: [
+        makeEntry({
+          sessionId: "ses_bad_url",
+          title: "Bad URL",
+          agent: "plan",
+          serverUrl: "http://10.0.0.2/",
+        }),
+      ],
+    });
+
+    await harness.run(["1"]);
+
+    assert.equal(fetchCalled, false);
+    assert.equal(harness.statusCalls.count, 0);
+    assert.equal(harness.commands.length, 0);
+    assert.equal(harness.sendCalls[0]?.text, "세션 서버 정보가 유효하지 않습니다. /sessions 재실행 필요");
+    assert.equal(harness.errorLogs[0]?.msg, "start-work invalid server url");
   });
 
   test("runSessionCommand throws sends error message and logs failure", async () => {
@@ -358,7 +481,7 @@ describe("start-work-command dispatcher", () => {
     await harness.run(["1"]);
 
     assert.equal(harness.commands.length, 0);
-    assert.equal(harness.sendCalls[0]?.text, "opencode /start-work 전송 실패: Error: boom");
+    assert.equal(harness.sendCalls[0]?.text, "opencode /start-work 전송 실패");
     assert.deepEqual(harness.sendCalls[0]?.opts, { parse_mode: "HTML" });
     assert.equal(harness.errorLogs[0]?.msg, "start-work dispatch failed");
     assert.equal(harness.errorLogs[0]?.data?.sessionId, "ses_plan");

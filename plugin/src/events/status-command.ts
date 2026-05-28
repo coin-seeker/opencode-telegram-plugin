@@ -1,6 +1,18 @@
-import type { Message, Part } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
 import { escapeHtml, stripCodeFences, truncateForTelegram } from "../lib/html-escape.js";
+import {
+  getRemoteMessages,
+  getRemoteSession,
+  getRemoteStatusMap,
+  isDifferentServerUrl,
+  normalizeMessages,
+  normalizeOpenCodeServerUrl,
+  normalizeSession,
+  normalizeStatusMap,
+  type OpenCodeFetcher,
+  type OpenCodeMessageEnvelope,
+  type OpenCodeSessionData,
+} from "../lib/opencode-http.js";
 import { checkPlanReadiness, type PlanReadinessResult } from "../lib/plan-readiness.js";
 import type { SnapshotStore } from "../lib/session-snapshot.js";
 import type { OpencodeClient } from "./types.js";
@@ -26,29 +38,20 @@ export interface StatusDispatcherDeps {
   sessionTitleService: StatusSessionTitleService;
   client: OpencodeClient;
   logger: StatusLogger;
+  serverUrl?: string;
+  opencodeFetch?: OpenCodeFetcher;
 }
 
 const SNIPPET_MAX_CHARS = 80;
 const MESSAGES_LIMIT = 10;
 const EMPTY_MESSAGE = "메시지 없음";
 
-interface SessionLike {
-  directory: string;
-  title?: string;
-  parentID?: string;
-}
-
 function resolveProjectRoot(session: { directory: string }): string {
   if (!session.directory) throw new Error("session directory missing");
   return session.directory;
 }
 
-interface MessageEnvelope {
-  info: Message;
-  parts: Array<Part>;
-}
-
-function extractTextFromParts(parts: Array<Part>): string {
+function extractTextFromParts(parts: OpenCodeMessageEnvelope["parts"]): string {
   const pieces: string[] = [];
   for (const part of parts) {
     if (part.type === "text" && typeof part.text === "string") {
@@ -58,7 +61,7 @@ function extractTextFromParts(parts: Array<Part>): string {
   return pieces.join(" ");
 }
 
-function buildSnippet(envelope: MessageEnvelope | undefined): string {
+function buildSnippet(envelope: OpenCodeMessageEnvelope | undefined): string {
   if (!envelope) return EMPTY_MESSAGE;
   try {
     const raw = extractTextFromParts(envelope.parts);
@@ -72,9 +75,9 @@ function buildSnippet(envelope: MessageEnvelope | undefined): string {
 }
 
 function findLastByRole(
-  messages: Array<MessageEnvelope>,
+  messages: Array<OpenCodeMessageEnvelope>,
   role: "user" | "assistant",
-): MessageEnvelope | undefined {
+): OpenCodeMessageEnvelope | undefined {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     if (msg && msg.info.role === role) return msg;
@@ -148,27 +151,67 @@ export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispat
       return;
     }
 
-    const [getResult, statusResult, messagesResult] = await Promise.all([
-      deps.client.session.get({ path: { id: entry.sessionId } }),
-      deps.client.session.status(),
-      deps.client.session.messages({
-        path: { id: entry.sessionId },
-        query: { limit: MESSAGES_LIMIT },
-      }),
-    ]);
+    const rawSourceServerUrl = entry.serverUrl ?? deps.sessionTitleService.getServerUrl(entry.sessionId);
+    const sourceServerUrl = normalizeOpenCodeServerUrl(rawSourceServerUrl);
+    if (rawSourceServerUrl && !sourceServerUrl) {
+      await bot.sendMessage("세션 서버 정보가 유효하지 않습니다. /sessions 재실행 필요", {
+        parse_mode: "HTML",
+      });
+      deps.logger.error("status invalid server url", { chatId, sessionId: entry.sessionId });
+      return;
+    }
+    const useRemoteServer = isDifferentServerUrl(sourceServerUrl, deps.serverUrl);
+    let session: OpenCodeSessionData | undefined;
+    let responseStatus: number | undefined;
+    let sessionStatus = "idle";
+    let messages: OpenCodeMessageEnvelope[] = [];
 
-    const session = getResult.data as SessionLike | undefined;
-    const responseStatus = getResult.response?.status;
+    if (sourceServerUrl && useRemoteServer) {
+      try {
+        const getResult = await getRemoteSession(sourceServerUrl, entry.sessionId, deps.opencodeFetch);
+        session = getResult.data;
+        responseStatus = getResult.response.status;
+        if (!session || responseStatus === 404) {
+          await bot.sendMessage("세션이 더 이상 존재하지 않습니다. /sessions 재실행 필요", {
+            parse_mode: "HTML",
+          });
+          return;
+        }
+        const [statusMap, remoteMessages] = await Promise.all([
+          getRemoteStatusMap(sourceServerUrl, deps.opencodeFetch),
+          getRemoteMessages(sourceServerUrl, entry.sessionId, MESSAGES_LIMIT, deps.opencodeFetch),
+        ]);
+        sessionStatus = statusMap[entry.sessionId]?.type ?? "idle";
+        messages = remoteMessages;
+      } catch (err) {
+        await bot.sendMessage("세션 상태를 불러오지 못했습니다. /sessions 재실행 필요", {
+          parse_mode: "HTML",
+        });
+        deps.logger.error("status remote lookup failed", { chatId, sessionId: entry.sessionId, error: String(err) });
+        return;
+      }
+    } else {
+      const [getResult, statusResult, messagesResult] = await Promise.all([
+        deps.client.session.get({ path: { id: entry.sessionId } }),
+        deps.client.session.status(),
+        deps.client.session.messages({
+          path: { id: entry.sessionId },
+          query: { limit: MESSAGES_LIMIT },
+        }),
+      ]);
+      session = normalizeSession(getResult.data);
+      responseStatus = getResult.response?.status;
+      const statusMap = normalizeStatusMap(statusResult.data);
+      sessionStatus = statusMap[entry.sessionId]?.type ?? "idle";
+      messages = normalizeMessages(messagesResult.data);
+    }
+
     if (!session || responseStatus === 404) {
       await bot.sendMessage("세션이 더 이상 존재하지 않습니다. /sessions 재실행 필요", {
         parse_mode: "HTML",
       });
       return;
     }
-
-    const statusMap = statusResult.data ?? {};
-    const sessionStatus = statusMap[entry.sessionId]?.type ?? "unknown";
-    const messages: Array<MessageEnvelope> = messagesResult.data ?? [];
 
     const projectRoot = resolveProjectRoot(session);
     const planReady = await checkPlanReadiness({ projectRoot });

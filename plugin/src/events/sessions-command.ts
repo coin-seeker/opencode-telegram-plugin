@@ -1,7 +1,20 @@
 import type { Session } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
 import { escapeHtml, truncateForTelegram } from "../lib/html-escape.js";
+import {
+  getRemoteSessions,
+  getRemoteStatusMap,
+  isDifferentServerUrl,
+  normalizeOpenCodeServerUrl,
+  type OpenCodeFetcher,
+  type OpenCodeSessionListItem,
+} from "../lib/opencode-http.js";
 import type { SessionWithAgent } from "../lib/sdk-augmentation.js";
+import {
+  registryEntryFromSession,
+  type SessionRegistryEntry,
+  type SessionRegistryStore,
+} from "../lib/session-registry.js";
 import type { SnapshotEntry, SnapshotStore } from "../lib/session-snapshot.js";
 import type { SessionStatusType } from "../services/session-title-service.js";
 import type { OpencodeClient } from "./types.js";
@@ -16,8 +29,9 @@ interface SessionsRecord {
   sessionId: string;
   title: string;
   agent: string | undefined;
-  status: SessionStatusType | undefined;
+  status: SessionStatusType;
   serverUrl: string;
+  updatedAt: number;
 }
 
 interface SessionsLogger {
@@ -32,9 +46,11 @@ interface SessionsDispatcherDeps {
     setServerUrl(sessionId: string, serverUrl: string): void;
     setSessionStatus(sessionId: string, status: SessionStatusType): void;
   };
+  sessionRegistry: SessionRegistryStore;
   snapshotStore: SnapshotStore;
   serverUrl: string;
   logger: SessionsLogger;
+  opencodeFetch?: OpenCodeFetcher;
 }
 
 const MAX_BODY_CHARS = 3900;
@@ -48,6 +64,60 @@ function agentFromSession(session: Session): string | undefined {
 
 function isRootSession(session: Session): boolean {
   return session.parentID === undefined || session.parentID === null;
+}
+
+function isRootRegistryEntry(entry: SessionRegistryEntry): boolean {
+  return entry.parentID === null;
+}
+
+function isRootRemoteSession(session: OpenCodeSessionListItem): boolean {
+  return session.parentID === undefined || session.parentID === null;
+}
+
+function addRegistryRecord(
+  combined: Map<string, SessionsRecord>,
+  entry: SessionRegistryEntry,
+  status?: SessionStatusType,
+): void {
+  combined.set(entry.sessionId, {
+    sessionId: entry.sessionId,
+    title: entry.title,
+    agent: entry.agent,
+    status: status ?? entry.status ?? "idle",
+    serverUrl: entry.serverUrl,
+    updatedAt: entry.updatedAt,
+  });
+}
+
+async function addRemoteServerRecords(
+  combined: Map<string, SessionsRecord>,
+  serverUrl: string,
+  deps: SessionsDispatcherDeps,
+): Promise<void> {
+  const [remoteSessions, remoteStatusMap] = await Promise.all([
+    getRemoteSessions(serverUrl, deps.opencodeFetch),
+    getRemoteStatusMap(serverUrl, deps.opencodeFetch),
+  ]);
+  for (const session of remoteSessions.filter(isRootRemoteSession)) {
+    const status = remoteStatusMap[session.id]?.type ?? "idle";
+    combined.set(session.id, {
+      sessionId: session.id,
+      title: session.title,
+      agent: session.agent,
+      status,
+      serverUrl,
+      updatedAt: session.time.updated,
+    });
+    await deps.sessionRegistry.upsertSession({
+      sessionId: session.id,
+      title: session.title,
+      parentID: session.parentID ?? null,
+      agent: session.agent,
+      status,
+      serverUrl,
+      updatedAt: session.time.updated,
+    });
+  }
 }
 
 export function createSessionsDispatcher(
@@ -64,21 +134,46 @@ export function createSessionsDispatcher(
       for (const session of listResult.data ?? []) {
         deps.sessionTitleService.setSessionInfo(session);
         deps.sessionTitleService.setServerUrl(session.id, deps.serverUrl);
-        const status = statusMap[session.id]?.type;
+        const status = statusMap[session.id]?.type ?? "idle";
+        await deps.sessionRegistry.upsertSession(
+          registryEntryFromSession(session, deps.serverUrl, status),
+        );
         if (status !== undefined) deps.sessionTitleService.setSessionStatus(session.id, status);
       }
 
-      sessions = (listResult.data ?? [])
-        .filter(isRootSession)
-        .sort((a, b) => b.time.updated - a.time.updated)
-        .slice(0, MAX_SESSIONS)
-        .map((session) => ({
+      const registrySessions = await deps.sessionRegistry.listSessions();
+      const combined = new Map<string, SessionsRecord>();
+      const remoteServerUrls = new Set<string>();
+      for (const entry of registrySessions.filter(isRootRegistryEntry)) {
+        const serverUrl = normalizeOpenCodeServerUrl(entry.serverUrl);
+        if (!serverUrl) continue;
+        if (isDifferentServerUrl(serverUrl, deps.serverUrl)) {
+          remoteServerUrls.add(serverUrl);
+          continue;
+        }
+        addRegistryRecord(combined, { ...entry, serverUrl }, statusMap[entry.sessionId]?.type);
+      }
+      for (const serverUrl of remoteServerUrls) {
+        try {
+          await addRemoteServerRecords(combined, serverUrl, deps);
+        } catch (err) {
+          deps.logger.error("sessions remote server refresh failed", { serverUrl, error: String(err) });
+        }
+      }
+      for (const session of (listResult.data ?? []).filter(isRootSession)) {
+        combined.set(session.id, {
           sessionId: session.id,
           title: session.title,
           agent: agentFromSession(session),
-          status: statusMap[session.id]?.type,
+          status: statusMap[session.id]?.type ?? "idle",
           serverUrl: deps.serverUrl,
-        }));
+          updatedAt: session.time.updated,
+        });
+      }
+
+      sessions = [...combined.values()]
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, MAX_SESSIONS);
     } catch (err) {
       await bot.sendMessage("세션 목록을 불러오지 못했습니다.", { parse_mode: "HTML" });
       deps.logger.error("sessions list failed", { chatId, error: String(err) });
@@ -99,7 +194,7 @@ export function createSessionsDispatcher(
         capturedAt,
       };
       if (session.agent !== undefined) entry.agent = session.agent;
-      if (session.status !== undefined) entry.status = session.status;
+      entry.status = session.status;
       if (session.serverUrl !== undefined) entry.serverUrl = session.serverUrl;
       return entry;
     });
@@ -109,7 +204,7 @@ export function createSessionsDispatcher(
     const lines = entries.map((entry) => {
       const agent = entry.agent ? escapeHtml(entry.agent) : "?";
       const title = truncateForTelegram(escapeHtml(entry.title), MAX_TITLE_CHARS);
-      const status = entry.status ? ` — ${escapeHtml(entry.status)}` : "";
+      const status = ` — ${escapeHtml(entry.status ?? "idle")}`;
       return `${entry.index}. [${agent}] ${title}${status}`;
     });
 

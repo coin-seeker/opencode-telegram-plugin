@@ -170,13 +170,13 @@ describe("recheckSessionIdle", () => {
     assert.equal(result, false);
   });
 
-  test("returns false when session is unknown", async () => {
+  test("returns true when session status is absent", async () => {
     const client = {
       session: {
         status: async () => ({ data: {} }),
       },
     } as unknown as OpencodeClient;
     const result = await recheckSessionIdle(client, "ses-missing");
-    assert.equal(result, false);
+    assert.equal(result, true);
   });
 });

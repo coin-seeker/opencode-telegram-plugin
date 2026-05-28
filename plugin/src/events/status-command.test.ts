@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { TelegramBotManager } from "../bot.js";
+import type { OpenCodeFetcher } from "../lib/opencode-http.js";
 import type { SnapshotEntry, SnapshotStore } from "../lib/session-snapshot.js";
 import { createStatusDispatcher } from "./status-command.js";
 import type { OpencodeClient } from "./types.js";
@@ -102,6 +103,13 @@ function makeEntry(overrides: Partial<SnapshotEntry> = {}): SnapshotEntry {
     capturedAt: Date.now(),
     ...overrides,
   };
+}
+
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 describe("status-command dispatcher", () => {
@@ -304,6 +312,208 @@ describe("status-command dispatcher", () => {
     const text = sendCalls[0]?.text ?? "";
     assert.match(text, /유저: 메시지 없음/);
     assert.match(text, /에이전트: 메시지 없음/);
+  });
+
+  test("missing status entry falls back to idle", async () => {
+    const projectRoot = await freshProject();
+    const sendCalls: SendCall[] = [];
+    const dispatcher = createStatusDispatcher({
+      snapshotStore: makeSnapshotStore([makeEntry({ index: 1, sessionId: "ses_idle_missing" })]),
+      sessionTitleService,
+      client: makeClient({
+        async get() {
+          return {
+            data: { directory: projectRoot, title: "Idle Missing", id: "ses_idle_missing" },
+          };
+        },
+        async status() {
+          return { data: {} };
+        },
+      }),
+      logger: makeLogger([]),
+    });
+
+    await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.match(text, /상태: idle/);
+    assert.ok(!text.includes("unknown"));
+  });
+
+  test("uses newest user and assistant messages from the end of returned history", async () => {
+    const projectRoot = await freshProject();
+    const sendCalls: SendCall[] = [];
+    const dispatcher = createStatusDispatcher({
+      snapshotStore: makeSnapshotStore([makeEntry({ index: 1, sessionId: "ses_latest" })]),
+      sessionTitleService,
+      client: makeClient({
+        async get() {
+          return {
+            data: { directory: projectRoot, title: "Latest", id: "ses_latest" },
+          };
+        },
+        async messages() {
+          return {
+            data: [
+              {
+                info: { role: "user", id: "m1", sessionID: "ses_latest" },
+                parts: [{ type: "text", text: "old user" }],
+              },
+              {
+                info: { role: "assistant", id: "m2", sessionID: "ses_latest" },
+                parts: [{ type: "text", text: "old assistant" }],
+              },
+              {
+                info: { role: "user", id: "m3", sessionID: "ses_latest" },
+                parts: [{ type: "text", text: "new user" }],
+              },
+              {
+                info: { role: "assistant", id: "m4", sessionID: "ses_latest" },
+                parts: [{ type: "text", text: "new assistant" }],
+              },
+            ],
+          };
+        },
+      }),
+      logger: makeLogger([]),
+    });
+
+    await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.match(text, /유저: new user/);
+    assert.match(text, /에이전트: new assistant/);
+    assert.ok(!text.includes("old user"));
+    assert.ok(!text.includes("old assistant"));
+  });
+
+  test("uses snapshot serverUrl for status of sessions from another OpenCode server", async () => {
+    const projectRoot = await freshProject();
+    const sendCalls: SendCall[] = [];
+    const requested: string[] = [];
+    let localGetCalled = false;
+    const opencodeFetch: OpenCodeFetcher = async (url) => {
+      requested.push(url.href);
+      if (url.pathname === "/session/ses_remote") {
+        return jsonResponse({ id: "ses_remote", directory: projectRoot, title: "Remote Title" });
+      }
+      if (url.pathname === "/session/status") {
+        return jsonResponse({ ses_remote: { type: "busy" } });
+      }
+      if (url.pathname === "/session/ses_remote/message") {
+        assert.equal(url.searchParams.get("limit"), "10");
+        return jsonResponse([
+          {
+            info: { role: "user" },
+            parts: [{ type: "text", text: "remote user" }],
+          },
+          {
+            info: { role: "assistant" },
+            parts: [{ type: "text", text: "remote assistant" }],
+          },
+        ]);
+      }
+      return jsonResponse({ message: "not found" }, 404);
+    };
+    const dispatcher = createStatusDispatcher({
+      snapshotStore: makeSnapshotStore([
+        makeEntry({
+          index: 1,
+          sessionId: "ses_remote",
+          agent: "build",
+          serverUrl: "http://127.0.0.1:8888/",
+        }),
+      ]),
+      sessionTitleService,
+      client: makeClient({
+        async get() {
+          localGetCalled = true;
+          return { data: undefined };
+        },
+      }),
+      logger: makeLogger([]),
+      serverUrl: "http://127.0.0.1:7777/",
+      opencodeFetch,
+    });
+
+    await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
+
+    assert.equal(localGetCalled, false);
+    assert.deepEqual(requested.sort(), [
+      "http://127.0.0.1:8888/session/ses_remote",
+      "http://127.0.0.1:8888/session/ses_remote/message?limit=10",
+      "http://127.0.0.1:8888/session/status",
+    ].sort());
+    const text = sendCalls[0]?.text ?? "";
+    assert.match(text, /<b>세션 #1<\/b>: Remote Title/);
+    assert.match(text, /상태: busy/);
+    assert.match(text, /유저: remote user/);
+    assert.match(text, /에이전트: remote assistant/);
+  });
+
+  test("remote session 404 returns graceful missing-session message", async () => {
+    const sendCalls: SendCall[] = [];
+    const requested: string[] = [];
+    const opencodeFetch: OpenCodeFetcher = async (url) => {
+      requested.push(url.href);
+      return jsonResponse({ message: "not found" }, 404);
+    };
+    const dispatcher = createStatusDispatcher({
+      snapshotStore: makeSnapshotStore([
+        makeEntry({
+          index: 1,
+          sessionId: "ses_remote_gone",
+          serverUrl: "http://127.0.0.1:8888/",
+        }),
+      ]),
+      sessionTitleService,
+      client: makeClient({}),
+      logger: makeLogger([]),
+      serverUrl: "http://127.0.0.1:7777/",
+      opencodeFetch,
+    });
+
+    await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
+
+    assert.deepEqual(requested, ["http://127.0.0.1:8888/session/ses_remote_gone"]);
+    assert.match(sendCalls[0]?.text ?? "", /더 이상 존재하지 않습니다/);
+    assert.match(sendCalls[0]?.text ?? "", /\/sessions 재실행/);
+  });
+
+  test("invalid snapshot serverUrl is rejected without remote fetch", async () => {
+    const sendCalls: SendCall[] = [];
+    const logs: LogCall[] = [];
+    let fetchCalled = false;
+    let localGetCalled = false;
+    const dispatcher = createStatusDispatcher({
+      snapshotStore: makeSnapshotStore([
+        makeEntry({
+          index: 1,
+          sessionId: "ses_bad_url",
+          serverUrl: "http://169.254.169.254/",
+        }),
+      ]),
+      sessionTitleService,
+      client: makeClient({
+        async get() {
+          localGetCalled = true;
+          return { data: undefined };
+        },
+      }),
+      logger: makeLogger(logs),
+      serverUrl: "http://127.0.0.1:7777/",
+      opencodeFetch: async () => {
+        fetchCalled = true;
+        return jsonResponse({});
+      },
+    });
+
+    await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(localGetCalled, false);
+    assert.match(sendCalls[0]?.text ?? "", /세션 서버 정보가 유효하지 않습니다/);
+    assert.equal(logs[0]?.msg, "status invalid server url");
   });
 
   test("HTML escape in title and message snippets", async () => {

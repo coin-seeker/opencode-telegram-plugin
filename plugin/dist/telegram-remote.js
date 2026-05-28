@@ -5,8 +5,8 @@
 
 // src/telegram-remote.ts
 import { createHash as createHash5 } from "crypto";
-import { tmpdir as tmpdir5 } from "os";
-import { dirname as dirname5, join as join7 } from "path";
+import { homedir as homedir3, tmpdir as tmpdir5 } from "os";
+import { dirname as dirname6, join as join9 } from "path";
 import { fileURLToPath } from "url";
 
 // src/bot.ts
@@ -46,6 +46,11 @@ function createTelegramBot(opts) {
   let questionDispatcher;
   let permissionDispatcher;
   let startWorkDispatcher;
+  let sessionsDispatcher;
+  let statusDispatcher;
+  let startWorkCommandDispatcher;
+  let helpDispatcher;
+  let managerObj;
   if (polling) {
     bot.use(async (ctx, next) => {
       const userId = ctx.from?.id;
@@ -105,6 +110,36 @@ This chat is now active for OpenCode notifications.`
       if (!startWorkDispatcher || messageId === void 0) return;
       await startWorkDispatcher.handleCallbackQuery(data, messageId);
     });
+    bot.command("sessions", async (ctx) => {
+      if (!sessionsDispatcher) return;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (chatId === void 0 || userId === void 0) return;
+      await sessionsDispatcher({ chatId, userId, bot: managerObj });
+    });
+    bot.command("status", async (ctx) => {
+      if (!statusDispatcher) return;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (chatId === void 0 || userId === void 0) return;
+      const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+      await statusDispatcher({ chatId, userId, bot: managerObj, args });
+    });
+    bot.command("start_work", async (ctx) => {
+      if (!startWorkCommandDispatcher) return;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (chatId === void 0 || userId === void 0) return;
+      const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+      await startWorkCommandDispatcher({ chatId, userId, bot: managerObj, args });
+    });
+    bot.command("help", async (ctx) => {
+      if (!helpDispatcher) return;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (chatId === void 0 || userId === void 0) return;
+      await helpDispatcher({ chatId, userId, bot: managerObj });
+    });
     bot.on("message:text", async (ctx) => {
       const replyToMessageId = ctx.message.reply_to_message?.message_id;
       const chatId = ctx.chat.id;
@@ -122,11 +157,21 @@ This chat is now active for OpenCode notifications.`
     }
     throw new Error(`No active chat for ${action}. Send any message to the bot first.`);
   };
-  return {
+  managerObj = {
     async start() {
       if (!polling) {
         logger.info("pass-through mode - skipping bot.start()");
         return;
+      }
+      try {
+        await bot.api.setMyCommands([
+          { command: "sessions", description: "\uD65C\uC131 \uC138\uC158 \uBAA9\uB85D (top 20)" },
+          { command: "status", description: "\uC138\uC158 \uC0C1\uD0DC \uC870\uD68C (/status N)" },
+          { command: "start_work", description: "plan-ready \uC138\uC158 \uC2E4\uD589 (/start_work N)" },
+          { command: "help", description: "\uBA85\uB839 \uB3C4\uC6C0\uB9D0" }
+        ]);
+      } catch (err) {
+        logger.warn("setMyCommands failed", { error: String(err) });
       }
       await bot.start({
         drop_pending_updates: true,
@@ -201,8 +246,21 @@ This chat is now active for OpenCode notifications.`
     },
     setStartWorkDispatcher(dispatcher) {
       startWorkDispatcher = dispatcher;
+    },
+    setSessionsDispatcher(dispatcher) {
+      sessionsDispatcher = dispatcher;
+    },
+    setStatusDispatcher(dispatcher) {
+      statusDispatcher = dispatcher;
+    },
+    setStartWorkCommandDispatcher(dispatcher) {
+      startWorkCommandDispatcher = dispatcher;
+    },
+    setHelpDispatcher(dispatcher) {
+      helpDispatcher = dispatcher;
     }
   };
+  return managerObj;
 }
 
 // src/config.ts
@@ -1293,17 +1351,439 @@ async function handleSessionUpdated(event, ctx) {
   ctx.sessionTitleService.setSessionInfo(info);
 }
 
+// src/lib/html-escape.ts
+function escapeHtml(input) {
+  return input.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function truncateForTelegram(input, maxChars, ellipsis = "\u2026") {
+  const single = input.replace(/\s+/g, " ").trim();
+  if (single.length <= maxChars) return single;
+  if (maxChars <= 0) return "";
+  if (ellipsis.length >= maxChars) return ellipsis.slice(0, maxChars);
+  return single.slice(0, maxChars - ellipsis.length) + ellipsis;
+}
+function stripCodeFences(input) {
+  return input.replace(/```[^\r\n`]*\r?\n([\s\S]*?)```/g, "$1").replace(/```([\s\S]*?)```/g, "$1").replace(/`([^`]*)`/g, "$1").replace(/\s+/g, " ").trim();
+}
+
+// src/events/sessions-command.ts
+var MAX_BODY_CHARS = 3900;
+var MAX_TITLE_CHARS = 55;
+var MAX_SESSIONS = 20;
+function createSessionsDispatcher(deps) {
+  return async ({ chatId, bot }) => {
+    const sessions = deps.sessionTitleService.getRootSessionsByRecency(MAX_SESSIONS);
+    if (sessions.length === 0) {
+      await bot.sendMessage("\uD65C\uC131 \uC138\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", { parse_mode: "HTML" });
+      return;
+    }
+    const capturedAt = Date.now();
+    const entries = sessions.map((session, i) => {
+      const entry = {
+        index: i + 1,
+        sessionId: session.sessionId,
+        title: session.title ?? "",
+        capturedAt
+      };
+      if (session.agent !== void 0) entry.agent = session.agent;
+      if (session.status !== void 0) entry.status = session.status;
+      if (session.serverUrl !== void 0) entry.serverUrl = session.serverUrl;
+      return entry;
+    });
+    await deps.snapshotStore.saveSnapshot(chatId, entries);
+    const lines = entries.map((entry) => {
+      const agent = entry.agent ? escapeHtml(entry.agent) : "?";
+      const title = truncateForTelegram(escapeHtml(entry.title), MAX_TITLE_CHARS);
+      const status = entry.status ?? "unknown";
+      return `${entry.index}. [${agent}] ${title} \u2014 ${status}`;
+    });
+    let body = lines.join("\n");
+    if (body.length > MAX_BODY_CHARS) {
+      body = body.slice(0, MAX_BODY_CHARS) + "\u2026";
+    }
+    const text = `<b>\uD65C\uC131 \uC138\uC158 (top ${entries.length})</b>
+${body}
+
+<i>/status N \uB610\uB294 /start_work N \uC73C\uB85C \uC870\uC791</i>`;
+    await bot.sendMessage(text, { parse_mode: "HTML" });
+    deps.logger.info("sessions listed", { chatId, count: entries.length });
+  };
+}
+
+// src/lib/plan-readiness.ts
+import { access, readFile as readFile4, readdir as readdir5, stat as stat2 } from "fs/promises";
+import { join as join5 } from "path";
+async function checkPlanReadiness(args) {
+  const { projectRoot } = args;
+  const omoDir = join5(projectRoot, ".omo");
+  const plansDir = join5(omoDir, "plans");
+  const boulderPath = join5(omoDir, "boulder.json");
+  try {
+    await access(omoDir);
+  } catch {
+    return {
+      ready: false,
+      reason: "no-omo-dir",
+      detail: `${omoDir} does not exist`
+    };
+  }
+  try {
+    await access(boulderPath);
+    return {
+      ready: false,
+      reason: "boulder-active",
+      detail: `${boulderPath} exists`
+    };
+  } catch {
+  }
+  let planFiles = [];
+  try {
+    const entries = await readdir5(plansDir);
+    planFiles = entries.filter((e) => e.endsWith(".md"));
+  } catch {
+    return {
+      ready: false,
+      reason: "no-plans",
+      detail: `${plansDir} not found or empty`
+    };
+  }
+  if (planFiles.length === 0) {
+    return {
+      ready: false,
+      reason: "no-plans",
+      detail: `No .md files in ${plansDir}`
+    };
+  }
+  const stats = await Promise.all(
+    planFiles.map(async (f) => {
+      const full = join5(plansDir, f);
+      const s = await stat2(full);
+      return { path: full, name: f, mtime: s.mtime.getTime() };
+    })
+  );
+  stats.sort((a, b) => b.mtime - a.mtime);
+  const latest = stats[0];
+  const content = await readFile4(latest.path, "utf8");
+  const totalMatches = content.match(/^- \[[ xX]\]/gm) ?? [];
+  const completedMatches = content.match(/^- \[[xX]\]/gm) ?? [];
+  const total = totalMatches.length;
+  const completed = completedMatches.length;
+  if (total === 0) {
+    return {
+      ready: false,
+      reason: "plan-empty",
+      detail: `${latest.name}: no checkboxes found`
+    };
+  }
+  if (completed >= total) {
+    return {
+      ready: false,
+      reason: "all-plans-complete",
+      detail: `${latest.name}: ${completed}/${total} complete`
+    };
+  }
+  return {
+    ready: true,
+    planPath: latest.path,
+    planName: latest.name.replace(/\.md$/, ""),
+    total,
+    completed
+  };
+}
+async function recheckSessionIdle(client, sessionId) {
+  const result = await client.session.status();
+  const statuses = result.data ?? {};
+  const sessionStatus = statuses[sessionId];
+  return sessionStatus?.type === "idle";
+}
+
+// src/events/status-command.ts
+var SNIPPET_MAX_CHARS = 80;
+var MESSAGES_LIMIT = 10;
+var EMPTY_MESSAGE = "\uBA54\uC2DC\uC9C0 \uC5C6\uC74C";
+function resolveProjectRoot(session) {
+  if (!session.directory) throw new Error("session directory missing");
+  return session.directory;
+}
+function extractTextFromParts(parts) {
+  const pieces = [];
+  for (const part of parts) {
+    if (part.type === "text" && typeof part.text === "string") {
+      pieces.push(part.text);
+    }
+  }
+  return pieces.join(" ");
+}
+function buildSnippet(envelope) {
+  if (!envelope) return EMPTY_MESSAGE;
+  try {
+    const raw = extractTextFromParts(envelope.parts);
+    const cleaned = stripCodeFences(raw);
+    const truncated = truncateForTelegram(cleaned, SNIPPET_MAX_CHARS);
+    if (!truncated) return EMPTY_MESSAGE;
+    return escapeHtml(truncated);
+  } catch {
+    return EMPTY_MESSAGE;
+  }
+}
+function findLastByRole(messages, role) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg && msg.info.role === role) return msg;
+  }
+  return void 0;
+}
+function planReadinessKorean(result) {
+  if (result.ready) {
+    return `${result.completed}/${result.total} (${result.planName})`;
+  }
+  switch (result.reason) {
+    case "no-omo-dir":
+      return "`.omo/` \uC5C6\uC74C";
+    case "no-plans":
+      return "plan \uD30C\uC77C \uC5C6\uC74C";
+    case "plan-empty":
+      return "\uCCB4\uD06C\uBC15\uC2A4 \uC5C6\uC74C";
+    case "all-plans-complete": {
+      const match = result.detail.match(/(\d+)\/(\d+)/);
+      if (match) return `${match[1]}/${match[2]} \uC644\uB8CC`;
+      return "\uC644\uB8CC";
+    }
+    case "boulder-active":
+      return "boulder \uD65C\uC131";
+  }
+}
+function planLine(result) {
+  if (result.ready) {
+    return `<b>\uD50C\uB79C \uC9C4\uD589\uB3C4</b>: ${result.completed}/${result.total} (${escapeHtml(result.planName)})`;
+  }
+  return `<b>\uD50C\uB79C \uC0C1\uD0DC</b>: ${planReadinessKorean(result)}`;
+}
+function boulderLine(result) {
+  const active = !result.ready && result.reason === "boulder-active";
+  return active ? "<b>Boulder</b>: \uD65C\uC131" : "<b>Boulder</b>: \uC5C6\uC74C";
+}
+function createStatusDispatcher(deps) {
+  return async ({ chatId, bot, args }) => {
+    const rawN = args[0];
+    if (rawN === void 0 || rawN === "") {
+      await bot.sendMessage("\uC0AC\uC6A9\uBC95: /status <\uBC88\uD638>. \uBA3C\uC800 /sessions \uB85C \uBAA9\uB85D \uD655\uC778", {
+        parse_mode: "HTML"
+      });
+      return;
+    }
+    const n = Number(rawN);
+    if (Number.isNaN(n)) {
+      await bot.sendMessage(`\uC798\uBABB\uB41C \uC785\uB825: ${escapeHtml(rawN)}\uC740 \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4`, {
+        parse_mode: "HTML"
+      });
+      return;
+    }
+    const snapshot = await deps.snapshotStore.loadSnapshot(chatId);
+    if (!snapshot) {
+      await bot.sendMessage("\uC138\uC158 \uBAA9\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uBA3C\uC800 /sessions \uB97C \uC2E4\uD589\uD558\uC138\uC694.", {
+        parse_mode: "HTML"
+      });
+      return;
+    }
+    const entry = snapshot.find((e) => e.index === n);
+    if (!entry) {
+      await bot.sendMessage(`${n}\uBC88 \uC138\uC158 \uC5C6\uC74C. \uD604\uC7AC \uBAA9\uB85D \uD06C\uAE30: ${snapshot.length}`, {
+        parse_mode: "HTML"
+      });
+      return;
+    }
+    const [getResult, statusResult, messagesResult] = await Promise.all([
+      deps.client.session.get({ path: { id: entry.sessionId } }),
+      deps.client.session.status(),
+      deps.client.session.messages({
+        path: { id: entry.sessionId },
+        query: { limit: MESSAGES_LIMIT }
+      })
+    ]);
+    const session = getResult.data;
+    const responseStatus = getResult.response?.status;
+    if (!session || responseStatus === 404) {
+      await bot.sendMessage("\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694", {
+        parse_mode: "HTML"
+      });
+      return;
+    }
+    const statusMap = statusResult.data ?? {};
+    const sessionStatus = statusMap[entry.sessionId]?.type ?? "unknown";
+    const messages = messagesResult.data ?? [];
+    const projectRoot = resolveProjectRoot(session);
+    const planReady = await checkPlanReadiness({ projectRoot });
+    const userSnippet = buildSnippet(findLastByRole(messages, "user"));
+    const assistantSnippet = buildSnippet(findLastByRole(messages, "assistant"));
+    const title = escapeHtml(session.title ?? "");
+    const agent = entry.agent ? escapeHtml(entry.agent) : "?";
+    const text = [
+      `<b>\uC138\uC158 #${n}</b>: ${title}`,
+      `\uC5D0\uC774\uC804\uD2B8: ${agent}`,
+      `\uC0C1\uD0DC: ${escapeHtml(sessionStatus)}`,
+      ``,
+      `<b>\uB9C8\uC9C0\uB9C9 \uBA54\uC2DC\uC9C0</b>`,
+      `\uC720\uC800: ${userSnippet}`,
+      `\uC5D0\uC774\uC804\uD2B8: ${assistantSnippet}`,
+      ``,
+      planLine(planReady),
+      ``,
+      boulderLine(planReady)
+    ].join("\n");
+    await bot.sendMessage(text, { parse_mode: "HTML" });
+    deps.logger.info("status shown", {
+      chatId,
+      sessionId: entry.sessionId,
+      snapshotIndex: n
+    });
+  };
+}
+
+// src/events/start-work-command.ts
+function agentFromSession(session) {
+  const candidate = session;
+  return typeof candidate.agent === "string" ? candidate.agent : void 0;
+}
+function resolveProjectRoot2(session) {
+  return session.directory;
+}
+function readinessMessage(reason) {
+  switch (reason) {
+    case "no-omo-dir":
+      return ".omo/ \uB514\uB809\uD1A0\uB9AC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. plan \uC791\uC131\uC774 \uC120\uD589\uB418\uC5B4\uC57C \uD569\uB2C8\uB2E4";
+    case "no-plans":
+      return ".omo/plans/ \uC5D0 plan \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
+    case "plan-empty":
+      return "plan \uD30C\uC77C\uC5D0 \uCCB4\uD06C\uBC15\uC2A4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4 (\uD5E4\uB354\uB9CC \uC874\uC7AC)";
+    case "all-plans-complete":
+      return "plan \uC758 \uBAA8\uB4E0 task \uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC0C8 plan \uC791\uC131 \uD544\uC694";
+    case "boulder-active":
+      return ".omo/boulder.json \uC774 \uC774\uBBF8 \uC874\uC7AC\uD569\uB2C8\uB2E4. \uAE30\uC874 \uC791\uC5C5\uC774 \uC9C4\uD589 \uC911\uC774\uAC70\uB098 archive \uAC00 \uD544\uC694\uD569\uB2C8\uB2E4";
+  }
+}
+function isSessionNotFoundError(err) {
+  const httpError = err;
+  return httpError.status === 404 || httpError.statusCode === 404 || httpError.response?.status === 404 || err.message.includes("404");
+}
+async function sendHtml(bot, text) {
+  await bot.sendMessage(text, { parse_mode: "HTML" });
+}
+async function sendPlain(bot, text) {
+  await bot.sendMessage(text);
+}
+function createStartWorkCommandDispatcher(deps) {
+  return async ({ chatId, bot, args }) => {
+    const rawIndex = args[0]?.trim();
+    if (!rawIndex) {
+      await sendPlain(bot, "\uC0AC\uC6A9\uBC95: /start_work <\uBC88\uD638>. \uBA3C\uC800 /sessions \uB85C \uBAA9\uB85D \uD655\uC778");
+      return;
+    }
+    const index = Number(rawIndex);
+    if (Number.isNaN(index)) {
+      await sendPlain(bot, `\uC798\uBABB\uB41C \uC785\uB825: ${rawIndex}\uC740 \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4`);
+      return;
+    }
+    const snapshot = await deps.snapshotStore.loadSnapshot(chatId);
+    if (snapshot === null) {
+      await sendPlain(bot, "\uC138\uC158 \uBAA9\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uBA3C\uC800 /sessions \uC2E4\uD589");
+      return;
+    }
+    const entry = snapshot.find((candidate) => candidate.index === index);
+    if (!entry) {
+      await sendPlain(bot, `${index}\uBC88 \uC138\uC158 \uC5C6\uC74C (\uBAA9\uB85D \uD06C\uAE30: ${snapshot.length})`);
+      return;
+    }
+    const sessionId = entry.sessionId;
+    let session;
+    try {
+      const result = await deps.client.session.get({ path: { id: sessionId } });
+      if (!result.data) {
+        await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+        return;
+      }
+      session = result.data;
+    } catch (err) {
+      if (err instanceof Error && isSessionNotFoundError(err)) {
+        await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+        return;
+      }
+      await sendPlain(bot, `\uC138\uC158 \uD655\uC778 \uC2E4\uD328: ${String(err)}`);
+      deps.logger.error("start-work session lookup failed", { sessionId, error: String(err) });
+      return;
+    }
+    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession(session);
+    if (agent !== "plan") {
+      await sendPlain(
+        bot,
+        `${index}\uBC88 \uC138\uC158\uC758 \uC5D0\uC774\uC804\uD2B8\uB294 'plan' \uC774 \uC544\uB2D9\uB2C8\uB2E4 (\uD604\uC7AC: ${agent ?? "unknown"}). /start_work \uB294 plan \uC138\uC158\uC5D0\uC11C\uB9CC \uAC00\uB2A5\uD569\uB2C8\uB2E4`
+      );
+      return;
+    }
+    const idle = await recheckSessionIdle(deps.client, sessionId);
+    if (!idle) {
+      await sendPlain(bot, `${index}\uBC88 \uC138\uC158\uC774 idle \uC0C1\uD0DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4. \uC791\uC5C5 \uC644\uB8CC\uB97C \uAE30\uB2E4\uB9AC\uC138\uC694`);
+      return;
+    }
+    const readiness = await checkPlanReadiness({ projectRoot: resolveProjectRoot2(session) });
+    if (!readiness.ready) {
+      await sendPlain(bot, readinessMessage(readiness.reason));
+      return;
+    }
+    try {
+      const serverUrl = deps.sessionTitleService.getServerUrl(sessionId);
+      await deps.runSessionCommand(sessionId, "start-work", serverUrl);
+      await sendHtml(
+        bot,
+        `${index}\uBC88 \uC138\uC158\uC5D0 opencode /start-work \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1 \uC644\uB8CC. (${escapeHtml(entry.title)})`
+      );
+      deps.logger.info("start-work dispatched", { chatId, sessionId, index });
+    } catch (err) {
+      await sendHtml(bot, "opencode /start-work \uC804\uC1A1 \uC2E4\uD328: " + String(err));
+      deps.logger.error("start-work dispatch failed", { sessionId, error: String(err) });
+    }
+  };
+}
+
+// src/events/help-command.ts
+var HELP_TEXT = `<b>OpenCode Telegram Plugin \u2014 \uBA85\uB839 \uB3C4\uC6C0\uB9D0</b>
+
+<b>/sessions</b>
+\uD65C\uC131 root \uC138\uC158 \uBAA9\uB85D\uC744 \uBC88\uD638\uC640 \uD568\uAED8 \uD45C\uC2DC (\uCD5C\uADFC\uD65C\uB3D9\uC21C top 20).
+
+<b>/status &lt;\uBC88\uD638&gt;</b>
+\uD574\uB2F9 \uC138\uC158\uC758 \uC5D0\uC774\uC804\uD2B8/\uC0C1\uD0DC/\uB9C8\uC9C0\uB9C9 \uBA54\uC2DC\uC9C0 \uC2A4\uB2C8\uD3AB/\uD50C\uB79C \uC9C4\uD589\uB3C4/boulder \uC0C1\uD0DC \uD45C\uC2DC.
+
+<b>/start_work &lt;\uBC88\uD638&gt;</b>
+\uD574\uB2F9 \uC138\uC158\uC5D0 opencode <code>/start-work</code> \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1.
+\uC548\uC804 \uAC8C\uC774\uD2B8: agent='plan' AND status=idle AND .omo/plans \uC5D0 \uBBF8\uC644\uB8CC plan \uC874\uC7AC AND .omo/boulder.json \uBD80\uC7AC.
+\uC870\uAC74 \uBBF8\uCDA9\uC871\uC2DC \uAD6C\uCCB4\uC801 \uC0AC\uC720 \uC548\uB0B4.
+(Telegram \uBD07 \uBA85\uB839\uC740 <code>/start_work</code>, \uB0B4\uBD80 \uD2B8\uB9AC\uAC70 \uB300\uC0C1\uC740 opencode \uC758 <code>/start-work</code>)
+
+<b>/help</b>
+\uC774 \uB3C4\uC6C0\uB9D0 \uD45C\uC2DC.
+
+<b>\uC81C\uC57D</b>
+\uBC88\uD638\uB294 <code>/sessions</code> \uB9C8\uC9C0\uB9C9 \uD638\uCD9C\uC758 \uC2A4\uB0C5\uC0F7\uC5D0 \uC885\uC18D (TTL 1\uC2DC\uAC04).
+leader \uD504\uB85C\uC138\uC2A4\uAC00 \uAD00\uCC30\uD55C \uC138\uC158\uB9CC \uD45C\uC2DC \u2014 \uB2E4\uB978 OpenCode \uD504\uB85C\uC138\uC2A4\uC758 \uC138\uC158\uC740 \uBCF4\uC774\uC9C0 \uC54A\uC744 \uC218 \uC788\uC74C.`;
+function createHelpDispatcher(deps) {
+  return async ({ chatId, bot }) => {
+    await bot.sendMessage(HELP_TEXT, { parse_mode: "HTML" });
+    deps.logger.info("help shown", { chatId });
+  };
+}
+
 // src/lib/env-loader.ts
 import { existsSync } from "fs";
 import { homedir } from "os";
-import { join as join5 } from "path";
+import { join as join6 } from "path";
 import dotenv from "dotenv";
 function loadPluginEnv(opts) {
   const paths = [
-    join5(opts.pluginDir, "../../.env"),
-    join5(opts.pluginDir, "..", ".env"),
-    join5(opts.pluginDir, ".env"),
-    join5(opts.homeDir ?? homedir(), ".config/opencode/telegram-remote/.env")
+    join6(opts.pluginDir, "../../.env"),
+    join6(opts.pluginDir, "..", ".env"),
+    join6(opts.pluginDir, ".env"),
+    join6(opts.homeDir ?? homedir(), ".config/opencode/telegram-remote/.env")
   ];
   const loadedFrom = [];
   const values = {};
@@ -1321,7 +1801,7 @@ function loadPluginEnv(opts) {
 }
 
 // src/lib/lock.ts
-import { open as open2, readFile as readFile4, stat as stat2, unlink as unlink5 } from "fs/promises";
+import { open as open2, readFile as readFile5, stat as stat3, unlink as unlink5 } from "fs/promises";
 import { hostname } from "os";
 var DEFAULT_TTL_MS2 = 5 * 60 * 1e3;
 function hasCode5(err, code) {
@@ -1374,7 +1854,7 @@ async function inspectExisting(lockPath, ttlMs) {
   let ownerPid;
   let dead = false;
   try {
-    const text = await readFile4(lockPath, "utf8");
+    const text = await readFile5(lockPath, "utf8");
     const data = parseLockData(text);
     if (data) {
       ownerPid = data.pid;
@@ -1384,7 +1864,7 @@ async function inspectExisting(lockPath, ttlMs) {
     return { stale: true, reason: "unreadable lock" };
   }
   try {
-    const fileStat = await stat2(lockPath);
+    const fileStat = await stat3(lockPath);
     const expired = Date.now() - fileStat.mtimeMs > ttlMs;
     if (dead) return { stale: true, ownerPid, reason: "dead owner" };
     if (expired) return { stale: true, ownerPid, reason: "expired lock" };
@@ -1487,11 +1967,146 @@ function createLogger(opts = {}) {
   };
 }
 
-// src/lib/state-store.ts
-import { mkdir as mkdir5, readFile as readFile5, rename as rename4, writeFile as writeFile4 } from "fs/promises";
-import { homedir as homedir2 } from "os";
-import { dirname as dirname4, join as join6 } from "path";
+// src/lib/session-snapshot.ts
+import { chmod, mkdir as mkdir5, readFile as readFile6, rename as rename4, unlink as unlink6, writeFile as writeFile4 } from "fs/promises";
+import { dirname as dirname4, join as join7 } from "path";
+var TTL_MS = 60 * 60 * 1e3;
 function hasCode6(err, code) {
+  return err instanceof Error && "code" in err && err.code === code;
+}
+function isSnapshotFile(value) {
+  if (!value || typeof value !== "object") return false;
+  const v = value;
+  if (v.version !== 1) return false;
+  if (typeof v.chatId !== "number") return false;
+  if (typeof v.createdAt !== "number") return false;
+  if (!Array.isArray(v.entries)) return false;
+  for (const entry of v.entries) {
+    if (!entry || typeof entry !== "object") return false;
+    const e = entry;
+    if (typeof e.index !== "number") return false;
+    if (typeof e.sessionId !== "string") return false;
+    if (typeof e.title !== "string") return false;
+    if (typeof e.capturedAt !== "number") return false;
+    if (e.agent !== void 0 && typeof e.agent !== "string") return false;
+    if (e.status !== void 0 && typeof e.status !== "string") return false;
+    if (e.serverUrl !== void 0 && typeof e.serverUrl !== "string") return false;
+  }
+  return true;
+}
+function normalizeEntry(entry) {
+  const out = {
+    index: entry.index,
+    sessionId: entry.sessionId,
+    title: entry.title,
+    capturedAt: entry.capturedAt
+  };
+  if (entry.agent !== void 0) out.agent = entry.agent;
+  if (entry.status !== void 0) out.status = entry.status;
+  if (entry.serverUrl !== void 0) out.serverUrl = entry.serverUrl;
+  return out;
+}
+function createSnapshotStore(opts) {
+  const { configDir, tokenHash, logger } = opts;
+  const snapshotsDir = join7(configDir, "snapshots");
+  const writeLocks = /* @__PURE__ */ new Map();
+  function snapshotFilePath(chatId) {
+    return join7(snapshotsDir, `${tokenHash}-${chatId}.json`);
+  }
+  async function performSave(chatId, entries) {
+    const filePath = snapshotFilePath(chatId);
+    const parent = dirname4(filePath);
+    await mkdir5(parent, { recursive: true });
+    try {
+      await chmod(parent, 448);
+    } catch (err) {
+      logger.error("snapshot: failed to chmod parent dir", {
+        path: parent,
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+    const payload = {
+      version: 1,
+      chatId,
+      createdAt: Date.now(),
+      entries: entries.map(normalizeEntry)
+    };
+    const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+    await writeFile4(tmpPath, JSON.stringify(payload, null, 2), "utf8");
+    try {
+      await rename4(tmpPath, filePath);
+    } catch (err) {
+      try {
+        await unlink6(tmpPath);
+      } catch {
+      }
+      throw err;
+    }
+    await chmod(filePath, 384);
+  }
+  async function saveSnapshot(chatId, entries) {
+    const prev = writeLocks.get(chatId) ?? Promise.resolve();
+    const next = prev.catch(() => void 0).then(() => performSave(chatId, entries));
+    const tracked = next.catch(() => void 0);
+    writeLocks.set(chatId, tracked);
+    try {
+      await next;
+    } finally {
+      if (writeLocks.get(chatId) === tracked) {
+        writeLocks.delete(chatId);
+      }
+    }
+  }
+  async function loadSnapshot(chatId) {
+    const filePath = snapshotFilePath(chatId);
+    let text;
+    try {
+      text = await readFile6(filePath, "utf8");
+    } catch (err) {
+      if (hasCode6(err, "ENOENT")) return null;
+      logger.error("snapshot: failed to read file", {
+        path: filePath,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      logger.error("snapshot: corrupted JSON", {
+        path: filePath,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
+    if (!isSnapshotFile(parsed)) {
+      logger.error("snapshot: invalid shape", { path: filePath });
+      return null;
+    }
+    if (parsed.createdAt + TTL_MS < Date.now()) {
+      try {
+        await unlink6(filePath);
+      } catch (err) {
+        if (!hasCode6(err, "ENOENT")) {
+          logger.error("snapshot: failed to unlink expired file", {
+            path: filePath,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+      }
+      return null;
+    }
+    return parsed.entries.map(normalizeEntry);
+  }
+  return { saveSnapshot, loadSnapshot, snapshotFilePath };
+}
+
+// src/lib/state-store.ts
+import { mkdir as mkdir6, readFile as readFile7, rename as rename5, writeFile as writeFile5 } from "fs/promises";
+import { homedir as homedir2 } from "os";
+import { dirname as dirname5, join as join8 } from "path";
+function hasCode7(err, code) {
   return "code" in err && err.code === code;
 }
 function parseState(text) {
@@ -1503,28 +2118,28 @@ function parseState(text) {
   return state;
 }
 function createStateStore(opts = {}) {
-  const filePath = opts.filePath ?? join6(homedir2(), ".config/opencode/telegram-remote/state.json");
+  const filePath = opts.filePath ?? join8(homedir2(), ".config/opencode/telegram-remote/state.json");
   return {
     async read() {
       try {
-        return parseState(await readFile5(filePath, "utf8"));
+        return parseState(await readFile7(filePath, "utf8"));
       } catch (err) {
-        if (err instanceof Error && hasCode6(err, "ENOENT")) return {};
+        if (err instanceof Error && hasCode7(err, "ENOENT")) return {};
         throw err;
       }
     },
     async write(patch) {
       const existing = await this.read();
       const next = { ...existing, ...patch, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-      await mkdir5(dirname4(filePath), { recursive: true });
+      await mkdir6(dirname5(filePath), { recursive: true });
       const tmpPath = `${filePath}.tmp.${process.pid}`;
-      await writeFile4(tmpPath, JSON.stringify(next, null, 2), "utf8");
+      await writeFile5(tmpPath, JSON.stringify(next, null, 2), "utf8");
       try {
-        await rename4(tmpPath, filePath);
+        await rename5(tmpPath, filePath);
       } catch (err) {
-        if (!(err instanceof Error) || !hasCode6(err, "ENOENT")) throw err;
-        await writeFile4(tmpPath, JSON.stringify(next, null, 2), "utf8");
-        await rename4(tmpPath, filePath);
+        if (!(err instanceof Error) || !hasCode7(err, "ENOENT")) throw err;
+        await writeFile5(tmpPath, JSON.stringify(next, null, 2), "utf8");
+        await rename5(tmpPath, filePath);
       }
       return next;
     }
@@ -1532,7 +2147,7 @@ function createStateStore(opts = {}) {
 }
 
 // src/services/session-title-service.ts
-function agentFromSession(info) {
+function agentFromSession2(info) {
   const candidate = info;
   return typeof candidate.agent === "string" ? candidate.agent : void 0;
 }
@@ -1543,9 +2158,11 @@ var SessionTitleService = class {
     this.sessions.set(info.id, {
       title: info.title || null,
       parentID: info.parentID ?? null,
-      agent: agentFromSession(info) ?? existing?.agent,
+      agent: agentFromSession2(info) ?? existing?.agent,
       status: existing?.status,
-      idleNotificationPending: existing?.idleNotificationPending ?? false
+      idleNotificationPending: existing?.idleNotificationPending ?? false,
+      lastSeenAt: Date.now(),
+      serverUrl: existing?.serverUrl
     });
   }
   setSessionTitle(sessionId, title) {
@@ -1555,7 +2172,9 @@ var SessionTitleService = class {
       parentID: existing?.parentID,
       agent: existing?.agent,
       status: existing?.status,
-      idleNotificationPending: existing?.idleNotificationPending ?? false
+      idleNotificationPending: existing?.idleNotificationPending ?? false,
+      lastSeenAt: Date.now(),
+      serverUrl: existing?.serverUrl
     });
   }
   setSessionAgent(sessionId, agent) {
@@ -1565,7 +2184,9 @@ var SessionTitleService = class {
       parentID: existing?.parentID,
       agent,
       status: existing?.status,
-      idleNotificationPending: existing?.idleNotificationPending ?? false
+      idleNotificationPending: existing?.idleNotificationPending ?? false,
+      lastSeenAt: Date.now(),
+      serverUrl: existing?.serverUrl
     });
   }
   setSessionStatus(sessionId, status) {
@@ -1575,8 +2196,47 @@ var SessionTitleService = class {
       parentID: existing?.parentID,
       agent: existing?.agent,
       status,
-      idleNotificationPending: status === "idle" ? existing?.idleNotificationPending ?? false : false
+      idleNotificationPending: status === "idle" ? existing?.idleNotificationPending ?? false : false,
+      lastSeenAt: Date.now(),
+      serverUrl: existing?.serverUrl
     });
+  }
+  setServerUrl(sessionId, serverUrl) {
+    const existing = this.sessions.get(sessionId);
+    if (existing?.serverUrl) return;
+    const lastSeenAt = existing?.lastSeenAt ?? Date.now();
+    this.sessions.set(sessionId, {
+      ...existing ?? {
+        title: null,
+        parentID: void 0,
+        idleNotificationPending: false,
+        lastSeenAt
+      },
+      lastSeenAt,
+      serverUrl
+    });
+  }
+  getServerUrl(sessionId) {
+    return this.sessions.get(sessionId)?.serverUrl;
+  }
+  getRootSessionsByRecency(limit) {
+    const results = [];
+    for (const [sessionId, entry] of this.sessions.entries()) {
+      if (entry.parentID !== null) continue;
+      results.push({
+        sessionId,
+        title: entry.title,
+        agent: entry.agent,
+        status: entry.status,
+        serverUrl: entry.serverUrl
+      });
+    }
+    results.sort((a, b) => {
+      const lastSeenA = this.sessions.get(a.sessionId)?.lastSeenAt ?? 0;
+      const lastSeenB = this.sessions.get(b.sessionId)?.lastSeenAt ?? 0;
+      return lastSeenB - lastSeenA;
+    });
+    return results.slice(0, limit);
   }
   getSessionTitle(sessionId) {
     return this.sessions.get(sessionId)?.title ?? null;
@@ -1605,7 +2265,9 @@ var SessionTitleService = class {
       parentID: existing?.parentID,
       agent: existing?.agent,
       status: existing?.status ?? "idle",
-      idleNotificationPending: true
+      idleNotificationPending: true,
+      lastSeenAt: existing?.lastSeenAt ?? Date.now(),
+      serverUrl: existing?.serverUrl
     });
   }
   hasDeferredIdleNotification(sessionId) {
@@ -1622,7 +2284,7 @@ var SessionTitleService = class {
 };
 
 // src/telegram-remote.ts
-var pluginDir = dirname5(fileURLToPath(import.meta.url));
+var pluginDir = dirname6(fileURLToPath(import.meta.url));
 async function postToServer(serverUrl, path, body) {
   const url = new URL(path, serverUrl);
   const response = await fetch(url, {
@@ -1658,8 +2320,10 @@ var TelegramRemote = async (input) => {
     const stateStore = createStateStore();
     const initialState = await stateStore.read();
     const tokenHash = createHash5("sha256").update(config.botToken).digest("hex").slice(0, 16);
-    const lockPath = join7(tmpdir5(), `opencoder-telegram-${tokenHash}.lock`);
-    const claimsDir = join7(tmpdir5(), `opencoder-telegram-claims-${tokenHash}`);
+    const configDir = join9(homedir3(), ".config/opencode/telegram-remote");
+    const snapshotStore = createSnapshotStore({ configDir, tokenHash, logger });
+    const lockPath = join9(tmpdir5(), `opencoder-telegram-${tokenHash}.lock`);
+    const claimsDir = join9(tmpdir5(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
     const pendingStartWorks = createPendingStartWorkStore({ tokenHash });
@@ -1782,6 +2446,26 @@ var TelegramRemote = async (input) => {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
       bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
+      bot.setSessionsDispatcher(createSessionsDispatcher({ sessionTitleService, snapshotStore, logger }));
+      bot.setStatusDispatcher(createStatusDispatcher({ snapshotStore, sessionTitleService, client: input.client, logger }));
+      bot.setStartWorkCommandDispatcher(createStartWorkCommandDispatcher({
+        snapshotStore,
+        sessionTitleService,
+        client: input.client,
+        runSessionCommand,
+        logger
+      }));
+      bot.setHelpDispatcher(createHelpDispatcher({ logger }));
+      try {
+        const sessions = await input.client.session.list();
+        for (const s of sessions.data ?? []) {
+          sessionTitleService.setSessionInfo(s);
+          sessionTitleService.setServerUrl(s.id, input.serverUrl.href);
+        }
+        logger.info("cold-start cache primed", { count: (sessions.data ?? []).length });
+      } catch (err) {
+        logger.error("cold-start priming failed", { error: String(err) });
+      }
     }
     return {
       event: async ({ event }) => {
@@ -1793,13 +2477,17 @@ var TelegramRemote = async (input) => {
             logger.info("session.status received", { statusType: event.properties.status.type });
             return handleSessionStatus(event, ctx);
           case "session.created":
+            ctx.sessionTitleService.setServerUrl(event.properties.info.id, input.serverUrl.href);
             return handleSessionCreated(event, ctx);
           case "session.updated":
+            ctx.sessionTitleService.setServerUrl(event.properties.info.id, input.serverUrl.href);
             return handleSessionUpdated(event, ctx);
           case "message.updated": {
             const messageAgent = getSessionAgentFromMessage(event);
-            if (messageAgent)
+            if (messageAgent) {
               ctx.sessionTitleService.setSessionAgent(messageAgent.sessionID, messageAgent.agent);
+              ctx.sessionTitleService.setServerUrl(messageAgent.sessionID, input.serverUrl.href);
+            }
             return;
           }
           case "permission.updated":

@@ -38,6 +38,10 @@ function makeBot(calls: SendCall[]): TelegramBotManager {
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
     setStartWorkDispatcher() {},
+    setSessionsDispatcher() {},
+    setStatusDispatcher() {},
+    setStartWorkCommandDispatcher() {},
+    setHelpDispatcher() {},
   };
 }
 

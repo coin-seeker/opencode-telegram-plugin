@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
@@ -7,9 +7,13 @@ import type { Event, EventMessageUpdated } from "@opencode-ai/sdk";
 import { createTelegramBot } from "./bot.js";
 import { loadConfig } from "./config.js";
 import {
+  createHelpDispatcher,
   createPermissionDispatcher,
   createQuestionDispatcher,
+  createSessionsDispatcher,
+  createStartWorkCommandDispatcher,
   createStartWorkDispatcher,
+  createStatusDispatcher,
   handlePermissionAsked,
   handlePermissionReplied,
   handlePermissionUpdated,
@@ -33,6 +37,7 @@ import { createLogger } from "./lib/logger.js";
 import { createPendingPermissionStore, type PermissionReply } from "./lib/pending-permissions.js";
 import { createPendingQuestionStore, type QuestionAnswer } from "./lib/pending-questions.js";
 import { createPendingStartWorkStore } from "./lib/pending-start-work.js";
+import { createSnapshotStore } from "./lib/session-snapshot.js";
 import { createStateStore } from "./lib/state-store.js";
 import { SessionTitleService } from "./services/session-title-service.js";
 
@@ -106,6 +111,8 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const stateStore = createStateStore();
     const initialState = await stateStore.read();
     const tokenHash = createHash("sha256").update(config.botToken).digest("hex").slice(0, 16);
+    const configDir = join(homedir(), ".config/opencode/telegram-remote");
+    const snapshotStore = createSnapshotStore({ configDir, tokenHash, logger });
     const lockPath = join(tmpdir(), `opencoder-telegram-${tokenHash}.lock`);
     const claimsDir = join(tmpdir(), `opencoder-telegram-claims-${tokenHash}`);
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
@@ -252,6 +259,27 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
       bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
       bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
+      bot.setSessionsDispatcher(createSessionsDispatcher({ sessionTitleService, snapshotStore, logger }));
+      bot.setStatusDispatcher(createStatusDispatcher({ snapshotStore, sessionTitleService, client: input.client, logger }));
+      bot.setStartWorkCommandDispatcher(createStartWorkCommandDispatcher({
+        snapshotStore,
+        sessionTitleService,
+        client: input.client,
+        runSessionCommand,
+        logger,
+      }));
+      bot.setHelpDispatcher(createHelpDispatcher({ logger }));
+
+      try {
+        const sessions = await input.client.session.list();
+        for (const s of (sessions.data ?? [])) {
+          sessionTitleService.setSessionInfo(s);
+          sessionTitleService.setServerUrl(s.id, input.serverUrl.href);
+        }
+        logger.info("cold-start cache primed", { count: (sessions.data ?? []).length });
+      } catch (err) {
+        logger.error("cold-start priming failed", { error: String(err) });
+      }
     }
 
     return {
@@ -264,13 +292,17 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
             logger.info("session.status received", { statusType: event.properties.status.type });
             return handleSessionStatus(event, ctx);
           case "session.created":
+            ctx.sessionTitleService.setServerUrl(event.properties.info.id, input.serverUrl.href);
             return handleSessionCreated(event, ctx);
           case "session.updated":
+            ctx.sessionTitleService.setServerUrl(event.properties.info.id, input.serverUrl.href);
             return handleSessionUpdated(event, ctx);
           case "message.updated": {
             const messageAgent = getSessionAgentFromMessage(event);
-            if (messageAgent)
+            if (messageAgent) {
               ctx.sessionTitleService.setSessionAgent(messageAgent.sessionID, messageAgent.agent);
+              ctx.sessionTitleService.setServerUrl(messageAgent.sessionID, input.serverUrl.href);
+            }
             return;
           }
           case "permission.updated":

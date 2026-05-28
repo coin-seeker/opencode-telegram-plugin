@@ -1,6 +1,10 @@
 import type { QuestionInfo } from "@opencode-ai/sdk/v2";
 import { Bot, GrammyError } from "grammy";
 import type { Config } from "./config.js";
+import type { HelpDispatcher } from "./events/help-command.js";
+import type { SessionsDispatcher } from "./events/sessions-command.js";
+import type { StartWorkCommandDispatcher } from "./events/start-work-command.js";
+import type { StatusDispatcher } from "./events/status-command.js";
 import type { Logger } from "./lib/logger.js";
 import { questionText } from "./lib/question-format.js";
 import type { StateStore } from "./lib/state-store.js";
@@ -48,6 +52,10 @@ export interface TelegramBotManager {
   setQuestionDispatcher(dispatcher: TelegramQuestionDispatcher): void;
   setPermissionDispatcher(dispatcher: TelegramPermissionDispatcher): void;
   setStartWorkDispatcher(dispatcher: TelegramStartWorkDispatcher): void;
+  setSessionsDispatcher(dispatcher: SessionsDispatcher): void;
+  setStatusDispatcher(dispatcher: StatusDispatcher): void;
+  setStartWorkCommandDispatcher(dispatcher: StartWorkCommandDispatcher): void;
+  setHelpDispatcher(dispatcher: HelpDispatcher): void;
 }
 
 export interface CreateBotOptions {
@@ -65,6 +73,11 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
   let questionDispatcher: TelegramQuestionDispatcher | undefined;
   let permissionDispatcher: TelegramPermissionDispatcher | undefined;
   let startWorkDispatcher: TelegramStartWorkDispatcher | undefined;
+  let sessionsDispatcher: SessionsDispatcher | undefined;
+  let statusDispatcher: StatusDispatcher | undefined;
+  let startWorkCommandDispatcher: StartWorkCommandDispatcher | undefined;
+  let helpDispatcher: HelpDispatcher | undefined;
+  let managerObj: TelegramBotManager;
 
   if (polling) {
     bot.use(async (ctx, next) => {
@@ -131,6 +144,40 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       await startWorkDispatcher.handleCallbackQuery(data, messageId);
     });
 
+    bot.command("sessions", async (ctx) => {
+      if (!sessionsDispatcher) return;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (chatId === undefined || userId === undefined) return;
+      await sessionsDispatcher({ chatId, userId, bot: managerObj });
+    });
+
+    bot.command("status", async (ctx) => {
+      if (!statusDispatcher) return;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (chatId === undefined || userId === undefined) return;
+      const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+      await statusDispatcher({ chatId, userId, bot: managerObj, args });
+    });
+
+    bot.command("start_work", async (ctx) => {
+      if (!startWorkCommandDispatcher) return;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (chatId === undefined || userId === undefined) return;
+      const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+      await startWorkCommandDispatcher({ chatId, userId, bot: managerObj, args });
+    });
+
+    bot.command("help", async (ctx) => {
+      if (!helpDispatcher) return;
+      const chatId = ctx.chat?.id;
+      const userId = ctx.from?.id;
+      if (chatId === undefined || userId === undefined) return;
+      await helpDispatcher({ chatId, userId, bot: managerObj });
+    });
+
     bot.on("message:text", async (ctx) => {
       const replyToMessageId = ctx.message.reply_to_message?.message_id;
       const chatId = ctx.chat.id;
@@ -150,11 +197,21 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
     throw new Error(`No active chat for ${action}. Send any message to the bot first.`);
   };
 
-  return {
+  managerObj = {
     async start() {
       if (!polling) {
         logger.info("pass-through mode - skipping bot.start()");
         return;
+      }
+      try {
+        await bot.api.setMyCommands([
+          { command: "sessions", description: "활성 세션 목록 (top 20)" },
+          { command: "status", description: "세션 상태 조회 (/status N)" },
+          { command: "start_work", description: "plan-ready 세션 실행 (/start_work N)" },
+          { command: "help", description: "명령 도움말" },
+        ]);
+      } catch (err) {
+        logger.warn("setMyCommands failed", { error: String(err) });
       }
       await bot.start({
         drop_pending_updates: true,
@@ -230,5 +287,18 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
     setStartWorkDispatcher(dispatcher) {
       startWorkDispatcher = dispatcher;
     },
+    setSessionsDispatcher(dispatcher) {
+      sessionsDispatcher = dispatcher;
+    },
+    setStatusDispatcher(dispatcher) {
+      statusDispatcher = dispatcher;
+    },
+    setStartWorkCommandDispatcher(dispatcher) {
+      startWorkCommandDispatcher = dispatcher;
+    },
+    setHelpDispatcher(dispatcher) {
+      helpDispatcher = dispatcher;
+    },
   };
+  return managerObj;
 }

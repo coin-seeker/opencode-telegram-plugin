@@ -70,6 +70,10 @@ function createBot() {
     setQuestionDispatcher() {},
     setPermissionDispatcher() {},
     setStartWorkDispatcher() {},
+    setSessionsDispatcher() {},
+    setStatusDispatcher() {},
+    setStartWorkCommandDispatcher() {},
+    setHelpDispatcher() {},
   };
   return { bot, sentMessages, sentOptions };
 }

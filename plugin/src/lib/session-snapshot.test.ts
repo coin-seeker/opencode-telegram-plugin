@@ -57,7 +57,7 @@ describe("createSnapshotStore", () => {
       logger,
     });
     const entries: SnapshotEntry[] = [
-      makeEntry(1, { agent: "build", status: "idle", serverUrl: "http://x" }),
+      makeEntry(1, { agent: "build", status: "idle", serverUrl: "http://127.0.0.1:7777/" }),
       makeEntry(2),
     ];
     await store.saveSnapshot(42, entries);
@@ -133,6 +133,29 @@ describe("createSnapshotStore", () => {
     const path = store.snapshotFilePath(11);
     await writeFile(path, JSON.stringify({ version: 2, foo: "bar" }), "utf8");
     const loaded = await store.loadSnapshot(11);
+    assert.equal(loaded, null);
+    assert.ok(logger.calls.some((c) => /invalid shape/.test(c.msg)));
+  });
+
+  test("invalid persisted serverUrl invalidates snapshot", async () => {
+    const logger = createMockLogger();
+    const configDir = freshConfigDir();
+    const store = createSnapshotStore({ configDir, tokenHash: "abc123", logger });
+    await store.saveSnapshot(12, [makeEntry(1)]);
+    const path = store.snapshotFilePath(12);
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        chatId: 12,
+        createdAt: Date.now(),
+        entries: [makeEntry(1, { serverUrl: "http://169.254.169.254/" })],
+      }),
+      "utf8",
+    );
+
+    const loaded = await store.loadSnapshot(12);
+
     assert.equal(loaded, null);
     assert.ok(logger.calls.some((c) => /invalid shape/.test(c.msg)));
   });

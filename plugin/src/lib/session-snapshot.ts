@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { normalizeOpenCodeServerUrl } from "./opencode-http.js";
 
 const TTL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -60,7 +61,10 @@ function isSnapshotFile(value: unknown): value is SnapshotFile {
     if (typeof e.capturedAt !== "number") return false;
     if (e.agent !== undefined && typeof e.agent !== "string") return false;
     if (e.status !== undefined && typeof e.status !== "string") return false;
-    if (e.serverUrl !== undefined && typeof e.serverUrl !== "string") return false;
+    if (e.serverUrl !== undefined) {
+      if (typeof e.serverUrl !== "string") return false;
+      if (!normalizeOpenCodeServerUrl(e.serverUrl)) return false;
+    }
   }
   return true;
 }
@@ -74,7 +78,10 @@ function normalizeEntry(entry: SnapshotEntry): SnapshotEntry {
   };
   if (entry.agent !== undefined) out.agent = entry.agent;
   if (entry.status !== undefined) out.status = entry.status;
-  if (entry.serverUrl !== undefined) out.serverUrl = entry.serverUrl;
+  if (entry.serverUrl !== undefined) {
+    const serverUrl = normalizeOpenCodeServerUrl(entry.serverUrl);
+    if (serverUrl !== undefined) out.serverUrl = serverUrl;
+  }
   return out;
 }
 

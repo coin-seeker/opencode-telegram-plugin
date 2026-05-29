@@ -40,9 +40,10 @@ function pendingQuestionText(questions, questionIndex) {
 
 // src/bot.ts
 function createTelegramBot(opts) {
-  const { config, stateStore, logger, polling } = opts;
+  const { config, stateStore, logger } = opts;
   const bot = new Bot(config.botToken);
   let activeChatId = opts.initialChatId;
+  let pollingActive = false;
   let questionDispatcher;
   let permissionDispatcher;
   let startWorkDispatcher;
@@ -51,103 +52,101 @@ function createTelegramBot(opts) {
   let startWorkCommandDispatcher;
   let helpDispatcher;
   let managerObj;
-  if (polling) {
-    bot.use(async (ctx, next) => {
-      const userId = ctx.from?.id;
-      if (!userId || !config.allowedUserIds.includes(userId)) {
-        logger.warn("unauthorized access attempt", { userId });
-        return;
-      }
-      if (ctx.chat?.type !== "private") return;
-      if (ctx.chat?.id) {
-        const newChatId = ctx.chat.id;
-        if (activeChatId !== newChatId) {
-          activeChatId = newChatId;
-          await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
-          logger.info("chat_id discovered", { chatId: newChatId });
-          await ctx.reply(
-            `\u2705 Chat connected!
+  bot.use(async (ctx, next) => {
+    const userId = ctx.from?.id;
+    if (!userId || !config.allowedUserIds.includes(userId)) {
+      logger.warn("unauthorized access attempt", { userId });
+      return;
+    }
+    if (ctx.chat?.type !== "private") return;
+    if (ctx.chat?.id) {
+      const newChatId = ctx.chat.id;
+      if (activeChatId !== newChatId) {
+        activeChatId = newChatId;
+        await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
+        logger.info("chat_id discovered", { chatId: newChatId });
+        await ctx.reply(
+          `\u2705 Chat connected!
 
 Your chat_id: ${newChatId}
 
 This chat is now active for OpenCode notifications.`
-          );
-        }
+        );
       }
-      await next();
-    });
-    bot.catch((err) => {
-      const e = err.error;
-      if (e instanceof GrammyError && e.error_code === 409) {
-        logger.info("polling conflict (409) - another process took over", {
-          description: e.description
-        });
-      } else {
-        logger.error("bot error", { error: String(e) });
-      }
-    });
-    bot.callbackQuery(/^q:([^:]+):(\d+):(\d+|c|d)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-      const data = ctx.callbackQuery.data;
-      const messageId = ctx.callbackQuery.message?.message_id;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (!questionDispatcher || messageId === void 0 || chatId === void 0 || userId === void 0)
-        return;
-      await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
-    });
-    bot.callbackQuery(/^p:([^:]+):(o|a|r)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-      const data = ctx.callbackQuery.data;
-      const messageId = ctx.callbackQuery.message?.message_id;
-      if (!permissionDispatcher || messageId === void 0) return;
-      await permissionDispatcher.handleCallbackQuery(data, messageId);
-    });
-    bot.callbackQuery(/^sw:([^:]+)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-      const data = ctx.callbackQuery.data;
-      const messageId = ctx.callbackQuery.message?.message_id;
-      if (!startWorkDispatcher || messageId === void 0) return;
-      await startWorkDispatcher.handleCallbackQuery(data, messageId);
-    });
-    bot.command("sessions", async (ctx) => {
-      if (!sessionsDispatcher) return;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (chatId === void 0 || userId === void 0) return;
-      await sessionsDispatcher({ chatId, userId, bot: managerObj });
-    });
-    bot.command("status", async (ctx) => {
-      if (!statusDispatcher) return;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (chatId === void 0 || userId === void 0) return;
-      const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-      await statusDispatcher({ chatId, userId, bot: managerObj, args });
-    });
-    bot.command("start_work", async (ctx) => {
-      if (!startWorkCommandDispatcher) return;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (chatId === void 0 || userId === void 0) return;
-      const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-      await startWorkCommandDispatcher({ chatId, userId, bot: managerObj, args });
-    });
-    bot.command("help", async (ctx) => {
-      if (!helpDispatcher) return;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (chatId === void 0 || userId === void 0) return;
-      await helpDispatcher({ chatId, userId, bot: managerObj });
-    });
-    bot.on("message:text", async (ctx) => {
-      const replyToMessageId = ctx.message.reply_to_message?.message_id;
-      const chatId = ctx.chat.id;
-      const userId = ctx.from?.id;
-      if (!questionDispatcher || replyToMessageId === void 0 || userId === void 0) return;
-      await questionDispatcher.handleTextReply(ctx.message.text, chatId, userId, replyToMessageId);
-    });
-  }
+    }
+    await next();
+  });
+  bot.catch((err) => {
+    const e = err.error;
+    if (e instanceof GrammyError && e.error_code === 409) {
+      logger.info("polling conflict (409) - another process took over", {
+        description: e.description
+      });
+    } else {
+      logger.error("bot error", { error: String(e) });
+    }
+  });
+  bot.callbackQuery(/^q:([^:]+):(\d+):(\d+|c|d)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const data = ctx.callbackQuery.data;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (!questionDispatcher || messageId === void 0 || chatId === void 0 || userId === void 0)
+      return;
+    await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
+  });
+  bot.callbackQuery(/^p:([^:]+):(o|a|r)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const data = ctx.callbackQuery.data;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!permissionDispatcher || messageId === void 0) return;
+    await permissionDispatcher.handleCallbackQuery(data, messageId);
+  });
+  bot.callbackQuery(/^sw:([^:]+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const data = ctx.callbackQuery.data;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!startWorkDispatcher || messageId === void 0) return;
+    await startWorkDispatcher.handleCallbackQuery(data, messageId);
+  });
+  bot.command("sessions", async (ctx) => {
+    if (!sessionsDispatcher) return;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (chatId === void 0 || userId === void 0) return;
+    await sessionsDispatcher({ chatId, userId, bot: managerObj });
+  });
+  bot.command("status", async (ctx) => {
+    if (!statusDispatcher) return;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (chatId === void 0 || userId === void 0) return;
+    const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+    await statusDispatcher({ chatId, userId, bot: managerObj, args });
+  });
+  bot.command("start_work", async (ctx) => {
+    if (!startWorkCommandDispatcher) return;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (chatId === void 0 || userId === void 0) return;
+    const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+    await startWorkCommandDispatcher({ chatId, userId, bot: managerObj, args });
+  });
+  bot.command("help", async (ctx) => {
+    if (!helpDispatcher) return;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (chatId === void 0 || userId === void 0) return;
+    await helpDispatcher({ chatId, userId, bot: managerObj });
+  });
+  bot.on("message:text", async (ctx) => {
+    const replyToMessageId = ctx.message.reply_to_message?.message_id;
+    const chatId = ctx.chat.id;
+    const userId = ctx.from?.id;
+    if (!questionDispatcher || replyToMessageId === void 0 || userId === void 0) return;
+    await questionDispatcher.handleTextReply(ctx.message.text, chatId, userId, replyToMessageId);
+  });
   const requireChatId = async (action) => {
     if (activeChatId) return activeChatId;
     const state = await stateStore.read();
@@ -159,10 +158,8 @@ This chat is now active for OpenCode notifications.`
   };
   managerObj = {
     async start() {
-      if (!polling) {
-        logger.info("pass-through mode - skipping bot.start()");
-        return;
-      }
+      if (pollingActive) return;
+      pollingActive = true;
       try {
         await bot.api.setMyCommands([
           { command: "sessions", description: "\uD65C\uC131 \uC138\uC158 \uBAA9\uB85D (top 20)" },
@@ -173,21 +170,29 @@ This chat is now active for OpenCode notifications.`
       } catch (err) {
         logger.warn("setMyCommands failed", { error: String(err) });
       }
-      await bot.start({
-        drop_pending_updates: true,
-        onStart: () => {
-          logger.info("polling started");
-        }
-      });
+      try {
+        await bot.start({
+          drop_pending_updates: true,
+          onStart: () => {
+            logger.info("polling started");
+          }
+        });
+      } catch (err) {
+        pollingActive = false;
+        throw err;
+      }
     },
     async stop() {
-      if (polling) {
-        try {
-          await bot.stop();
-        } catch (err) {
-          logger.warn("bot.stop() error", { error: String(err) });
-        }
+      if (!pollingActive) return;
+      pollingActive = false;
+      try {
+        await bot.stop();
+      } catch (err) {
+        logger.warn("bot.stop() error", { error: String(err) });
       }
+    },
+    isPolling() {
+      return pollingActive;
     },
     async sendMessage(text, options) {
       const chatId = await requireChatId("sendMessage");
@@ -2035,7 +2040,7 @@ function createStatusDispatcher(deps) {
   return async ({ chatId, bot, args }) => {
     const rawN = args[0];
     if (rawN === void 0 || rawN === "") {
-      await bot.sendMessage("\uC0AC\uC6A9\uBC95: /status <\uBC88\uD638>. \uBA3C\uC800 /sessions \uB85C \uBAA9\uB85D \uD655\uC778", {
+      await bot.sendMessage("\uC0AC\uC6A9\uBC95: /status &lt;\uBC88\uD638&gt;. \uBA3C\uC800 /sessions \uB85C \uBAA9\uB85D \uD655\uC778", {
         parse_mode: "HTML"
       });
       return;
@@ -2077,7 +2082,11 @@ function createStatusDispatcher(deps) {
     let messages = [];
     if (sourceServerUrl && useRemoteServer) {
       try {
-        const getResult = await getRemoteSession(sourceServerUrl, entry.sessionId, deps.opencodeFetch);
+        const getResult = await getRemoteSession(
+          sourceServerUrl,
+          entry.sessionId,
+          deps.opencodeFetch
+        );
         session = getResult.data;
         responseStatus = getResult.response.status;
         if (!session || responseStatus === 404) {
@@ -2096,7 +2105,11 @@ function createStatusDispatcher(deps) {
         await bot.sendMessage("\uC138\uC158 \uC0C1\uD0DC\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694", {
           parse_mode: "HTML"
         });
-        deps.logger.error("status remote lookup failed", { chatId, sessionId: entry.sessionId, error: String(err) });
+        deps.logger.error("status remote lookup failed", {
+          chatId,
+          sessionId: entry.sessionId,
+          error: String(err)
+        });
         return;
       }
     } else {
@@ -2331,7 +2344,7 @@ function loadPluginEnv(opts) {
 }
 
 // src/lib/lock.ts
-import { open as open2, readFile as readFile6, stat as stat3, unlink as unlink6 } from "fs/promises";
+import { open as open2, readFile as readFile6, stat as stat3, unlink as unlink6, utimes } from "fs/promises";
 import { hostname } from "os";
 var DEFAULT_TTL_MS2 = 5 * 60 * 1e3;
 function hasCode6(err, code) {
@@ -2377,6 +2390,18 @@ async function createLock(lockPath, pid) {
         await unlink6(lockPath);
       } catch {
       }
+    },
+    async refresh() {
+      if (released) return false;
+      try {
+        const data2 = parseLockData(await readFile6(lockPath, "utf8"));
+        if (!data2 || data2.pid !== pid || data2.hostname !== hostname()) return false;
+        const now = /* @__PURE__ */ new Date();
+        await utimes(lockPath, now, now);
+        return true;
+      } catch {
+        return false;
+      }
     }
   };
 }
@@ -2420,7 +2445,11 @@ async function acquireLock(opts) {
       try {
         await unlink6(opts.lockPath);
       } catch {
-        return { acquired: false, reason: "failed to remove stale lock", ownerPid: existing.ownerPid };
+        return {
+          acquired: false,
+          reason: "failed to remove stale lock",
+          ownerPid: existing.ownerPid
+        };
       }
     }
   }
@@ -2865,11 +2894,14 @@ var TelegramRemote = async (input) => {
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
     const pendingStartWorks = createPendingStartWorkStore({ tokenHash });
     const lockResult = await acquireLock({ lockPath });
-    const isLeader = lockResult.acquired;
-    logger.info(
-      `lock ${isLeader ? "acquired - leader mode" : "held by other - pass-through mode"}`,
-      isLeader ? {} : { reason: lockResult.reason }
-    );
+    const leadership = { isLeader: false };
+    if (lockResult.acquired) {
+      leadership.isLeader = true;
+      leadership.handle = lockResult.handle;
+      logger.info("lock acquired - leader mode");
+    } else {
+      logger.info("lock held by other - pass-through mode", { reason: lockResult.reason });
+    }
     logger.info("server url", {
       url: input.serverUrl.toString(),
       href: input.serverUrl.href,
@@ -2934,21 +2966,60 @@ var TelegramRemote = async (input) => {
       config,
       stateStore,
       logger,
-      initialChatId: initialState.chatId ?? config.chatId,
-      polling: isLeader
+      initialChatId: initialState.chatId ?? config.chatId
     });
-    if (isLeader) {
-      bot.start().catch((err) => {
+    const startLeaderPolling = () => {
+      bot.start().catch(async (err) => {
         logger.error("bot polling stopped", { error: String(err) });
+        leadership.isLeader = false;
+        if (leadership.handle) {
+          await leadership.handle.release();
+          leadership.handle = void 0;
+        }
       });
+    };
+    if (leadership.isLeader) {
+      startLeaderPolling();
     }
+    let electionRunning = false;
+    const runElection = async () => {
+      if (electionRunning) return;
+      electionRunning = true;
+      try {
+        if (leadership.isLeader && leadership.handle) {
+          if (await leadership.handle.refresh()) return;
+          leadership.isLeader = false;
+          leadership.handle = void 0;
+          await bot.stop();
+          logger.info("leadership lost - demoted to pass-through");
+          return;
+        }
+        if (bot.isPolling()) return;
+        const result = await acquireLock({ lockPath });
+        if (result.acquired) {
+          leadership.isLeader = true;
+          leadership.handle = result.handle;
+          logger.info("leadership acquired - promoting to leader");
+          startLeaderPolling();
+        }
+      } catch (err) {
+        logger.warn("election cycle failed", { error: String(err) });
+      } finally {
+        electionRunning = false;
+      }
+    };
+    const electionTimer = setInterval(() => {
+      void runElection();
+    }, 3e4);
+    if (typeof electionTimer.unref === "function") electionTimer.unref();
     const cleanup = async () => {
+      clearInterval(electionTimer);
       try {
         await bot.stop();
       } catch {
       }
-      if (lockResult.acquired) {
-        await lockResult.handle.release();
+      if (leadership.handle) {
+        await leadership.handle.release();
       }
       await logger.close();
     };
@@ -2980,35 +3051,39 @@ var TelegramRemote = async (input) => {
       replyToPermission,
       runSessionCommand
     };
-    if (isLeader) {
-      bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
-      bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
-      bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
-      bot.setSessionsDispatcher(createSessionsDispatcher({
+    bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
+    bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
+    bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
+    bot.setSessionsDispatcher(
+      createSessionsDispatcher({
         client: input.client,
         sessionTitleService,
         sessionRegistry,
         snapshotStore,
         serverUrl: input.serverUrl.href,
         logger
-      }));
-      bot.setStatusDispatcher(createStatusDispatcher({
+      })
+    );
+    bot.setStatusDispatcher(
+      createStatusDispatcher({
         snapshotStore,
         sessionTitleService,
         client: input.client,
         logger,
         serverUrl: input.serverUrl.href
-      }));
-      bot.setStartWorkCommandDispatcher(createStartWorkCommandDispatcher({
+      })
+    );
+    bot.setStartWorkCommandDispatcher(
+      createStartWorkCommandDispatcher({
         snapshotStore,
         sessionTitleService,
         client: input.client,
         serverUrl: input.serverUrl.href,
         runSessionCommand,
         logger
-      }));
-      bot.setHelpDispatcher(createHelpDispatcher({ logger }));
-    }
+      })
+    );
+    bot.setHelpDispatcher(createHelpDispatcher({ logger }));
     return {
       event: async ({ event }) => {
         const extEvent = event;
@@ -3058,14 +3133,14 @@ var TelegramRemote = async (input) => {
               return;
             }
             if (isEventPermissionAsked(extEvent)) {
-              if (!isLeader) return;
+              if (!leadership.isLeader) return;
               return handlePermissionAsked(extEvent, ctx);
             }
             if (isEventSessionError(extEvent)) {
               return handleSessionError(extEvent, ctx);
             }
             if (isEventQuestionAsked(extEvent)) {
-              if (!isLeader) return;
+              if (!leadership.isLeader) return;
               return handleQuestionAsked(extEvent, ctx);
             }
             if (isEventQuestionReplied(extEvent)) {

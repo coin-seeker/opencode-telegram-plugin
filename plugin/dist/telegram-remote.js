@@ -923,6 +923,7 @@ function createQuestionDispatcher(ctx) {
         await expirePending2(ctx, shortHash, pending, messageId);
         return;
       }
+      pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = pending.questions[questionIndex];
       if (!question) return;
       if (selection === "c") {
@@ -980,6 +981,7 @@ function createQuestionDispatcher(ctx) {
         await expirePending2(ctx, match.shortHash, match.data, match.data.telegramMessageIds[0]);
         return;
       }
+      match.data.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = match.data.questions[awaiting.questionIndex];
       if (question?.multiple === true) {
         const current = selectedAnswers(match.data, awaiting.questionIndex);

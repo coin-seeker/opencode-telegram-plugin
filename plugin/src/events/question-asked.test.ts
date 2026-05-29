@@ -14,6 +14,10 @@ import { SessionTitleService } from "../services/session-title-service.js";
 import { createQuestionDispatcher, handleQuestionAsked } from "./question-asked.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function createLogger() {
   return {
     debug() {},
@@ -149,6 +153,18 @@ function multipleQuestionEvent(requestID = "que_multiple"): EventQuestionAsked {
           ],
         },
       ],
+    },
+  };
+}
+
+function singleQuestionEvent(requestID = "que_single"): EventQuestionAsked {
+  return {
+    id: `event-${requestID}`,
+    type: "question.asked",
+    properties: {
+      id: requestID,
+      sessionID: "ses_test",
+      questions: [{ header: "Only", question: "Only?", options: [{ label: "A", description: "A" }] }],
     },
   };
 }
@@ -299,6 +315,78 @@ describe("question asked flow", () => {
         serverUrl: "http://localhost:4096/",
       },
     ]);
+  });
+
+  test("accepts a custom reply after the original deadline once the user tapped Custom answer", async () => {
+    const { bot, editedMessages } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_custom_refresh", dir, replies);
+
+    await handleQuestionAsked(singleQuestionEvent("que_custom_refresh"), ctx);
+    const shortHash = createQuestionShortHash("que_custom_refresh");
+    const dispatcher = createQuestionDispatcher(ctx);
+
+    const nearDeadlineMs = 1000;
+    const pending = await ctx.pendingQuestions.loadPending(shortHash);
+    assert.ok(pending);
+    pending.expiresAt = Date.now() + nearDeadlineMs;
+    await ctx.pendingQuestions.savePending(shortHash, pending);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:c`, 10, 1, 1);
+    await sleep(nearDeadlineMs + 300);
+    await dispatcher.handleTextReply("나의 커스텀 답변", 1, 1, 11);
+
+    assert.deepEqual(replies, [
+      {
+        requestID: "que_custom_refresh",
+        answers: [["나의 커스텀 답변"]],
+        serverUrl: "http://localhost:4096/",
+      },
+    ]);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+    assert.doesNotMatch(editedMessages.at(-1)?.text ?? "", /expired/i);
+  });
+
+  test("refreshes the expiry window when the user taps Custom answer", async () => {
+    const { bot } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_custom_window", dir, replies);
+
+    await handleQuestionAsked(singleQuestionEvent("que_custom_window"), ctx);
+    const shortHash = createQuestionShortHash("que_custom_window");
+    const dispatcher = createQuestionDispatcher(ctx);
+
+    const pending = await ctx.pendingQuestions.loadPending(shortHash);
+    assert.ok(pending);
+    pending.expiresAt = Date.now() + 1000;
+    await ctx.pendingQuestions.savePending(shortHash, pending);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:c`, 10, 1, 1);
+
+    const refreshed = await ctx.pendingQuestions.loadPending(shortHash);
+    assert.ok(refreshed);
+    assert.ok(refreshed.expiresAt >= Date.now() + 4 * 60_000);
+  });
+
+  test("expires a genuinely stale question on the next interaction", async () => {
+    const { bot, editedMessages } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_stale", dir, replies);
+
+    await handleQuestionAsked(singleQuestionEvent("que_stale"), ctx);
+    const shortHash = createQuestionShortHash("que_stale");
+    const dispatcher = createQuestionDispatcher(ctx);
+
+    const pending = await ctx.pendingQuestions.loadPending(shortHash);
+    assert.ok(pending);
+    pending.expiresAt = Date.now() - 1000;
+    await ctx.pendingQuestions.savePending(shortHash, pending);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
+
+    assert.equal(replies.length, 0);
+    assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
+    assert.match(editedMessages.at(-1)?.text ?? "", /expired/i);
   });
 
   test("submits mixed multi-select and single-select questions in order", async () => {

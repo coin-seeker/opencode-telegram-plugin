@@ -1,8 +1,8 @@
-import type { QuestionInfo } from "@opencode-ai/sdk/v2";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { QuestionInfo } from "@opencode-ai/sdk/v2";
 
 export type QuestionAnswer = string[];
 
@@ -38,8 +38,15 @@ export interface PendingQuestionStore {
   loadPending(shortHash: string): Promise<PendingQuestionState | undefined>;
   deletePending(shortHash: string): Promise<void>;
   sweepExpired(): Promise<PendingQuestionState[]>;
-  findByRequestID(requestID: string): Promise<{ shortHash: string; data: PendingQuestionState } | undefined>;
-  findAwaitingCustom(chatId: number, userId: number): Promise<{ shortHash: string; data: PendingQuestionState } | undefined>;
+  findByRequestID(
+    requestID: string,
+    sessionID?: string,
+    serverUrl?: string,
+  ): Promise<{ shortHash: string; data: PendingQuestionState } | undefined>;
+  findAwaitingCustom(
+    chatId: number,
+    userId: number,
+  ): Promise<{ shortHash: string; data: PendingQuestionState } | undefined>;
 }
 
 function hasCode(err: Error, code: string): boolean {
@@ -55,8 +62,10 @@ function parsePending(text: string): PendingQuestionState {
   if (typeof parsed.requestID !== "string") throw new Error("Invalid pending question: requestID");
   if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending question: sessionID");
   if (!Array.isArray(parsed.questions)) throw new Error("Invalid pending question: questions");
-  if (!Array.isArray(parsed.telegramMessageIds)) throw new Error("Invalid pending question: telegramMessageIds");
-  if (!Array.isArray(parsed.answersInProgress)) throw new Error("Invalid pending question: answersInProgress");
+  if (!Array.isArray(parsed.telegramMessageIds))
+    throw new Error("Invalid pending question: telegramMessageIds");
+  if (!Array.isArray(parsed.answersInProgress))
+    throw new Error("Invalid pending question: answersInProgress");
   parsed.answersInProgress = parsed.answersInProgress.map((answer) => answer ?? null);
   return parsed;
 }
@@ -64,7 +73,9 @@ function parsePending(text: string): PendingQuestionState {
 async function listPendingFiles(dir: string): Promise<string[]> {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+    return entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name);
   } catch (err) {
     if (err instanceof Error && hasCode(err, "ENOENT")) return [];
     throw err;
@@ -75,8 +86,11 @@ function shortHashFromFileName(fileName: string): string {
   return fileName.slice(0, -".json".length);
 }
 
-export function createPendingQuestionStore(opts: PendingQuestionStoreOptions): PendingQuestionStore {
-  const dir = opts.baseDir ?? join(tmpdir(), `opencoder-telegram-pending-questions-${opts.tokenHash}`);
+export function createPendingQuestionStore(
+  opts: PendingQuestionStoreOptions,
+): PendingQuestionStore {
+  const dir =
+    opts.baseDir ?? join(tmpdir(), `opencoder-telegram-pending-questions-${opts.tokenHash}`);
 
   return {
     dir,
@@ -114,11 +128,17 @@ export function createPendingQuestionStore(opts: PendingQuestionStoreOptions): P
       }
       return expired;
     },
-    async findByRequestID(requestID) {
+    async findByRequestID(requestID, sessionID, serverUrl) {
       for (const fileName of await listPendingFiles(dir)) {
         const shortHash = shortHashFromFileName(fileName);
         const data = await this.loadPending(shortHash);
-        if (data?.requestID === requestID) return { shortHash, data };
+        if (
+          data?.requestID === requestID &&
+          (sessionID === undefined || data.sessionID === sessionID) &&
+          (serverUrl === undefined || data.serverUrl === serverUrl)
+        ) {
+          return { shortHash, data };
+        }
       }
       return undefined;
     },
@@ -127,13 +147,20 @@ export function createPendingQuestionStore(opts: PendingQuestionStoreOptions): P
         const shortHash = shortHashFromFileName(fileName);
         const data = await this.loadPending(shortHash);
         const awaiting = data?.awaitingCustomFor;
-        if (awaiting && awaiting.chatId === chatId && awaiting.userId === userId) return { shortHash, data };
+        if (awaiting && awaiting.chatId === chatId && awaiting.userId === userId)
+          return { shortHash, data };
       }
       return undefined;
     },
   };
 }
 
-export function createQuestionShortHash(requestID: string): string {
-  return createHash("sha256").update(requestID).digest("base64url").slice(0, 10);
+export function createQuestionShortHash(
+  requestID: string,
+  sessionID?: string,
+  serverUrl?: string,
+): string {
+  const source =
+    sessionID === undefined ? requestID : `${serverUrl ?? ""}:${sessionID}:${requestID}`;
+  return createHash("sha256").update(source).digest("base64url").slice(0, 10);
 }

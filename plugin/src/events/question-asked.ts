@@ -167,17 +167,6 @@ async function completeIfReady(
   }
 }
 
-async function expirePending(
-  ctx: EventHandlerContext,
-  shortHash: string,
-  pending: PendingQuestionState,
-  messageId: number,
-): Promise<void> {
-  await ctx.bot.editMessageRemoveKeyboard(messageId, "⏱ Question expired");
-  await ctx.pendingQuestions.deletePending(shortHash);
-  ctx.logger.info("pending question expired", { requestID: pending.requestID });
-}
-
 export async function handleQuestionAsked(
   event: EventQuestionAsked,
   ctx: EventHandlerContext,
@@ -187,12 +176,12 @@ export async function handleQuestionAsked(
 
   const claimed = await claimOnce({
     claimsDir: ctx.claimsDir,
-    key: `question.asked:${request.id}`,
+    key: `question:${ctx.serverUrl.href}:${request.sessionID}:${request.id}`,
     ttlMs: 5_000,
   });
   if (!claimed) return;
 
-  const shortHash = createQuestionShortHash(request.id);
+  const shortHash = createQuestionShortHash(request.id, request.sessionID, ctx.serverUrl.href);
   const firstQuestion = request.questions[0];
   const sentAt = Date.now();
   const pending: PendingQuestionState = {
@@ -245,10 +234,6 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       const pending = await ctx.pendingQuestions.loadPending(shortHash);
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
-        return;
-      }
-      if (pending.expiresAt < Date.now()) {
-        await expirePending(ctx, shortHash, pending, messageId);
         return;
       }
       pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
@@ -310,10 +295,6 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       if (!match) return;
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
-      if (match.data.expiresAt < Date.now()) {
-        await expirePending(ctx, match.shortHash, match.data, match.data.telegramMessageIds[0]);
-        return;
-      }
       match.data.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = match.data.questions[awaiting.questionIndex];
       if (question?.multiple === true) {

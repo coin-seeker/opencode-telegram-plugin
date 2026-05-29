@@ -223,10 +223,6 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       });
     };
 
-    if (leadership.isLeader) {
-      startLeaderPolling();
-    }
-
     let electionRunning = false;
     const runElection = async (): Promise<void> => {
       if (electionRunning) return;
@@ -336,6 +332,10 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     );
     bot.setHelpDispatcher(createHelpDispatcher({ logger }));
 
+    if (leadership.isLeader) {
+      startLeaderPolling();
+    }
+
     return {
       event: async ({ event }: { event: Event }) => {
         const extEvent = event as { type: string; properties?: Record<string, unknown> };
@@ -391,7 +391,6 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
               return handleSessionError(extEvent, ctx);
             }
             if (isEventQuestionAsked(extEvent)) {
-              if (!leadership.isLeader) return;
               return handleQuestionAsked(extEvent, ctx);
             }
             if (isEventQuestionReplied(extEvent)) {

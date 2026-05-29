@@ -12,6 +12,7 @@ import { createPendingStartWorkStore } from "../lib/pending-start-work.js";
 import type { SessionRegistryStore } from "../lib/session-registry.js";
 import { SessionTitleService } from "../services/session-title-service.js";
 import { createQuestionDispatcher, handleQuestionAsked } from "./question-asked.js";
+import { handleQuestionReplied } from "./question-replied.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
 
 function sleep(ms: number): Promise<void> {
@@ -167,7 +168,9 @@ function singleQuestionEvent(requestID = "que_single"): EventQuestionAsked {
     properties: {
       id: requestID,
       sessionID: "ses_test",
-      questions: [{ header: "Only", question: "Only?", options: [{ label: "A", description: "A" }] }],
+      questions: [
+        { header: "Only", question: "Only?", options: [{ label: "A", description: "A" }] },
+      ],
     },
   };
 }
@@ -212,7 +215,7 @@ describe("question asked flow", () => {
     const ctx = createContext(bot, "que_test", dir, replies);
 
     await handleQuestionAsked(questionEvent(), ctx);
-    const shortHash = createQuestionShortHash("que_test");
+    const shortHash = createQuestionShortHash("que_test", "ses_test", "http://localhost:4096/");
     const dispatcher = createQuestionDispatcher(ctx);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
@@ -241,7 +244,7 @@ describe("question asked flow", () => {
 
     await handleQuestionAsked(questionEvent("que_source"), ctx);
 
-    const shortHash = createQuestionShortHash("que_source");
+    const shortHash = createQuestionShortHash("que_source", "ses_test", "http://localhost:5099/");
     const pending = await ctx.pendingQuestions.loadPending(shortHash);
     assert.equal(pending?.serverUrl, "http://localhost:5099/");
   });
@@ -252,7 +255,7 @@ describe("question asked flow", () => {
     const ctx = createContext(bot, "que_multiple", dir, replies);
 
     await handleQuestionAsked(multipleQuestionEvent(), ctx);
-    const shortHash = createQuestionShortHash("que_multiple");
+    const shortHash = createQuestionShortHash("que_multiple", "ses_test", "http://localhost:4096/");
     const dispatcher = createQuestionDispatcher(ctx);
 
     assert.match(sentMessages[0]?.text ?? "", /Pick options\?/);
@@ -297,7 +300,11 @@ describe("question asked flow", () => {
     const ctx = createContext(bot, "que_multiple_custom", dir, replies);
 
     await handleQuestionAsked(multipleQuestionEvent("que_multiple_custom"), ctx);
-    const shortHash = createQuestionShortHash("que_multiple_custom");
+    const shortHash = createQuestionShortHash(
+      "que_multiple_custom",
+      "ses_test",
+      "http://localhost:4096/",
+    );
     const dispatcher = createQuestionDispatcher(ctx);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:c`, 10, 1, 1);
@@ -326,7 +333,11 @@ describe("question asked flow", () => {
     const ctx = createContext(bot, "que_custom_refresh", dir, replies);
 
     await handleQuestionAsked(singleQuestionEvent("que_custom_refresh"), ctx);
-    const shortHash = createQuestionShortHash("que_custom_refresh");
+    const shortHash = createQuestionShortHash(
+      "que_custom_refresh",
+      "ses_test",
+      "http://localhost:4096/",
+    );
     const dispatcher = createQuestionDispatcher(ctx);
 
     const nearDeadlineMs = 1000;
@@ -356,7 +367,11 @@ describe("question asked flow", () => {
     const ctx = createContext(bot, "que_custom_window", dir, replies);
 
     await handleQuestionAsked(singleQuestionEvent("que_custom_window"), ctx);
-    const shortHash = createQuestionShortHash("que_custom_window");
+    const shortHash = createQuestionShortHash(
+      "que_custom_window",
+      "ses_test",
+      "http://localhost:4096/",
+    );
     const dispatcher = createQuestionDispatcher(ctx);
 
     const pending = await ctx.pendingQuestions.loadPending(shortHash);
@@ -371,13 +386,13 @@ describe("question asked flow", () => {
     assert.ok(refreshed.expiresAt >= Date.now() + 4 * 60_000);
   });
 
-  test("expires a genuinely stale question on the next interaction", async () => {
+  test("late tap on a past-deadline question still replies to opencode", async () => {
     const { bot, editedMessages } = createBot();
     const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
     const ctx = createContext(bot, "que_stale", dir, replies);
 
     await handleQuestionAsked(singleQuestionEvent("que_stale"), ctx);
-    const shortHash = createQuestionShortHash("que_stale");
+    const shortHash = createQuestionShortHash("que_stale", "ses_test", "http://localhost:4096/");
     const dispatcher = createQuestionDispatcher(ctx);
 
     const pending = await ctx.pendingQuestions.loadPending(shortHash);
@@ -387,9 +402,51 @@ describe("question asked flow", () => {
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
 
-    assert.equal(replies.length, 0);
+    assert.deepEqual(replies, [
+      { requestID: "que_stale", answers: [["A"]], serverUrl: "http://localhost:4096/" },
+    ]);
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /expired/i);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+  });
+
+  test("keeps concurrent questions separate across sessions", async () => {
+    const { bot, sentMessages, editedMessages } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_concurrent", dir, replies);
+
+    const event = (sessionID: string): EventQuestionAsked => ({
+      id: `event-${sessionID}`,
+      type: "question.asked",
+      properties: {
+        id: "que_shared",
+        sessionID,
+        questions: [
+          { header: "Only", question: "Only?", options: [{ label: "A", description: "A" }] },
+        ],
+      },
+    });
+
+    await handleQuestionAsked(event("ses_one"), ctx);
+    await handleQuestionAsked(event("ses_two"), ctx);
+
+    const oneHash = createQuestionShortHash("que_shared", "ses_one", "http://localhost:4096/");
+    const twoHash = createQuestionShortHash("que_shared", "ses_two", "http://localhost:4096/");
+    assert.notEqual(oneHash, twoHash);
+    assert.equal(sentMessages.length, 2);
+    assert.equal((await ctx.pendingQuestions.loadPending(oneHash))?.sessionID, "ses_one");
+    assert.equal((await ctx.pendingQuestions.loadPending(twoHash))?.sessionID, "ses_two");
+
+    const dispatcher = createQuestionDispatcher(ctx);
+    await dispatcher.handleCallbackQuery(`q:${oneHash}:0:0`, 10, 1, 1);
+    await dispatcher.handleCallbackQuery(`q:${twoHash}:0:0`, 11, 1, 1);
+
+    assert.deepEqual(replies, [
+      { requestID: "que_shared", answers: [["A"]], serverUrl: "http://localhost:4096/" },
+      { requestID: "que_shared", answers: [["A"]], serverUrl: "http://localhost:4096/" },
+    ]);
+    assert.equal(await ctx.pendingQuestions.loadPending(oneHash), undefined);
+    assert.equal(await ctx.pendingQuestions.loadPending(twoHash), undefined);
+    assert.equal(editedMessages.length, 2);
   });
 
   test("submits mixed multi-select and single-select questions in order", async () => {
@@ -398,7 +455,7 @@ describe("question asked flow", () => {
     const ctx = createContext(bot, "que_mixed", dir, replies);
 
     await handleQuestionAsked(mixedQuestionEvent(), ctx);
-    const shortHash = createQuestionShortHash("que_mixed");
+    const shortHash = createQuestionShortHash("que_mixed", "ses_test", "http://localhost:4096/");
     const dispatcher = createQuestionDispatcher(ctx);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
@@ -411,5 +468,56 @@ describe("question asked flow", () => {
     assert.deepEqual(replies, [
       { requestID: "que_mixed", answers: [["A", "B"], ["C"]], serverUrl: "http://localhost:4096/" },
     ]);
+  });
+
+  test("clears the matching pending question when answered in opencode", async () => {
+    const { bot, editedMessages } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_external", dir, replies);
+
+    await handleQuestionAsked(singleQuestionEvent("que_external"), ctx);
+    const shortHash = createQuestionShortHash("que_external", "ses_test", "http://localhost:4096/");
+    assert.ok(await ctx.pendingQuestions.loadPending(shortHash));
+
+    await handleQuestionReplied(
+      {
+        id: "event-replied",
+        type: "question.replied",
+        properties: { sessionID: "ses_test", requestID: "que_external", answers: [["A"]] },
+      },
+      ctx,
+    );
+
+    assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Already answered in opencode/);
+  });
+
+  test("ignores opencode answer for a different session", async () => {
+    const { bot, editedMessages } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_external_mismatch", dir, replies);
+
+    await handleQuestionAsked(singleQuestionEvent("que_external_mismatch"), ctx);
+    const shortHash = createQuestionShortHash(
+      "que_external_mismatch",
+      "ses_test",
+      "http://localhost:4096/",
+    );
+
+    await handleQuestionReplied(
+      {
+        id: "event-replied",
+        type: "question.replied",
+        properties: {
+          sessionID: "ses_other",
+          requestID: "que_external_mismatch",
+          answers: [["A"]],
+        },
+      },
+      ctx,
+    );
+
+    assert.ok(await ctx.pendingQuestions.loadPending(shortHash));
+    assert.equal(editedMessages.length, 0);
   });
 });

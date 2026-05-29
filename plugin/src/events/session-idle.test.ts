@@ -174,6 +174,31 @@ describe("session idle notifications", () => {
     assert.equal(service.hasDeferredIdleNotification("parent"), false);
   });
 
+  test("sends deferred parent notification after a background child finishes while parent stays idle", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("bg-parent", "Background task"));
+    service.setSessionInfo(createSession("bg-child", "Subagent", "bg-parent"));
+    service.setSessionStatus("bg-child", "busy");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "bg-defer"), service, {
+      "bg-parent": [createSession("bg-child", "Subagent", "bg-parent")],
+    });
+    ctx.deferredConfirmDelayMs = 20;
+
+    await handleSessionIdle(idleEvent("bg-parent"), ctx);
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.hasDeferredIdleNotification("bg-parent"), true);
+
+    service.setSessionStatus("bg-child", "idle");
+    await handleSessionIdle(idleEvent("bg-child"), ctx);
+    assert.deepEqual(sentMessages, []);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.deepEqual(sentMessages, ["Agent has finished: Background task"]);
+    assert.equal(service.hasDeferredIdleNotification("bg-parent"), false);
+  });
+
   test("suppresses first-seen child idle by fetching parentID before status cache writes", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent-fetch", "Parent"));

@@ -1522,8 +1522,16 @@ Session: ${label}`
 
 // src/events/session-idle.ts
 var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
+var DEFERRED_PARENT_CONFIRM_DELAY_MS = 2500;
+var deferredConfirmTimers = /* @__PURE__ */ new Map();
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function cancelDeferredParentConfirm(sessionId) {
+  const timer = deferredConfirmTimers.get(sessionId);
+  if (timer === void 0) return;
+  clearTimeout(timer);
+  deferredConfirmTimers.delete(sessionId);
 }
 async function resolveParentID(sessionId, ctx) {
   const cachedParentID = ctx.sessionTitleService.getParentID(sessionId);
@@ -1601,18 +1609,49 @@ async function flushDeferredParentIfReady(parentID, ctx) {
   if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
   if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) return;
   const parentStatus = ctx.sessionTitleService.getSessionStatus(parentID);
-  if (parentStatus === "idle") {
-    ctx.logger.info("keeping deferred parent idle notification - waiting for parent to resume", {
+  if (parentStatus !== "idle") {
+    if (parentStatus !== void 0) {
+      cancelDeferredParentConfirm(parentID);
+      ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
+      ctx.logger.info("clearing deferred parent idle notification - parent resumed", {
+        sessionId: parentID
+      });
+    }
+    return;
+  }
+  scheduleDeferredParentConfirm(parentID, ctx);
+}
+function scheduleDeferredParentConfirm(parentID, ctx) {
+  if (deferredConfirmTimers.has(parentID)) return;
+  const delay = ctx.deferredConfirmDelayMs ?? DEFERRED_PARENT_CONFIRM_DELAY_MS;
+  const timer = setTimeout(() => {
+    deferredConfirmTimers.delete(parentID);
+    void confirmDeferredParentIdle(parentID, ctx);
+  }, delay);
+  timer.unref?.();
+  deferredConfirmTimers.set(parentID, timer);
+  ctx.logger.info("parent idle and descendants finished - confirming deferred notification", {
+    sessionId: parentID
+  });
+}
+async function confirmDeferredParentIdle(parentID, ctx) {
+  if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
+  if (ctx.sessionTitleService.getSessionStatus(parentID) !== "idle") {
+    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
+    ctx.logger.info("clearing deferred parent idle notification - parent resumed during confirm", {
       sessionId: parentID
     });
     return;
   }
-  if (parentStatus !== void 0) {
-    ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
-    ctx.logger.info("clearing deferred parent idle notification - parent resumed", {
+  await hydrateDescendants(parentID, ctx);
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) {
+    ctx.logger.info("keeping deferred parent idle notification - descendants active again", {
       sessionId: parentID
     });
+    return;
   }
+  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
+  await sendIdleNotification(parentID, ctx);
 }
 async function deferParentIdleIfDescendantsRunning(sessionId, ctx) {
   await hydrateDescendants(sessionId, ctx);

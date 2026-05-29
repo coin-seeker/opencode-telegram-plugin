@@ -19,6 +19,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function agentFinishedMessage(title: string | null, agent: string | undefined): string {
+  const base = title ? `Agent has finished: ${title}` : "Agent has finished.";
+  return agent ? `${base} (${agent})` : base;
+}
+
 function cancelDeferredParentConfirm(sessionId: string): void {
   const timer = deferredConfirmTimers.get(sessionId);
   if (timer === undefined) return;
@@ -90,12 +95,9 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
   if (!claimed) return;
 
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const isPlanSession = ctx.sessionTitleService.getSessionAgent(sessionId) === "plan";
-  const text = isPlanSession
-    ? planCompleteMessage(title)
-    : title
-      ? `Agent has finished: ${title}`
-      : "Agent has finished.";
+  const agent = ctx.sessionTitleService.getSessionAgent(sessionId);
+  const isPlanSession = agent === "plan";
+  const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
     if (isPlanSession) {
       const shortHash = startWorkShortHash(sessionId);

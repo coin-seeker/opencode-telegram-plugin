@@ -1529,6 +1529,10 @@ var deferredConfirmTimers = /* @__PURE__ */ new Map();
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+function agentFinishedMessage(title, agent) {
+  const base = title ? `Agent has finished: ${title}` : "Agent has finished.";
+  return agent ? `${base} (${agent})` : base;
+}
 function cancelDeferredParentConfirm(sessionId) {
   const timer = deferredConfirmTimers.get(sessionId);
   if (timer === void 0) return;
@@ -1586,8 +1590,9 @@ async function sendIdleNotification(sessionId, ctx) {
   });
   if (!claimed) return;
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const isPlanSession = ctx.sessionTitleService.getSessionAgent(sessionId) === "plan";
-  const text = isPlanSession ? planCompleteMessage(title) : title ? `Agent has finished: ${title}` : "Agent has finished.";
+  const agent = ctx.sessionTitleService.getSessionAgent(sessionId);
+  const isPlanSession = agent === "plan";
+  const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
     if (isPlanSession) {
       const shortHash = startWorkShortHash(sessionId);

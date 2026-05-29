@@ -154,7 +154,7 @@ The plugin reacts to these OpenCode events:
 
 | Event | When it fires | Telegram behavior |
 |-------|---------------|-------------------|
-| `session.status` / `session.idle` | Root session finishes and no child/subagent is running | Sends `Agent has finished: [Session Title]` |
+| `session.status` / `session.idle` | Root session finishes and no child/subagent is running | Sends `Agent has finished: [Session Title] ([agent])`, where `[agent]` is the session's agent name (e.g. `build`) when known |
 | Child/subagent idle | A subagent finishes | Suppressed; no Telegram completion message |
 | Parent idle while background subagent is running | Parent appears idle before background work completes | Defers the parent completion message |
 | `permission.updated` | OpenCode is waiting on a permission decision | Sends `Permission needed: [Session Title]` |

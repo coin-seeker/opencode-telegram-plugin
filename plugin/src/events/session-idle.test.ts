@@ -14,7 +14,7 @@ import {
 } from "../lib/pending-start-work.js";
 import type { SessionRegistryStore } from "../lib/session-registry.js";
 import { SessionTitleService } from "../services/session-title-service.js";
-import { handleSessionIdle } from "./session-idle.js";
+import { agentFinishedMessage, handleSessionIdle } from "./session-idle.js";
 import type { EventHandlerContext } from "./types.js";
 
 function createLogger() {
@@ -273,7 +273,51 @@ describe("session idle notifications", () => {
 
     await handleSessionIdle(idleEvent("build-session"), ctx);
 
-    assert.deepEqual(sentMessages, ["Agent has finished: Build task"]);
+    assert.deepEqual(sentMessages, ["Agent has finished: Build task (build)"]);
     assert.equal(sentOptions[0], undefined);
+  });
+
+  test("includes the agent name in the completion notification", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("general-session", "주식 admin 메뉴 정상화 계획"));
+    service.setSessionAgent("general-session", "general");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "agent-name"), service);
+
+    await handleSessionIdle(idleEvent("general-session"), ctx);
+
+    assert.deepEqual(sentMessages, ["Agent has finished: 주식 admin 메뉴 정상화 계획 (general)"]);
+  });
+
+  test("omits the agent suffix when the agent is unknown", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("unknown-agent-session", "Untracked task"));
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "unknown-agent"), service);
+
+    await handleSessionIdle(idleEvent("unknown-agent-session"), ctx);
+
+    assert.deepEqual(sentMessages, ["Agent has finished: Untracked task"]);
+  });
+});
+
+describe("agentFinishedMessage", () => {
+  test("appends the agent name when both title and agent are known", () => {
+    assert.equal(
+      agentFinishedMessage("Backend DB migration 계획", "build"),
+      "Agent has finished: Backend DB migration 계획 (build)",
+    );
+  });
+
+  test("keeps the plain title message when the agent is unknown", () => {
+    assert.equal(agentFinishedMessage("Build task", undefined), "Agent has finished: Build task");
+  });
+
+  test("shows the agent even when there is no title", () => {
+    assert.equal(agentFinishedMessage(null, "build"), "Agent has finished. (build)");
+  });
+
+  test("falls back to the bare message when nothing is known", () => {
+    assert.equal(agentFinishedMessage(null, undefined), "Agent has finished.");
   });
 });

@@ -183,9 +183,16 @@ export async function handleSessionStatus(
 ): Promise<void> {
   const sessionId = event.properties.sessionID;
   const statusType = event.properties.status.type;
+  const previousStatus = ctx.sessionTitleService.getSessionStatus(sessionId);
   ctx.sessionTitleService.setSessionStatus(sessionId, statusType);
-  await ctx.sessionRegistry.updateSession(sessionId, { status: statusType, updatedAt: Date.now() });
   if (statusType === "idle") {
     await handleSessionIdle(event, ctx);
+    return;
+  }
+  // Write only on status transition: busy/retry events flood at ~50/s while an agent
+  // works, and awaiting a registry write per event backs up OpenCode's awaited event
+  // delivery and freezes the TUI. Do not persist every busy event.
+  if (previousStatus !== statusType) {
+    await ctx.sessionRegistry.updateSession(sessionId, { status: statusType, updatedAt: Date.now() });
   }
 }

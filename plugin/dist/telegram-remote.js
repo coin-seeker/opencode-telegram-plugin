@@ -1654,10 +1654,14 @@ async function handleSessionIdle(event, ctx) {
 async function handleSessionStatus(event, ctx) {
   const sessionId = event.properties.sessionID;
   const statusType = event.properties.status.type;
+  const previousStatus = ctx.sessionTitleService.getSessionStatus(sessionId);
   ctx.sessionTitleService.setSessionStatus(sessionId, statusType);
-  await ctx.sessionRegistry.updateSession(sessionId, { status: statusType, updatedAt: Date.now() });
   if (statusType === "idle") {
     await handleSessionIdle(event, ctx);
+    return;
+  }
+  if (previousStatus !== statusType) {
+    await ctx.sessionRegistry.updateSession(sessionId, { status: statusType, updatedAt: Date.now() });
   }
 }
 
@@ -2977,13 +2981,16 @@ var TelegramRemote = async (input) => {
           case "message.updated": {
             const messageAgent = getSessionAgentFromMessage(event);
             if (messageAgent) {
+              const previousAgent = ctx.sessionTitleService.getSessionAgent(messageAgent.sessionID);
               ctx.sessionTitleService.setSessionAgent(messageAgent.sessionID, messageAgent.agent);
               ctx.sessionTitleService.setServerUrl(messageAgent.sessionID, input.serverUrl.href);
-              await ctx.sessionRegistry.updateSession(messageAgent.sessionID, {
-                agent: messageAgent.agent,
-                serverUrl: input.serverUrl.href,
-                updatedAt: Date.now()
-              });
+              if (previousAgent !== messageAgent.agent) {
+                await ctx.sessionRegistry.updateSession(messageAgent.sessionID, {
+                  agent: messageAgent.agent,
+                  serverUrl: input.serverUrl.href,
+                  updatedAt: Date.now()
+                });
+              }
             }
             return;
           }
@@ -2992,13 +2999,16 @@ var TelegramRemote = async (input) => {
           default: {
             const stepAgent = getSessionAgentFromNextStep(extEvent);
             if (stepAgent) {
+              const previousAgent = ctx.sessionTitleService.getSessionAgent(stepAgent.sessionID);
               ctx.sessionTitleService.setSessionAgent(stepAgent.sessionID, stepAgent.agent);
               ctx.sessionTitleService.setServerUrl(stepAgent.sessionID, input.serverUrl.href);
-              await ctx.sessionRegistry.updateSession(stepAgent.sessionID, {
-                agent: stepAgent.agent,
-                serverUrl: input.serverUrl.href,
-                updatedAt: Date.now()
-              });
+              if (previousAgent !== stepAgent.agent) {
+                await ctx.sessionRegistry.updateSession(stepAgent.sessionID, {
+                  agent: stepAgent.agent,
+                  serverUrl: input.serverUrl.href,
+                  updatedAt: Date.now()
+                });
+              }
               return;
             }
             if (isEventPermissionAsked(extEvent)) {

@@ -369,7 +369,7 @@ async function claimOnce(opts) {
 
 // src/lib/pending-permissions.ts
 import { createHash as createHash2 } from "crypto";
-import { mkdir as mkdir2, readFile, readdir as readdir2, rename, unlink as unlink2, writeFile } from "fs/promises";
+import { mkdir as mkdir2, readdir as readdir2, readFile, rename, unlink as unlink2, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { dirname, join as join2 } from "path";
 function hasCode2(err, code) {
@@ -380,13 +380,17 @@ function pendingFilePath(dir, shortHash) {
 }
 function parsePending(text) {
   const parsed = JSON.parse(text);
-  if (typeof parsed.requestID !== "string") throw new Error("Invalid pending permission: requestID");
-  if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending permission: sessionID");
+  if (typeof parsed.requestID !== "string")
+    throw new Error("Invalid pending permission: requestID");
+  if (typeof parsed.sessionID !== "string")
+    throw new Error("Invalid pending permission: sessionID");
   if (typeof parsed.title !== "string") throw new Error("Invalid pending permission: title");
-  if (typeof parsed.permission !== "string") throw new Error("Invalid pending permission: permission");
+  if (typeof parsed.permission !== "string")
+    throw new Error("Invalid pending permission: permission");
   if (!Array.isArray(parsed.patterns)) throw new Error("Invalid pending permission: patterns");
   if (!Array.isArray(parsed.always)) throw new Error("Invalid pending permission: always");
-  if (parsed.endpoint !== "request" && parsed.endpoint !== "session") throw new Error("Invalid pending permission: endpoint");
+  if (parsed.endpoint !== "request" && parsed.endpoint !== "session")
+    throw new Error("Invalid pending permission: endpoint");
   return parsed;
 }
 async function listPendingFiles(dir) {
@@ -427,11 +431,13 @@ function createPendingPermissionStore(opts) {
         if (!(err instanceof Error) || !hasCode2(err, "ENOENT")) throw err;
       }
     },
-    async findByRequestID(requestID) {
+    async findByRequestID(requestID, sessionID, serverUrl) {
       for (const fileName of await listPendingFiles(dir)) {
         const shortHash = shortHashFromFileName(fileName);
         const data = await this.loadPending(shortHash);
-        if (data?.requestID === requestID) return { shortHash, data };
+        if (data?.requestID === requestID && (sessionID === void 0 || data.sessionID === sessionID) && (serverUrl === void 0 || data.serverUrl === serverUrl)) {
+          return { shortHash, data };
+        }
       }
       return void 0;
     },
@@ -449,8 +455,9 @@ function createPendingPermissionStore(opts) {
     }
   };
 }
-function createPermissionShortHash(requestID) {
-  return createHash2("sha256").update(requestID).digest("base64url").slice(0, 10);
+function createPermissionShortHash(requestID, sessionID, endpoint2, serverUrl) {
+  const source = sessionID === void 0 ? requestID : `${serverUrl ?? ""}:${endpoint2 ?? ""}:${sessionID}:${requestID}`;
+  return createHash2("sha256").update(source).digest("base64url").slice(0, 10);
 }
 
 // src/events/permission-updated.ts
@@ -472,7 +479,8 @@ function isEventPermissionAsked(event) {
 }
 function buildCallbackData(shortHash, reply) {
   const data = `p:${shortHash}:${reply}`;
-  if (Buffer.byteLength(data, "utf8") > 64) throw new Error("Telegram callback_data exceeds 64 bytes");
+  if (Buffer.byteLength(data, "utf8") > 64)
+    throw new Error("Telegram callback_data exceeds 64 bytes");
   return data;
 }
 function normalizeUpdated(permission) {
@@ -484,8 +492,7 @@ function normalizeUpdated(permission) {
     permission: permission.type,
     patterns: pattern,
     always: [],
-    endpoint: "session",
-    claimKey: `permission.updated:${permission.id}`
+    endpoint: "session"
   };
 }
 function normalizeAsked(permission) {
@@ -496,8 +503,7 @@ function normalizeAsked(permission) {
     permission: permission.permission,
     patterns: permission.patterns,
     always: permission.always,
-    endpoint: "request",
-    claimKey: `permission.asked:${permission.id}`
+    endpoint: "request"
   };
 }
 function permissionMessage(permission, sessionTitle) {
@@ -532,9 +538,15 @@ function replyLabel(reply) {
   return "Rejected";
 }
 async function handleNormalizedPermission(permission, ctx) {
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: permission.claimKey });
+  const permissionKey = `${ctx.serverUrl.href}:${permission.sessionID}:${permission.requestID}`;
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `permission:${permissionKey}` });
   if (!claimed) return;
-  const shortHash = createPermissionShortHash(permission.requestID);
+  const shortHash = createPermissionShortHash(
+    permission.requestID,
+    permission.sessionID,
+    permission.endpoint,
+    ctx.serverUrl.href
+  );
   const sentAt = Date.now();
   const rawSessionTitle = ctx.sessionTitleService.getSessionTitle(permission.sessionID);
   const sessionTitle = rawSessionTitle === null ? void 0 : rawSessionTitle;
@@ -560,11 +572,6 @@ async function handleNormalizedPermission(permission, ctx) {
     ctx.logger.error("failed to send permission notification", { error: String(err) });
   }
 }
-async function expirePending(ctx, shortHash, pending, messageId) {
-  await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 Permission request expired");
-  await ctx.pendingPermissions.deletePending(shortHash);
-  ctx.logger.info("pending permission expired", { requestID: pending.requestID });
-}
 async function handlePermissionUpdated(event, ctx) {
   await handleNormalizedPermission(normalizeUpdated(event.properties), ctx);
 }
@@ -588,7 +595,11 @@ function externalReplyLabel(value) {
 async function handlePermissionReplied(event, ctx) {
   const requestID = event.properties.requestID ?? event.properties.permissionID;
   if (!requestID) return;
-  const found = await ctx.pendingPermissions.findByRequestID(requestID);
+  const found = await ctx.pendingPermissions.findByRequestID(
+    requestID,
+    event.properties.sessionID,
+    ctx.serverUrl.href
+  );
   if (!found) return;
   const label = externalReplyLabel(event.properties.reply ?? event.properties.response);
   try {
@@ -624,10 +635,6 @@ function createPermissionDispatcher(ctx) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
         return;
       }
-      if (pending.expiresAt < Date.now()) {
-        await expirePending(ctx, shortHash, pending, messageId);
-        return;
-      }
       try {
         await ctx.replyToPermission(
           pending.requestID,
@@ -636,13 +643,26 @@ function createPermissionDispatcher(ctx) {
           pending.endpoint,
           pending.serverUrl
         );
-        await ctx.bot.editMessageRemoveKeyboard(messageId, `\u2705 Permission ${replyLabel(reply)}
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          `\u2705 Permission ${replyLabel(reply)}
 
-${pending.permission}: ${pending.title}`);
-        ctx.logger.info("permission reply sent", { requestID: pending.requestID, sessionID: pending.sessionID, reply });
+${pending.permission}: ${pending.title}`
+        );
+        ctx.logger.info("permission reply sent", {
+          requestID: pending.requestID,
+          sessionID: pending.sessionID,
+          reply
+        });
       } catch (err) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "\u26A0\uFE0F Failed to send permission reply to opencode");
-        ctx.logger.error("failed to send permission reply", { error: String(err), requestID: pending.requestID });
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "\u26A0\uFE0F Failed to send permission reply to opencode"
+        );
+        ctx.logger.error("failed to send permission reply", {
+          error: String(err),
+          requestID: pending.requestID
+        });
       } finally {
         await ctx.pendingPermissions.deletePending(shortHash);
       }
@@ -860,7 +880,7 @@ ${answerSummary(pending.questions, answers)}`
     await ctx.pendingQuestions.deletePending(shortHash);
   }
 }
-async function expirePending2(ctx, shortHash, pending, messageId) {
+async function expirePending(ctx, shortHash, pending, messageId) {
   await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 Question expired");
   await ctx.pendingQuestions.deletePending(shortHash);
   ctx.logger.info("pending question expired", { requestID: pending.requestID });
@@ -925,7 +945,7 @@ function createQuestionDispatcher(ctx) {
         return;
       }
       if (pending.expiresAt < Date.now()) {
-        await expirePending2(ctx, shortHash, pending, messageId);
+        await expirePending(ctx, shortHash, pending, messageId);
         return;
       }
       pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
@@ -983,7 +1003,7 @@ function createQuestionDispatcher(ctx) {
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
       if (match.data.expiresAt < Date.now()) {
-        await expirePending2(ctx, match.shortHash, match.data, match.data.telegramMessageIds[0]);
+        await expirePending(ctx, match.shortHash, match.data, match.data.telegramMessageIds[0]);
         return;
       }
       match.data.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
@@ -1481,7 +1501,7 @@ function createPendingStartWork(sessionID, title, serverUrl, telegramMessageId) 
 function startWorkShortHash(sessionID) {
   return createStartWorkShortHash(sessionID);
 }
-async function expirePending3(ctx, shortHash, pending, messageId) {
+async function expirePending2(ctx, shortHash, pending, messageId) {
   await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 /start-work request expired");
   await ctx.pendingStartWorks.deletePending(shortHash);
   ctx.logger.info("pending start-work expired", { sessionID: pending.sessionID });
@@ -1498,7 +1518,7 @@ function createStartWorkDispatcher(ctx) {
         return;
       }
       if (pending.expiresAt < Date.now()) {
-        await expirePending3(ctx, shortHash, pending, messageId);
+        await expirePending2(ctx, shortHash, pending, messageId);
         return;
       }
       try {
@@ -3133,7 +3153,6 @@ var TelegramRemote = async (input) => {
               return;
             }
             if (isEventPermissionAsked(extEvent)) {
-              if (!leadership.isLeader) return;
               return handlePermissionAsked(extEvent, ctx);
             }
             if (isEventSessionError(extEvent)) {

@@ -136,7 +136,9 @@ function createContext(
   };
 }
 
-function permissionAskedEvent(): EventPermissionAsked {
+function permissionAskedEvent(
+  overrides: Partial<EventPermissionAsked["properties"]> = {},
+): EventPermissionAsked {
   return {
     id: "event-permission-asked",
     type: "permission.asked",
@@ -147,11 +149,14 @@ function permissionAskedEvent(): EventPermissionAsked {
       patterns: [".env"],
       metadata: {},
       always: [".env"],
+      ...overrides,
     },
   };
 }
 
-function permissionUpdatedEvent(): EventPermissionUpdated {
+function permissionUpdatedEvent(
+  overrides: Partial<EventPermissionUpdated["properties"]> = {},
+): EventPermissionUpdated {
   return {
     type: "permission.updated",
     properties: {
@@ -163,6 +168,7 @@ function permissionUpdatedEvent(): EventPermissionUpdated {
       title: "Read .env",
       metadata: {},
       time: { created: Date.now() },
+      ...overrides,
     },
   };
 }
@@ -198,7 +204,12 @@ describe("permission updated flow", () => {
     const ctx = createContext(bot, join(dir, "asked"), replies);
 
     await handlePermissionAsked(permissionAskedEvent(), ctx);
-    const shortHash = createPermissionShortHash("per_asked");
+    const shortHash = createPermissionShortHash(
+      "per_asked",
+      "ses_test",
+      "request",
+      "http://localhost:4096/",
+    );
     assert.match(sentMessages[0]?.text ?? "", /Permission requested/);
     assert.match(sentMessages[0]?.text ?? "", /\.env/);
     assert.match(JSON.stringify(sentMessages[0]?.options), /Allow once/);
@@ -234,7 +245,12 @@ describe("permission updated flow", () => {
     const ctx = createContext(bot, join(dir, "updated"), replies);
 
     await handlePermissionUpdated(permissionUpdatedEvent(), ctx);
-    const shortHash = createPermissionShortHash("per_updated");
+    const shortHash = createPermissionShortHash(
+      "per_updated",
+      "ses_test",
+      "session",
+      "http://localhost:4096/",
+    );
     const dispatcher = createPermissionDispatcher(ctx);
     await dispatcher.handleCallbackQuery(`p:${shortHash}:r`, 10);
 
@@ -249,6 +265,83 @@ describe("permission updated flow", () => {
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
     assert.match(editedMessages.at(-1)?.text ?? "", /Rejected/);
+  });
+
+  test("keeps same request id permissions separate across sessions", async () => {
+    const { bot, sentMessages, editedMessages } = createBot();
+    const replies: Array<{
+      requestID: string;
+      sessionID: string;
+      reply: PermissionReply;
+      endpoint: "request" | "session";
+      serverUrl?: string;
+    }> = [];
+    const ctx = createContext(bot, join(dir, "same-id-sessions"), replies);
+
+    await handlePermissionAsked(
+      permissionAskedEvent({
+        id: "per_shared",
+        sessionID: "ses_one",
+        patterns: ["one.env"],
+        always: [],
+      }),
+      ctx,
+    );
+    await handlePermissionAsked(
+      permissionAskedEvent({
+        id: "per_shared",
+        sessionID: "ses_two",
+        patterns: ["two.env"],
+        always: [],
+      }),
+      ctx,
+    );
+
+    const firstHash = createPermissionShortHash(
+      "per_shared",
+      "ses_one",
+      "request",
+      "http://localhost:4096/",
+    );
+    const secondHash = createPermissionShortHash(
+      "per_shared",
+      "ses_two",
+      "request",
+      "http://localhost:4096/",
+    );
+    assert.notEqual(firstHash, secondHash);
+    assert.equal(sentMessages.length, 2);
+    assert.equal((await ctx.pendingPermissions.loadPending(firstHash))?.sessionID, "ses_one");
+    assert.equal((await ctx.pendingPermissions.loadPending(secondHash))?.sessionID, "ses_two");
+
+    const dispatcher = createPermissionDispatcher(ctx);
+    await dispatcher.handleCallbackQuery(`p:${firstHash}:o`, 10);
+    await dispatcher.handleCallbackQuery(`p:${secondHash}:r`, 11);
+
+    assert.deepEqual(
+      replies.map((reply) => [reply.requestID, reply.sessionID, reply.reply]),
+      [
+        ["per_shared", "ses_one", "once"],
+        ["per_shared", "ses_two", "reject"],
+      ],
+    );
+    assert.equal(editedMessages.length, 2);
+  });
+
+  test("deduplicates current and legacy events for the same permission", async () => {
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "current-legacy-dedupe"), []);
+
+    await handlePermissionAsked(
+      permissionAskedEvent({ id: "per_same", sessionID: "ses_same" }),
+      ctx,
+    );
+    await handlePermissionUpdated(
+      permissionUpdatedEvent({ id: "per_same", sessionID: "ses_same", title: "Read .env" }),
+      ctx,
+    );
+
+    assert.equal(sentMessages.length, 1);
   });
 
   test("detects v1 and v2 permission.replied events", () => {
@@ -271,7 +364,10 @@ describe("permission updated flow", () => {
       false,
     );
     assert.equal(
-      isEventPermissionReplied({ type: "something.else", properties: { requestID: "x", sessionID: "y" } }),
+      isEventPermissionReplied({
+        type: "something.else",
+        properties: { requestID: "x", sessionID: "y" },
+      }),
       false,
     );
   });
@@ -279,7 +375,12 @@ describe("permission updated flow", () => {
   test("clears pending permission when replied outside Telegram (v2 requestID)", async () => {
     const { bot, editedMessages } = createBot();
     const ctx = createContext(bot, join(dir, "replied-v2"), []);
-    const shortHash = createPermissionShortHash("per_external");
+    const shortHash = createPermissionShortHash(
+      "per_external",
+      "ses_test",
+      "request",
+      "http://localhost:4096/",
+    );
 
     await ctx.pendingPermissions.savePending(shortHash, {
       requestID: "per_external",
@@ -288,6 +389,7 @@ describe("permission updated flow", () => {
       permission: "read",
       patterns: [".env"],
       always: [],
+      serverUrl: "http://localhost:4096/",
       sentAt: Date.now(),
       expiresAt: Date.now() + 60_000,
       telegramMessageId: 42,
@@ -310,7 +412,12 @@ describe("permission updated flow", () => {
   test("clears pending permission when replied outside Telegram (v1 permissionID)", async () => {
     const { bot, editedMessages } = createBot();
     const ctx = createContext(bot, join(dir, "replied-v1"), []);
-    const shortHash = createPermissionShortHash("per_legacy");
+    const shortHash = createPermissionShortHash(
+      "per_legacy",
+      "ses_test",
+      "session",
+      "http://localhost:4096/",
+    );
 
     await ctx.pendingPermissions.savePending(shortHash, {
       requestID: "per_legacy",
@@ -319,6 +426,7 @@ describe("permission updated flow", () => {
       permission: "read",
       patterns: [".env"],
       always: [],
+      serverUrl: "http://localhost:4096/",
       sentAt: Date.now(),
       expiresAt: Date.now() + 60_000,
       telegramMessageId: 55,
@@ -353,7 +461,7 @@ describe("permission updated flow", () => {
     assert.deepEqual(editedMessages, []);
   });
 
-  test("expires pending permission callbacks", async () => {
+  test("late permission callbacks still attempt the opencode reply", async () => {
     const { bot, editedMessages } = createBot();
     const replies: Array<{
       requestID: string;
@@ -363,7 +471,12 @@ describe("permission updated flow", () => {
       serverUrl?: string;
     }> = [];
     const ctx = createContext(bot, join(dir, "expired"), replies);
-    const shortHash = createPermissionShortHash("per_expired");
+    const shortHash = createPermissionShortHash(
+      "per_expired",
+      "ses_test",
+      "request",
+      "http://localhost:4096/",
+    );
 
     await ctx.pendingPermissions.savePending(shortHash, {
       requestID: "per_expired",
@@ -372,6 +485,7 @@ describe("permission updated flow", () => {
       permission: "read",
       patterns: [".env"],
       always: [],
+      serverUrl: "http://localhost:4096/",
       sentAt: Date.now() - 10_000,
       expiresAt: Date.now() - 1_000,
       telegramMessageId: 10,
@@ -381,8 +495,16 @@ describe("permission updated flow", () => {
     const dispatcher = createPermissionDispatcher(ctx);
     await dispatcher.handleCallbackQuery(`p:${shortHash}:a`, 10);
 
-    assert.deepEqual(replies, []);
+    assert.deepEqual(replies, [
+      {
+        requestID: "per_expired",
+        sessionID: "ses_test",
+        reply: "always",
+        endpoint: "request",
+        serverUrl: "http://localhost:4096/",
+      },
+    ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /expired/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Always allowed/);
   });
 });

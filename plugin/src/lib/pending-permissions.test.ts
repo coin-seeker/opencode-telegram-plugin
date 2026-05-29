@@ -1,9 +1,9 @@
-import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
 import { createPendingPermissionStore, createPermissionShortHash } from "./pending-permissions.js";
 
 describe("pending permission store", () => {
@@ -28,6 +28,7 @@ describe("pending permission store", () => {
       permission: "read",
       patterns: [".env"],
       always: [".env"],
+      serverUrl: "http://localhost:4096/",
       sentAt: 1,
       expiresAt: Date.now() + 10_000,
       telegramMessageId: 10,
@@ -36,6 +37,16 @@ describe("pending permission store", () => {
 
     assert.deepEqual((await store.loadPending(shortHash))?.patterns, [".env"]);
     assert.equal((await store.findByRequestID("per_test"))?.shortHash, shortHash);
+    assert.equal((await store.findByRequestID("per_test", "ses_test"))?.shortHash, shortHash);
+    assert.equal(
+      (await store.findByRequestID("per_test", "ses_test", "http://localhost:4096/"))?.shortHash,
+      shortHash,
+    );
+    assert.equal(await store.findByRequestID("per_test", "ses_other"), undefined);
+    assert.equal(
+      await store.findByRequestID("per_test", "ses_test", "http://localhost:5099/"),
+      undefined,
+    );
     await store.deletePending(shortHash);
     assert.equal(await store.loadPending(shortHash), undefined);
   });

@@ -385,7 +385,6 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
               return;
             }
             if (isEventPermissionAsked(extEvent)) {
-              if (!leadership.isLeader) return;
               return handlePermissionAsked(extEvent, ctx);
             }
             if (isEventSessionError(extEvent)) {

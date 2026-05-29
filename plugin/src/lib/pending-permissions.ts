@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -29,7 +29,11 @@ export interface PendingPermissionStore {
   savePending(shortHash: string, data: PendingPermissionState): Promise<void>;
   loadPending(shortHash: string): Promise<PendingPermissionState | undefined>;
   deletePending(shortHash: string): Promise<void>;
-  findByRequestID(requestID: string): Promise<{ shortHash: string; data: PendingPermissionState } | undefined>;
+  findByRequestID(
+    requestID: string,
+    sessionID?: string,
+    serverUrl?: string,
+  ): Promise<{ shortHash: string; data: PendingPermissionState } | undefined>;
   sweepExpired(): Promise<PendingPermissionState[]>;
 }
 
@@ -43,20 +47,26 @@ function pendingFilePath(dir: string, shortHash: string): string {
 
 function parsePending(text: string): PendingPermissionState {
   const parsed = JSON.parse(text) as PendingPermissionState;
-  if (typeof parsed.requestID !== "string") throw new Error("Invalid pending permission: requestID");
-  if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending permission: sessionID");
+  if (typeof parsed.requestID !== "string")
+    throw new Error("Invalid pending permission: requestID");
+  if (typeof parsed.sessionID !== "string")
+    throw new Error("Invalid pending permission: sessionID");
   if (typeof parsed.title !== "string") throw new Error("Invalid pending permission: title");
-  if (typeof parsed.permission !== "string") throw new Error("Invalid pending permission: permission");
+  if (typeof parsed.permission !== "string")
+    throw new Error("Invalid pending permission: permission");
   if (!Array.isArray(parsed.patterns)) throw new Error("Invalid pending permission: patterns");
   if (!Array.isArray(parsed.always)) throw new Error("Invalid pending permission: always");
-  if (parsed.endpoint !== "request" && parsed.endpoint !== "session") throw new Error("Invalid pending permission: endpoint");
+  if (parsed.endpoint !== "request" && parsed.endpoint !== "session")
+    throw new Error("Invalid pending permission: endpoint");
   return parsed;
 }
 
 async function listPendingFiles(dir: string): Promise<string[]> {
   try {
     const entries = await readdir(dir, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => entry.name);
+    return entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name);
   } catch (err) {
     if (err instanceof Error && hasCode(err, "ENOENT")) return [];
     throw err;
@@ -67,8 +77,11 @@ function shortHashFromFileName(fileName: string): string {
   return fileName.slice(0, -".json".length);
 }
 
-export function createPendingPermissionStore(opts: PendingPermissionStoreOptions): PendingPermissionStore {
-  const dir = opts.baseDir ?? join(tmpdir(), `opencoder-telegram-pending-permissions-${opts.tokenHash}`);
+export function createPendingPermissionStore(
+  opts: PendingPermissionStoreOptions,
+): PendingPermissionStore {
+  const dir =
+    opts.baseDir ?? join(tmpdir(), `opencoder-telegram-pending-permissions-${opts.tokenHash}`);
 
   return {
     dir,
@@ -94,11 +107,17 @@ export function createPendingPermissionStore(opts: PendingPermissionStoreOptions
         if (!(err instanceof Error) || !hasCode(err, "ENOENT")) throw err;
       }
     },
-    async findByRequestID(requestID) {
+    async findByRequestID(requestID, sessionID, serverUrl) {
       for (const fileName of await listPendingFiles(dir)) {
         const shortHash = shortHashFromFileName(fileName);
         const data = await this.loadPending(shortHash);
-        if (data?.requestID === requestID) return { shortHash, data };
+        if (
+          data?.requestID === requestID &&
+          (sessionID === undefined || data.sessionID === sessionID) &&
+          (serverUrl === undefined || data.serverUrl === serverUrl)
+        ) {
+          return { shortHash, data };
+        }
       }
       return undefined;
     },
@@ -117,6 +136,15 @@ export function createPendingPermissionStore(opts: PendingPermissionStoreOptions
   };
 }
 
-export function createPermissionShortHash(requestID: string): string {
-  return createHash("sha256").update(requestID).digest("base64url").slice(0, 10);
+export function createPermissionShortHash(
+  requestID: string,
+  sessionID?: string,
+  endpoint?: "request" | "session",
+  serverUrl?: string,
+): string {
+  const source =
+    sessionID === undefined
+      ? requestID
+      : `${serverUrl ?? ""}:${endpoint ?? ""}:${sessionID}:${requestID}`;
+  return createHash("sha256").update(source).digest("base64url").slice(0, 10);
 }

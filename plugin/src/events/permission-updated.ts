@@ -1,8 +1,12 @@
 import type { EventPermissionUpdated, Permission } from "@opencode-ai/sdk";
 import type { EventPermissionAsked, PermissionRequest } from "@opencode-ai/sdk/v2";
-import { claimOnce } from "../lib/claim.js";
-import { createPermissionShortHash, type PendingPermissionState, type PermissionReply } from "../lib/pending-permissions.js";
 import type { TelegramPermissionDispatcher } from "../bot.js";
+import { claimOnce } from "../lib/claim.js";
+import {
+  createPermissionShortHash,
+  type PendingPermissionState,
+  type PermissionReply,
+} from "../lib/pending-permissions.js";
 import type { EventHandlerContext } from "./types.js";
 
 const PERMISSION_EXPIRY_MS = 5 * 60_000;
@@ -16,14 +20,16 @@ interface NormalizedPermissionRequest {
   patterns: string[];
   always: string[];
   endpoint: "request" | "session";
-  claimKey: string;
 }
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-export function isEventPermissionAsked(event: { type: string; properties?: Record<string, unknown> }): event is EventPermissionAsked {
+export function isEventPermissionAsked(event: {
+  type: string;
+  properties?: Record<string, unknown>;
+}): event is EventPermissionAsked {
   if (event.type !== "permission.asked") return false;
   const props = event.properties;
   if (!props) return false;
@@ -37,12 +43,18 @@ export function isEventPermissionAsked(event: { type: string; properties?: Recor
 
 function buildCallbackData(shortHash: string, reply: "o" | "a" | "r"): string {
   const data = `p:${shortHash}:${reply}`;
-  if (Buffer.byteLength(data, "utf8") > 64) throw new Error("Telegram callback_data exceeds 64 bytes");
+  if (Buffer.byteLength(data, "utf8") > 64)
+    throw new Error("Telegram callback_data exceeds 64 bytes");
   return data;
 }
 
 function normalizeUpdated(permission: Permission): NormalizedPermissionRequest {
-  const pattern = permission.pattern === undefined ? [] : Array.isArray(permission.pattern) ? permission.pattern : [permission.pattern];
+  const pattern =
+    permission.pattern === undefined
+      ? []
+      : Array.isArray(permission.pattern)
+        ? permission.pattern
+        : [permission.pattern];
   return {
     requestID: permission.id,
     sessionID: permission.sessionID,
@@ -51,7 +63,6 @@ function normalizeUpdated(permission: Permission): NormalizedPermissionRequest {
     patterns: pattern,
     always: [],
     endpoint: "session",
-    claimKey: `permission.updated:${permission.id}`,
   };
 }
 
@@ -64,18 +75,24 @@ function normalizeAsked(permission: PermissionRequest): NormalizedPermissionRequ
     patterns: permission.patterns,
     always: permission.always,
     endpoint: "request",
-    claimKey: `permission.asked:${permission.id}`,
   };
 }
 
-function permissionMessage(permission: NormalizedPermissionRequest, sessionTitle: string | undefined): string {
+function permissionMessage(
+  permission: NormalizedPermissionRequest,
+  sessionTitle: string | undefined,
+): string {
   const titleLine = sessionTitle ? `📋 ${sessionTitle}` : `Session: ${permission.sessionID}`;
-  const patterns = permission.patterns.length > 0 ? `\nPatterns: ${permission.patterns.join(", ")}` : "";
-  const always = permission.always.length > 0 ? `\nAlways options: ${permission.always.join(", ")}` : "";
+  const patterns =
+    permission.patterns.length > 0 ? `\nPatterns: ${permission.patterns.join(", ")}` : "";
+  const always =
+    permission.always.length > 0 ? `\nAlways options: ${permission.always.join(", ")}` : "";
   return `❓ Permission requested\n\n${titleLine}\n\nPermission: ${permission.permission}\nDetail: ${permission.title}${patterns}${always}`;
 }
 
-function permissionKeyboard(shortHash: string): Array<Array<{ text: string; callback_data: string }>> {
+function permissionKeyboard(
+  shortHash: string,
+): Array<Array<{ text: string; callback_data: string }>> {
   return [
     [{ text: "✅ Allow once", callback_data: buildCallbackData(shortHash, "o") }],
     [{ text: "♻️ Always allow", callback_data: buildCallbackData(shortHash, "a") }],
@@ -96,11 +113,20 @@ function replyLabel(reply: PermissionReply): string {
   return "Rejected";
 }
 
-async function handleNormalizedPermission(permission: NormalizedPermissionRequest, ctx: EventHandlerContext): Promise<void> {
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: permission.claimKey });
+async function handleNormalizedPermission(
+  permission: NormalizedPermissionRequest,
+  ctx: EventHandlerContext,
+): Promise<void> {
+  const permissionKey = `${ctx.serverUrl.href}:${permission.sessionID}:${permission.requestID}`;
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `permission:${permissionKey}` });
   if (!claimed) return;
 
-  const shortHash = createPermissionShortHash(permission.requestID);
+  const shortHash = createPermissionShortHash(
+    permission.requestID,
+    permission.sessionID,
+    permission.endpoint,
+    ctx.serverUrl.href,
+  );
   const sentAt = Date.now();
   const rawSessionTitle = ctx.sessionTitleService.getSessionTitle(permission.sessionID);
   const sessionTitle = rawSessionTitle === null ? undefined : rawSessionTitle;
@@ -127,17 +153,17 @@ async function handleNormalizedPermission(permission: NormalizedPermissionReques
   }
 }
 
-async function expirePending(ctx: EventHandlerContext, shortHash: string, pending: PendingPermissionState, messageId: number): Promise<void> {
-  await ctx.bot.editMessageRemoveKeyboard(messageId, "⏱ Permission request expired");
-  await ctx.pendingPermissions.deletePending(shortHash);
-  ctx.logger.info("pending permission expired", { requestID: pending.requestID });
-}
-
-export async function handlePermissionUpdated(event: EventPermissionUpdated, ctx: EventHandlerContext): Promise<void> {
+export async function handlePermissionUpdated(
+  event: EventPermissionUpdated,
+  ctx: EventHandlerContext,
+): Promise<void> {
   await handleNormalizedPermission(normalizeUpdated(event.properties), ctx);
 }
 
-export async function handlePermissionAsked(event: EventPermissionAsked, ctx: EventHandlerContext): Promise<void> {
+export async function handlePermissionAsked(
+  event: EventPermissionAsked,
+  ctx: EventHandlerContext,
+): Promise<void> {
   await handleNormalizedPermission(normalizeAsked(event.properties), ctx);
 }
 
@@ -154,7 +180,10 @@ interface PermissionRepliedEvent {
   };
 }
 
-export function isEventPermissionReplied(event: { type: string; properties?: Record<string, unknown> }): event is PermissionRepliedEvent {
+export function isEventPermissionReplied(event: {
+  type: string;
+  properties?: Record<string, unknown>;
+}): event is PermissionRepliedEvent {
   if (event.type !== "permission.replied") return false;
   const props = event.properties;
   if (!props) return false;
@@ -172,10 +201,17 @@ function externalReplyLabel(value: string | undefined): string {
   return "Already answered in opencode";
 }
 
-export async function handlePermissionReplied(event: PermissionRepliedEvent, ctx: EventHandlerContext): Promise<void> {
+export async function handlePermissionReplied(
+  event: PermissionRepliedEvent,
+  ctx: EventHandlerContext,
+): Promise<void> {
   const requestID = event.properties.requestID ?? event.properties.permissionID;
   if (!requestID) return;
-  const found = await ctx.pendingPermissions.findByRequestID(requestID);
+  const found = await ctx.pendingPermissions.findByRequestID(
+    requestID,
+    event.properties.sessionID,
+    ctx.serverUrl.href,
+  );
   if (!found) return;
   const label = externalReplyLabel(event.properties.reply ?? event.properties.response);
   try {
@@ -210,10 +246,6 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
         return;
       }
-      if (pending.expiresAt < Date.now()) {
-        await expirePending(ctx, shortHash, pending, messageId);
-        return;
-      }
       try {
         await ctx.replyToPermission(
           pending.requestID,
@@ -222,11 +254,24 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
           pending.endpoint,
           pending.serverUrl,
         );
-        await ctx.bot.editMessageRemoveKeyboard(messageId, `✅ Permission ${replyLabel(reply)}\n\n${pending.permission}: ${pending.title}`);
-        ctx.logger.info("permission reply sent", { requestID: pending.requestID, sessionID: pending.sessionID, reply });
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          `✅ Permission ${replyLabel(reply)}\n\n${pending.permission}: ${pending.title}`,
+        );
+        ctx.logger.info("permission reply sent", {
+          requestID: pending.requestID,
+          sessionID: pending.sessionID,
+          reply,
+        });
       } catch (err) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "⚠️ Failed to send permission reply to opencode");
-        ctx.logger.error("failed to send permission reply", { error: String(err), requestID: pending.requestID });
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "⚠️ Failed to send permission reply to opencode",
+        );
+        ctx.logger.error("failed to send permission reply", {
+          error: String(err),
+          requestID: pending.requestID,
+        });
       } finally {
         await ctx.pendingPermissions.deletePending(shortHash);
       }

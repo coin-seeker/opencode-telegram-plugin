@@ -1,6 +1,6 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -73,5 +73,42 @@ describe("acquireLock", () => {
     const result = await acquireLock({ lockPath });
     assert.equal(result.acquired, true);
     if (result.acquired) await result.handle.release();
+  });
+
+  test("refresh bumps mtime while still owned", async () => {
+    const lockPath = join(dir, "refresh.lock");
+    const result = await acquireLock({ lockPath });
+    assert.equal(result.acquired, true);
+    if (result.acquired) {
+      const past = new Date(Date.now() - 5_000);
+      await utimes(lockPath, past, past);
+      assert.equal(await result.handle.refresh(), true);
+      assert.ok((await stat(lockPath)).mtimeMs > past.getTime());
+      await result.handle.release();
+    }
+  });
+
+  test("refresh returns false after release", async () => {
+    const lockPath = join(dir, "refresh-released.lock");
+    const result = await acquireLock({ lockPath });
+    assert.equal(result.acquired, true);
+    if (result.acquired) {
+      await result.handle.release();
+      assert.equal(await result.handle.refresh(), false);
+    }
+  });
+
+  test("refresh returns false when owner pid changed", async () => {
+    const lockPath = join(dir, "refresh-stolen.lock");
+    const result = await acquireLock({ lockPath });
+    assert.equal(result.acquired, true);
+    if (result.acquired) {
+      await writeFile(
+        lockPath,
+        JSON.stringify({ pid: 1, hostname: "other", createdAt: new Date().toISOString() }),
+      );
+      assert.equal(await result.handle.refresh(), false);
+      await result.handle.release();
+    }
   });
 });

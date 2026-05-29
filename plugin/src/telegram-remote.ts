@@ -32,7 +32,7 @@ import {
 } from "./events/index.js";
 import type { EventHandlerContext } from "./events/types.js";
 import { loadPluginEnv } from "./lib/env-loader.js";
-import { acquireLock } from "./lib/lock.js";
+import { acquireLock, type LockHandle } from "./lib/lock.js";
 import { createLogger } from "./lib/logger.js";
 import { normalizeOpenCodeServerUrl } from "./lib/opencode-http.js";
 import { createPendingPermissionStore, type PermissionReply } from "./lib/pending-permissions.js";
@@ -122,12 +122,14 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
     const pendingStartWorks = createPendingStartWorkStore({ tokenHash });
     const lockResult = await acquireLock({ lockPath });
-    const isLeader = lockResult.acquired;
-
-    logger.info(
-      `lock ${isLeader ? "acquired - leader mode" : "held by other - pass-through mode"}`,
-      isLeader ? {} : { reason: lockResult.reason },
-    );
+    const leadership: { isLeader: boolean; handle?: LockHandle } = { isLeader: false };
+    if (lockResult.acquired) {
+      leadership.isLeader = true;
+      leadership.handle = lockResult.handle;
+      logger.info("lock acquired - leader mode");
+    } else {
+      logger.info("lock held by other - pass-through mode", { reason: lockResult.reason });
+    }
     logger.info("server url", {
       url: input.serverUrl.toString(),
       href: input.serverUrl.href,
@@ -208,23 +210,64 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       stateStore,
       logger,
       initialChatId: initialState.chatId ?? config.chatId,
-      polling: isLeader,
     });
 
-    if (isLeader) {
-      bot.start().catch((err) => {
+    const startLeaderPolling = (): void => {
+      bot.start().catch(async (err) => {
         logger.error("bot polling stopped", { error: String(err) });
+        leadership.isLeader = false;
+        if (leadership.handle) {
+          await leadership.handle.release();
+          leadership.handle = undefined;
+        }
       });
+    };
+
+    if (leadership.isLeader) {
+      startLeaderPolling();
     }
 
+    let electionRunning = false;
+    const runElection = async (): Promise<void> => {
+      if (electionRunning) return;
+      electionRunning = true;
+      try {
+        if (leadership.isLeader && leadership.handle) {
+          if (await leadership.handle.refresh()) return;
+          leadership.isLeader = false;
+          leadership.handle = undefined;
+          await bot.stop();
+          logger.info("leadership lost - demoted to pass-through");
+          return;
+        }
+        if (bot.isPolling()) return;
+        const result = await acquireLock({ lockPath });
+        if (result.acquired) {
+          leadership.isLeader = true;
+          leadership.handle = result.handle;
+          logger.info("leadership acquired - promoting to leader");
+          startLeaderPolling();
+        }
+      } catch (err) {
+        logger.warn("election cycle failed", { error: String(err) });
+      } finally {
+        electionRunning = false;
+      }
+    };
+    const electionTimer = setInterval(() => {
+      void runElection();
+    }, 30_000);
+    if (typeof electionTimer.unref === "function") electionTimer.unref();
+
     const cleanup = async (): Promise<void> => {
+      clearInterval(electionTimer);
       try {
         await bot.stop();
       } catch {
         // best-effort shutdown
       }
-      if (lockResult.acquired) {
-        await lockResult.handle.release();
+      if (leadership.handle) {
+        await leadership.handle.release();
       }
       await logger.close();
     };
@@ -259,35 +302,39 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       runSessionCommand,
     };
 
-    if (isLeader) {
-      bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
-      bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
-      bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
-      bot.setSessionsDispatcher(createSessionsDispatcher({
+    bot.setQuestionDispatcher(createQuestionDispatcher(ctx));
+    bot.setPermissionDispatcher(createPermissionDispatcher(ctx));
+    bot.setStartWorkDispatcher(createStartWorkDispatcher(ctx));
+    bot.setSessionsDispatcher(
+      createSessionsDispatcher({
         client: input.client,
         sessionTitleService,
         sessionRegistry,
         snapshotStore,
         serverUrl: input.serverUrl.href,
         logger,
-      }));
-      bot.setStatusDispatcher(createStatusDispatcher({
+      }),
+    );
+    bot.setStatusDispatcher(
+      createStatusDispatcher({
         snapshotStore,
         sessionTitleService,
         client: input.client,
         logger,
         serverUrl: input.serverUrl.href,
-      }));
-      bot.setStartWorkCommandDispatcher(createStartWorkCommandDispatcher({
+      }),
+    );
+    bot.setStartWorkCommandDispatcher(
+      createStartWorkCommandDispatcher({
         snapshotStore,
         sessionTitleService,
         client: input.client,
         serverUrl: input.serverUrl.href,
         runSessionCommand,
         logger,
-      }));
-      bot.setHelpDispatcher(createHelpDispatcher({ logger }));
-    }
+      }),
+    );
+    bot.setHelpDispatcher(createHelpDispatcher({ logger }));
 
     return {
       event: async ({ event }: { event: Event }) => {
@@ -338,14 +385,14 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
               return;
             }
             if (isEventPermissionAsked(extEvent)) {
-              if (!isLeader) return;
+              if (!leadership.isLeader) return;
               return handlePermissionAsked(extEvent, ctx);
             }
             if (isEventSessionError(extEvent)) {
               return handleSessionError(extEvent, ctx);
             }
             if (isEventQuestionAsked(extEvent)) {
-              if (!isLeader) return;
+              if (!leadership.isLeader) return;
               return handleQuestionAsked(extEvent, ctx);
             }
             if (isEventQuestionReplied(extEvent)) {

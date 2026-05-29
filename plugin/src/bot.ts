@@ -38,6 +38,7 @@ export interface TelegramStartWorkDispatcher {
 export interface TelegramBotManager {
   start(): Promise<void>;
   stop(): Promise<void>;
+  isPolling(): boolean;
   sendMessage(text: string, options?: SendMessageOptions): Promise<{ message_id: number }>;
   sendQuestionWithKeyboard(
     question: QuestionInfo,
@@ -63,13 +64,13 @@ export interface CreateBotOptions {
   stateStore: StateStore;
   logger: Logger;
   initialChatId?: number;
-  polling: boolean;
 }
 
 export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
-  const { config, stateStore, logger, polling } = opts;
+  const { config, stateStore, logger } = opts;
   const bot = new Bot(config.botToken);
   let activeChatId: number | undefined = opts.initialChatId;
+  let pollingActive = false;
   let questionDispatcher: TelegramQuestionDispatcher | undefined;
   let permissionDispatcher: TelegramPermissionDispatcher | undefined;
   let startWorkDispatcher: TelegramStartWorkDispatcher | undefined;
@@ -79,113 +80,111 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
   let helpDispatcher: HelpDispatcher | undefined;
   let managerObj: TelegramBotManager;
 
-  if (polling) {
-    bot.use(async (ctx, next) => {
-      const userId = ctx.from?.id;
-      if (!userId || !config.allowedUserIds.includes(userId)) {
-        logger.warn("unauthorized access attempt", { userId });
-        return;
+  bot.use(async (ctx, next) => {
+    const userId = ctx.from?.id;
+    if (!userId || !config.allowedUserIds.includes(userId)) {
+      logger.warn("unauthorized access attempt", { userId });
+      return;
+    }
+    if (ctx.chat?.type !== "private") return;
+    if (ctx.chat?.id) {
+      const newChatId = ctx.chat.id;
+      if (activeChatId !== newChatId) {
+        activeChatId = newChatId;
+        await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
+        logger.info("chat_id discovered", { chatId: newChatId });
+        await ctx.reply(
+          `✅ Chat connected!\n\nYour chat_id: ${newChatId}\n\nThis chat is now active for OpenCode notifications.`,
+        );
       }
-      if (ctx.chat?.type !== "private") return;
-      if (ctx.chat?.id) {
-        const newChatId = ctx.chat.id;
-        if (activeChatId !== newChatId) {
-          activeChatId = newChatId;
-          await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
-          logger.info("chat_id discovered", { chatId: newChatId });
-          await ctx.reply(
-            `✅ Chat connected!\n\nYour chat_id: ${newChatId}\n\nThis chat is now active for OpenCode notifications.`,
-          );
-        }
-      }
-      await next();
-    });
+    }
+    await next();
+  });
 
-    bot.catch((err) => {
-      const e = err.error;
-      if (e instanceof GrammyError && e.error_code === 409) {
-        logger.info("polling conflict (409) - another process took over", {
-          description: e.description,
-        });
-      } else {
-        logger.error("bot error", { error: String(e) });
-      }
-    });
+  bot.catch((err) => {
+    const e = err.error;
+    if (e instanceof GrammyError && e.error_code === 409) {
+      logger.info("polling conflict (409) - another process took over", {
+        description: e.description,
+      });
+    } else {
+      logger.error("bot error", { error: String(e) });
+    }
+  });
 
-    bot.callbackQuery(/^q:([^:]+):(\d+):(\d+|c|d)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-      const data = ctx.callbackQuery.data;
-      const messageId = ctx.callbackQuery.message?.message_id;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (
-        !questionDispatcher ||
-        messageId === undefined ||
-        chatId === undefined ||
-        userId === undefined
-      )
-        return;
-      await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
-    });
+  bot.callbackQuery(/^q:([^:]+):(\d+):(\d+|c|d)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const data = ctx.callbackQuery.data;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (
+      !questionDispatcher ||
+      messageId === undefined ||
+      chatId === undefined ||
+      userId === undefined
+    )
+      return;
+    await questionDispatcher.handleCallbackQuery(data, messageId, chatId, userId);
+  });
 
-    bot.callbackQuery(/^p:([^:]+):(o|a|r)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-      const data = ctx.callbackQuery.data;
-      const messageId = ctx.callbackQuery.message?.message_id;
-      if (!permissionDispatcher || messageId === undefined) return;
-      await permissionDispatcher.handleCallbackQuery(data, messageId);
-    });
+  bot.callbackQuery(/^p:([^:]+):(o|a|r)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const data = ctx.callbackQuery.data;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!permissionDispatcher || messageId === undefined) return;
+    await permissionDispatcher.handleCallbackQuery(data, messageId);
+  });
 
-    bot.callbackQuery(/^sw:([^:]+)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-      const data = ctx.callbackQuery.data;
-      const messageId = ctx.callbackQuery.message?.message_id;
-      if (!startWorkDispatcher || messageId === undefined) return;
-      await startWorkDispatcher.handleCallbackQuery(data, messageId);
-    });
+  bot.callbackQuery(/^sw:([^:]+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const data = ctx.callbackQuery.data;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!startWorkDispatcher || messageId === undefined) return;
+    await startWorkDispatcher.handleCallbackQuery(data, messageId);
+  });
 
-    bot.command("sessions", async (ctx) => {
-      if (!sessionsDispatcher) return;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (chatId === undefined || userId === undefined) return;
-      await sessionsDispatcher({ chatId, userId, bot: managerObj });
-    });
+  bot.command("sessions", async (ctx) => {
+    if (!sessionsDispatcher) return;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (chatId === undefined || userId === undefined) return;
+    await sessionsDispatcher({ chatId, userId, bot: managerObj });
+  });
 
-    bot.command("status", async (ctx) => {
-      if (!statusDispatcher) return;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (chatId === undefined || userId === undefined) return;
-      const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-      await statusDispatcher({ chatId, userId, bot: managerObj, args });
-    });
+  bot.command("status", async (ctx) => {
+    if (!statusDispatcher) return;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (chatId === undefined || userId === undefined) return;
+    const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+    await statusDispatcher({ chatId, userId, bot: managerObj, args });
+  });
 
-    bot.command("start_work", async (ctx) => {
-      if (!startWorkCommandDispatcher) return;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (chatId === undefined || userId === undefined) return;
-      const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-      await startWorkCommandDispatcher({ chatId, userId, bot: managerObj, args });
-    });
+  bot.command("start_work", async (ctx) => {
+    if (!startWorkCommandDispatcher) return;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (chatId === undefined || userId === undefined) return;
+    const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+    await startWorkCommandDispatcher({ chatId, userId, bot: managerObj, args });
+  });
 
-    bot.command("help", async (ctx) => {
-      if (!helpDispatcher) return;
-      const chatId = ctx.chat?.id;
-      const userId = ctx.from?.id;
-      if (chatId === undefined || userId === undefined) return;
-      await helpDispatcher({ chatId, userId, bot: managerObj });
-    });
+  bot.command("help", async (ctx) => {
+    if (!helpDispatcher) return;
+    const chatId = ctx.chat?.id;
+    const userId = ctx.from?.id;
+    if (chatId === undefined || userId === undefined) return;
+    await helpDispatcher({ chatId, userId, bot: managerObj });
+  });
 
-    bot.on("message:text", async (ctx) => {
-      const replyToMessageId = ctx.message.reply_to_message?.message_id;
-      const chatId = ctx.chat.id;
-      const userId = ctx.from?.id;
-      if (!questionDispatcher || replyToMessageId === undefined || userId === undefined) return;
-      await questionDispatcher.handleTextReply(ctx.message.text, chatId, userId, replyToMessageId);
-    });
-  }
+  bot.on("message:text", async (ctx) => {
+    const replyToMessageId = ctx.message.reply_to_message?.message_id;
+    const chatId = ctx.chat.id;
+    const userId = ctx.from?.id;
+    if (!questionDispatcher || replyToMessageId === undefined || userId === undefined) return;
+    await questionDispatcher.handleTextReply(ctx.message.text, chatId, userId, replyToMessageId);
+  });
 
   const requireChatId = async (action: string): Promise<number> => {
     if (activeChatId) return activeChatId;
@@ -199,10 +198,8 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
 
   managerObj = {
     async start() {
-      if (!polling) {
-        logger.info("pass-through mode - skipping bot.start()");
-        return;
-      }
+      if (pollingActive) return;
+      pollingActive = true;
       try {
         await bot.api.setMyCommands([
           { command: "sessions", description: "활성 세션 목록 (top 20)" },
@@ -213,21 +210,29 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       } catch (err) {
         logger.warn("setMyCommands failed", { error: String(err) });
       }
-      await bot.start({
-        drop_pending_updates: true,
-        onStart: () => {
-          logger.info("polling started");
-        },
-      });
+      try {
+        await bot.start({
+          drop_pending_updates: true,
+          onStart: () => {
+            logger.info("polling started");
+          },
+        });
+      } catch (err) {
+        pollingActive = false;
+        throw err;
+      }
     },
     async stop() {
-      if (polling) {
-        try {
-          await bot.stop();
-        } catch (err) {
-          logger.warn("bot.stop() error", { error: String(err) });
-        }
+      if (!pollingActive) return;
+      pollingActive = false;
+      try {
+        await bot.stop();
+      } catch (err) {
+        logger.warn("bot.stop() error", { error: String(err) });
       }
+    },
+    isPolling() {
+      return pollingActive;
     },
     async sendMessage(text, options) {
       const chatId = await requireChatId("sendMessage");

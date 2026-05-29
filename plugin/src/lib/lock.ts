@@ -1,10 +1,11 @@
-import { open, readFile, stat, unlink } from "node:fs/promises";
+import { open, readFile, stat, unlink, utimes } from "node:fs/promises";
 import { hostname } from "node:os";
 
 export interface LockHandle {
   readonly path: string;
   readonly acquiredAt: Date;
   release(): Promise<void>;
+  refresh(): Promise<boolean>;
 }
 
 export interface AcquireLockOptions {
@@ -32,7 +33,11 @@ function hasCode(err: Error, code: string): boolean {
 function parseLockData(text: string): LockFileData | null {
   try {
     const parsed = JSON.parse(text) as Partial<LockFileData>;
-    if (typeof parsed.pid === "number" && typeof parsed.hostname === "string" && typeof parsed.createdAt === "string") {
+    if (
+      typeof parsed.pid === "number" &&
+      typeof parsed.hostname === "string" &&
+      typeof parsed.createdAt === "string"
+    ) {
       return { pid: parsed.pid, hostname: parsed.hostname, createdAt: parsed.createdAt };
     }
   } catch {
@@ -73,10 +78,25 @@ async function createLock(lockPath: string, pid: number): Promise<LockHandle> {
         // idempotent release
       }
     },
+    async refresh() {
+      if (released) return false;
+      try {
+        const data = parseLockData(await readFile(lockPath, "utf8"));
+        if (!data || data.pid !== pid || data.hostname !== hostname()) return false;
+        const now = new Date();
+        await utimes(lockPath, now, now);
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
 }
 
-async function inspectExisting(lockPath: string, ttlMs: number): Promise<{ stale: boolean; ownerPid?: number; reason: string }> {
+async function inspectExisting(
+  lockPath: string,
+  ttlMs: number,
+): Promise<{ stale: boolean; ownerPid?: number; reason: string }> {
   let ownerPid: number | undefined;
   let dead = false;
   try {
@@ -118,7 +138,11 @@ export async function acquireLock(opts: AcquireLockOptions): Promise<LockResult>
       try {
         await unlink(opts.lockPath);
       } catch {
-        return { acquired: false, reason: "failed to remove stale lock", ownerPid: existing.ownerPid };
+        return {
+          acquired: false,
+          reason: "failed to remove stale lock",
+          ownerPid: existing.ownerPid,
+        };
       }
     }
   }

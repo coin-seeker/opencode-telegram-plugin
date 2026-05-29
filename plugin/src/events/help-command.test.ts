@@ -18,6 +18,9 @@ function makeBot(calls: SendCall[]): TelegramBotManager {
   return {
     async start() {},
     async stop() {},
+    isPolling() {
+      return false;
+    },
     async sendMessage(text, opts) {
       calls.push({ text, opts });
       return { message_id: 1 };

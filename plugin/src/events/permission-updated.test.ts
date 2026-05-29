@@ -44,6 +44,9 @@ function createBot() {
   const bot: TelegramBotManager = {
     async start() {},
     async stop() {},
+    isPolling() {
+      return false;
+    },
     async sendMessage(text, options) {
       sentMessages.push({ text, options });
       return { message_id: nextMessageId++ };

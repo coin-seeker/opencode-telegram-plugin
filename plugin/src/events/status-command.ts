@@ -122,7 +122,7 @@ export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispat
   return async ({ chatId, bot, args }) => {
     const rawN = args[0];
     if (rawN === undefined || rawN === "") {
-      await bot.sendMessage("사용법: /status <번호>. 먼저 /sessions 로 목록 확인", {
+      await bot.sendMessage("사용법: /status &lt;번호&gt;. 먼저 /sessions 로 목록 확인", {
         parse_mode: "HTML",
       });
       return;
@@ -151,7 +151,8 @@ export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispat
       return;
     }
 
-    const rawSourceServerUrl = entry.serverUrl ?? deps.sessionTitleService.getServerUrl(entry.sessionId);
+    const rawSourceServerUrl =
+      entry.serverUrl ?? deps.sessionTitleService.getServerUrl(entry.sessionId);
     const sourceServerUrl = normalizeOpenCodeServerUrl(rawSourceServerUrl);
     if (rawSourceServerUrl && !sourceServerUrl) {
       await bot.sendMessage("세션 서버 정보가 유효하지 않습니다. /sessions 재실행 필요", {
@@ -168,7 +169,11 @@ export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispat
 
     if (sourceServerUrl && useRemoteServer) {
       try {
-        const getResult = await getRemoteSession(sourceServerUrl, entry.sessionId, deps.opencodeFetch);
+        const getResult = await getRemoteSession(
+          sourceServerUrl,
+          entry.sessionId,
+          deps.opencodeFetch,
+        );
         session = getResult.data;
         responseStatus = getResult.response.status;
         if (!session || responseStatus === 404) {
@@ -187,7 +192,11 @@ export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispat
         await bot.sendMessage("세션 상태를 불러오지 못했습니다. /sessions 재실행 필요", {
           parse_mode: "HTML",
         });
-        deps.logger.error("status remote lookup failed", { chatId, sessionId: entry.sessionId, error: String(err) });
+        deps.logger.error("status remote lookup failed", {
+          chatId,
+          sessionId: entry.sessionId,
+          error: String(err),
+        });
         return;
       }
     } else {

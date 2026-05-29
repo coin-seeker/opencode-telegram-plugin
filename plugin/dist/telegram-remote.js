@@ -672,7 +672,7 @@ ${pending.permission}: ${pending.title}`
 
 // src/lib/pending-questions.ts
 import { createHash as createHash3 } from "crypto";
-import { mkdir as mkdir3, readFile as readFile2, readdir as readdir3, rename as rename2, unlink as unlink3, writeFile as writeFile2 } from "fs/promises";
+import { mkdir as mkdir3, readdir as readdir3, readFile as readFile2, rename as rename2, unlink as unlink3, writeFile as writeFile2 } from "fs/promises";
 import { tmpdir as tmpdir2 } from "os";
 import { dirname as dirname2, join as join3 } from "path";
 function hasCode3(err, code) {
@@ -686,8 +686,10 @@ function parsePending2(text) {
   if (typeof parsed.requestID !== "string") throw new Error("Invalid pending question: requestID");
   if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending question: sessionID");
   if (!Array.isArray(parsed.questions)) throw new Error("Invalid pending question: questions");
-  if (!Array.isArray(parsed.telegramMessageIds)) throw new Error("Invalid pending question: telegramMessageIds");
-  if (!Array.isArray(parsed.answersInProgress)) throw new Error("Invalid pending question: answersInProgress");
+  if (!Array.isArray(parsed.telegramMessageIds))
+    throw new Error("Invalid pending question: telegramMessageIds");
+  if (!Array.isArray(parsed.answersInProgress))
+    throw new Error("Invalid pending question: answersInProgress");
   parsed.answersInProgress = parsed.answersInProgress.map((answer) => answer ?? null);
   return parsed;
 }
@@ -741,11 +743,13 @@ function createPendingQuestionStore(opts) {
       }
       return expired;
     },
-    async findByRequestID(requestID) {
+    async findByRequestID(requestID, sessionID, serverUrl) {
       for (const fileName of await listPendingFiles2(dir)) {
         const shortHash = shortHashFromFileName2(fileName);
         const data = await this.loadPending(shortHash);
-        if (data?.requestID === requestID) return { shortHash, data };
+        if (data?.requestID === requestID && (sessionID === void 0 || data.sessionID === sessionID) && (serverUrl === void 0 || data.serverUrl === serverUrl)) {
+          return { shortHash, data };
+        }
       }
       return void 0;
     },
@@ -754,14 +758,16 @@ function createPendingQuestionStore(opts) {
         const shortHash = shortHashFromFileName2(fileName);
         const data = await this.loadPending(shortHash);
         const awaiting = data?.awaitingCustomFor;
-        if (awaiting && awaiting.chatId === chatId && awaiting.userId === userId) return { shortHash, data };
+        if (awaiting && awaiting.chatId === chatId && awaiting.userId === userId)
+          return { shortHash, data };
       }
       return void 0;
     }
   };
 }
-function createQuestionShortHash(requestID) {
-  return createHash3("sha256").update(requestID).digest("base64url").slice(0, 10);
+function createQuestionShortHash(requestID, sessionID, serverUrl) {
+  const source = sessionID === void 0 ? requestID : `${serverUrl ?? ""}:${sessionID}:${requestID}`;
+  return createHash3("sha256").update(source).digest("base64url").slice(0, 10);
 }
 
 // src/events/question-asked.ts
@@ -880,21 +886,16 @@ ${answerSummary(pending.questions, answers)}`
     await ctx.pendingQuestions.deletePending(shortHash);
   }
 }
-async function expirePending(ctx, shortHash, pending, messageId) {
-  await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 Question expired");
-  await ctx.pendingQuestions.deletePending(shortHash);
-  ctx.logger.info("pending question expired", { requestID: pending.requestID });
-}
 async function handleQuestionAsked(event, ctx) {
   const request = event.properties;
   if (request.questions.length === 0) return;
   const claimed = await claimOnce({
     claimsDir: ctx.claimsDir,
-    key: `question.asked:${request.id}`,
+    key: `question:${ctx.serverUrl.href}:${request.sessionID}:${request.id}`,
     ttlMs: 5e3
   });
   if (!claimed) return;
-  const shortHash = createQuestionShortHash(request.id);
+  const shortHash = createQuestionShortHash(request.id, request.sessionID, ctx.serverUrl.href);
   const firstQuestion = request.questions[0];
   const sentAt = Date.now();
   const pending = {
@@ -942,10 +943,6 @@ function createQuestionDispatcher(ctx) {
       const pending = await ctx.pendingQuestions.loadPending(shortHash);
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
-        return;
-      }
-      if (pending.expiresAt < Date.now()) {
-        await expirePending(ctx, shortHash, pending, messageId);
         return;
       }
       pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
@@ -1002,10 +999,6 @@ function createQuestionDispatcher(ctx) {
       if (!match) return;
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
-      if (match.data.expiresAt < Date.now()) {
-        await expirePending(ctx, match.shortHash, match.data, match.data.telegramMessageIds[0]);
-        return;
-      }
       match.data.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = match.data.questions[awaiting.questionIndex];
       if (question?.multiple === true) {
@@ -1029,16 +1022,31 @@ function createQuestionDispatcher(ctx) {
 function isEventQuestionReplied(event) {
   if (event.type !== "question.replied") return false;
   const props = event.properties;
-  return Boolean(props && typeof props.requestID === "string" && typeof props.sessionID === "string");
+  return Boolean(
+    props && typeof props.requestID === "string" && typeof props.sessionID === "string"
+  );
 }
 async function handleQuestionReplied(event, ctx) {
-  const found = await ctx.pendingQuestions.findByRequestID(event.properties.requestID);
-  if (!found) return;
+  const found = await ctx.pendingQuestions.findByRequestID(
+    event.properties.requestID,
+    event.properties.sessionID,
+    ctx.serverUrl.href
+  );
+  if (!found) {
+    ctx.logger.info("question.replied no pending match", {
+      requestID: event.properties.requestID,
+      sessionID: event.properties.sessionID
+    });
+    return;
+  }
   const messageId = found.data.telegramMessageIds[0];
   try {
     await ctx.bot.editMessageRemoveKeyboard(messageId, "\u2705 Already answered in opencode.");
   } catch (err) {
-    ctx.logger.error("failed to edit externally answered question", { error: String(err), requestID: event.properties.requestID });
+    ctx.logger.error("failed to edit externally answered question", {
+      error: String(err),
+      requestID: event.properties.requestID
+    });
   } finally {
     await ctx.pendingQuestions.deletePending(found.shortHash);
   }
@@ -1501,7 +1509,7 @@ function createPendingStartWork(sessionID, title, serverUrl, telegramMessageId) 
 function startWorkShortHash(sessionID) {
   return createStartWorkShortHash(sessionID);
 }
-async function expirePending2(ctx, shortHash, pending, messageId) {
+async function expirePending(ctx, shortHash, pending, messageId) {
   await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 /start-work request expired");
   await ctx.pendingStartWorks.deletePending(shortHash);
   ctx.logger.info("pending start-work expired", { sessionID: pending.sessionID });
@@ -1518,7 +1526,7 @@ function createStartWorkDispatcher(ctx) {
         return;
       }
       if (pending.expiresAt < Date.now()) {
-        await expirePending2(ctx, shortHash, pending, messageId);
+        await expirePending(ctx, shortHash, pending, messageId);
         return;
       }
       try {
@@ -2998,9 +3006,6 @@ var TelegramRemote = async (input) => {
         }
       });
     };
-    if (leadership.isLeader) {
-      startLeaderPolling();
-    }
     let electionRunning = false;
     const runElection = async () => {
       if (electionRunning) return;
@@ -3104,6 +3109,9 @@ var TelegramRemote = async (input) => {
       })
     );
     bot.setHelpDispatcher(createHelpDispatcher({ logger }));
+    if (leadership.isLeader) {
+      startLeaderPolling();
+    }
     return {
       event: async ({ event }) => {
         const extEvent = event;
@@ -3159,7 +3167,6 @@ var TelegramRemote = async (input) => {
               return handleSessionError(extEvent, ctx);
             }
             if (isEventQuestionAsked(extEvent)) {
-              if (!leadership.isLeader) return;
               return handleQuestionAsked(extEvent, ctx);
             }
             if (isEventQuestionReplied(extEvent)) {

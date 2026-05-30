@@ -1560,7 +1560,7 @@ var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
 var DEFERRED_PARENT_CONFIRM_DELAY_MS = 2500;
 var deferredConfirmTimers = /* @__PURE__ */ new Map();
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 function agentFinishedMessage(title, agent) {
   const base = title ? `Agent has finished: ${title}` : "Agent has finished.";
@@ -1913,9 +1913,223 @@ ${body}
 
 // src/lib/plan-readiness.ts
 import { access, readFile as readFile5, readdir as readdir6, stat as stat2 } from "fs/promises";
-import { join as join6 } from "path";
+import { basename, isAbsolute, join as join6, relative, resolve } from "path";
+function asRecord2(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  return value;
+}
+function stringArray(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => typeof item === "string");
+}
+function optionalString(value) {
+  return typeof value === "string" ? value : void 0;
+}
+function normalizeBoulderWork(value) {
+  const record = asRecord2(value);
+  if (!record || typeof record.active_plan !== "string") return void 0;
+  const work = {
+    activePlan: record.active_plan,
+    sessionIds: stringArray(record.session_ids)
+  };
+  const planName = optionalString(record.plan_name);
+  if (planName !== void 0) work.planName = planName;
+  const status = optionalString(record.status);
+  if (status !== void 0) work.status = status;
+  const startedAt = optionalString(record.started_at);
+  if (startedAt !== void 0) work.startedAt = startedAt;
+  const updatedAt = optionalString(record.updated_at);
+  if (updatedAt !== void 0) work.updatedAt = updatedAt;
+  const worktreePath = optionalString(record.worktree_path);
+  if (worktreePath !== void 0) work.worktreePath = worktreePath;
+  return work;
+}
+function normalizeBoulderState(value) {
+  const record = asRecord2(value);
+  if (!record) return void 0;
+  const state = { sessionIds: stringArray(record.session_ids) };
+  const activePlan = optionalString(record.active_plan);
+  if (activePlan !== void 0) state.activePlan = activePlan;
+  const planName = optionalString(record.plan_name);
+  if (planName !== void 0) state.planName = planName;
+  const status = optionalString(record.status);
+  if (status !== void 0) state.status = status;
+  const startedAt = optionalString(record.started_at);
+  if (startedAt !== void 0) state.startedAt = startedAt;
+  const updatedAt = optionalString(record.updated_at);
+  if (updatedAt !== void 0) state.updatedAt = updatedAt;
+  const worktreePath = optionalString(record.worktree_path);
+  if (worktreePath !== void 0) state.worktreePath = worktreePath;
+  const activeWorkId = optionalString(record.active_work_id);
+  if (activeWorkId !== void 0) state.activeWorkId = activeWorkId;
+  const worksRecord = asRecord2(record.works);
+  if (worksRecord) {
+    const works = {};
+    for (const [workId, rawWork] of Object.entries(worksRecord)) {
+      const work = normalizeBoulderWork(rawWork);
+      if (work) works[workId] = work;
+    }
+    if (Object.keys(works).length > 0) state.works = works;
+  }
+  return state;
+}
+async function readBoulderState(boulderPath) {
+  let text;
+  try {
+    text = await readFile5(boulderPath, "utf8");
+  } catch (err) {
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+      return { exists: false };
+    }
+    return { exists: true };
+  }
+  try {
+    return { exists: true, state: normalizeBoulderState(JSON.parse(text)) };
+  } catch {
+    return { exists: true };
+  }
+}
+function mirrorWorkFromState(state) {
+  if (!state.activePlan) return void 0;
+  const work = {
+    activePlan: state.activePlan,
+    sessionIds: state.sessionIds
+  };
+  if (state.planName !== void 0) work.planName = state.planName;
+  if (state.status !== void 0) work.status = state.status;
+  if (state.startedAt !== void 0) work.startedAt = state.startedAt;
+  if (state.updatedAt !== void 0) work.updatedAt = state.updatedAt;
+  if (state.worktreePath !== void 0) work.worktreePath = state.worktreePath;
+  return work;
+}
+function boulderWorks(state) {
+  if (state.works) return Object.values(state.works);
+  const mirrorWork = mirrorWorkFromState(state);
+  return mirrorWork ? [mirrorWork] : [];
+}
+function parseIsoToMs(value) {
+  if (!value) return 0;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+function findBoulderWorkForSession(state, sessionId) {
+  const works = boulderWorks(state).filter((work) => work.sessionIds.includes(sessionId)).sort(
+    (left, right) => parseIsoToMs(right.updatedAt ?? right.startedAt) - parseIsoToMs(left.updatedAt ?? left.startedAt)
+  );
+  if (works[0]) return works[0];
+  const mirrorWork = mirrorWorkFromState(state);
+  if (mirrorWork && state.sessionIds.includes(sessionId)) return mirrorWork;
+  return void 0;
+}
+function isActiveBoulderWork(work) {
+  return work.status !== "completed" && work.status !== "abandoned";
+}
+function resolveTrackedPath(baseDirectory, trackedPath) {
+  return isAbsolute(trackedPath) ? resolve(trackedPath) : resolve(baseDirectory, trackedPath);
+}
+async function resolveBoulderPlanPath(projectRoot, work) {
+  const absolutePlanPath = resolveTrackedPath(projectRoot, work.activePlan);
+  const worktreePath = work.worktreePath?.trim();
+  if (!worktreePath) return absolutePlanPath;
+  const relativePlanPath = relative(resolve(projectRoot), absolutePlanPath);
+  if (relativePlanPath.length === 0 || relativePlanPath.startsWith("..") || isAbsolute(relativePlanPath)) {
+    return absolutePlanPath;
+  }
+  const worktreePlanPath = resolve(resolveTrackedPath(projectRoot, worktreePath), relativePlanPath);
+  try {
+    await access(worktreePlanPath);
+    return worktreePlanPath;
+  } catch {
+    return absolutePlanPath;
+  }
+}
+function planNameFromPath(planPath) {
+  return basename(planPath, ".md");
+}
+function normalizePlanToken(value) {
+  return value.normalize("NFKD").toLowerCase().replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9가-힣]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function selectPlanByHint(candidates, planHint) {
+  if (!planHint) return void 0;
+  const normalizedHint = normalizePlanToken(planHint);
+  if (!normalizedHint) return void 0;
+  return candidates.find((candidate) => {
+    const planName = candidate.name.replace(/\.md$/, "");
+    return normalizePlanToken(planName) === normalizedHint;
+  });
+}
+function resolvePlanPathHint(projectRoot, planPath) {
+  if (!planPath) return void 0;
+  const resolvedPath = isAbsolute(planPath) ? resolve(planPath) : resolve(projectRoot, planPath);
+  const plansRoot = resolve(projectRoot, ".omo", "plans");
+  const relativePlanPath = relative(plansRoot, resolvedPath);
+  if (!resolvedPath.endsWith(".md") || relativePlanPath.length === 0 || relativePlanPath.startsWith("..") || isAbsolute(relativePlanPath)) {
+    return void 0;
+  }
+  return resolvedPath;
+}
+async function getPlanFiles(plansDir) {
+  let planFiles = [];
+  try {
+    const entries = await readdir6(plansDir);
+    planFiles = entries.filter((e) => e.endsWith(".md"));
+  } catch {
+    return void 0;
+  }
+  if (planFiles.length === 0) return [];
+  const stats = await Promise.all(
+    planFiles.map(async (f) => {
+      const full = join6(plansDir, f);
+      const s = await stat2(full);
+      return { path: full, name: f, mtime: s.mtime.getTime() };
+    })
+  );
+  return stats.sort((a, b) => b.mtime - a.mtime);
+}
+async function readPlanProgress(planPath, planName, boulderActive = false) {
+  let content;
+  try {
+    content = await readFile5(planPath, "utf8");
+  } catch {
+    return {
+      ready: false,
+      reason: "no-plans",
+      detail: `${planPath} not found`,
+      ...boulderActive ? { boulderActive } : {}
+    };
+  }
+  const totalMatches = content.match(/^- \[[ xX]\]/gm) ?? [];
+  const completedMatches = content.match(/^- \[[xX]\]/gm) ?? [];
+  const total = totalMatches.length;
+  const completed = completedMatches.length;
+  if (total === 0) {
+    return {
+      ready: false,
+      reason: "plan-empty",
+      detail: `${planName}: no checkboxes found`,
+      ...boulderActive ? { boulderActive } : {}
+    };
+  }
+  if (completed >= total) {
+    return {
+      ready: false,
+      reason: "all-plans-complete",
+      detail: `${planName}: ${completed}/${total} complete`,
+      ...boulderActive ? { boulderActive } : {}
+    };
+  }
+  return {
+    ready: true,
+    planPath,
+    planName,
+    total,
+    completed,
+    ...boulderActive ? { boulderActive } : {}
+  };
+}
 async function checkPlanReadiness(args) {
-  const { projectRoot } = args;
+  const { projectRoot, sessionId } = args;
+  const allowLatestFallback = args.allowLatestFallback ?? sessionId === void 0;
   const omoDir = join6(projectRoot, ".omo");
   const plansDir = join6(omoDir, "plans");
   const boulderPath = join6(omoDir, "boulder.json");
@@ -1928,68 +2142,62 @@ async function checkPlanReadiness(args) {
       detail: `${omoDir} does not exist`
     };
   }
-  try {
-    await access(boulderPath);
+  const boulder = await readBoulderState(boulderPath);
+  const projectBoulderActive = boulder.exists;
+  if (boulder.exists && sessionId === void 0) {
     return {
       ready: false,
       reason: "boulder-active",
-      detail: `${boulderPath} exists`
+      detail: `${boulderPath} exists`,
+      boulderActive: true
     };
-  } catch {
   }
-  let planFiles = [];
-  try {
-    const entries = await readdir6(plansDir);
-    planFiles = entries.filter((e) => e.endsWith(".md"));
-  } catch {
+  if (boulder.state && sessionId !== void 0) {
+    const work = findBoulderWorkForSession(boulder.state, sessionId);
+    if (work) {
+      const planPath = await resolveBoulderPlanPath(projectRoot, work);
+      return readPlanProgress(
+        planPath,
+        work.planName ?? planNameFromPath(planPath),
+        isActiveBoulderWork(work)
+      );
+    }
+  }
+  const explicitPlanPath = resolvePlanPathHint(projectRoot, args.planPath);
+  if (explicitPlanPath) {
+    return readPlanProgress(explicitPlanPath, planNameFromPath(explicitPlanPath), projectBoulderActive);
+  }
+  const stats = await getPlanFiles(plansDir);
+  if (stats === void 0) {
     return {
       ready: false,
       reason: "no-plans",
-      detail: `${plansDir} not found or empty`
+      detail: `${plansDir} not found or empty`,
+      ...projectBoulderActive ? { boulderActive: true } : {}
     };
   }
-  if (planFiles.length === 0) {
+  if (stats.length === 0) {
     return {
       ready: false,
       reason: "no-plans",
-      detail: `No .md files in ${plansDir}`
+      detail: `No .md files in ${plansDir}`,
+      ...projectBoulderActive ? { boulderActive: true } : {}
     };
   }
-  const stats = await Promise.all(
-    planFiles.map(async (f) => {
-      const full = join6(plansDir, f);
-      const s = await stat2(full);
-      return { path: full, name: f, mtime: s.mtime.getTime() };
-    })
-  );
-  stats.sort((a, b) => b.mtime - a.mtime);
+  const hinted = selectPlanByHint(stats, args.planHint);
+  if (hinted) {
+    return readPlanProgress(hinted.path, hinted.name.replace(/\.md$/, ""), projectBoulderActive);
+  }
+  if (!allowLatestFallback) {
+    return {
+      ready: false,
+      reason: "no-session-plan",
+      detail: `No plan associated with session ${sessionId ?? "missing"}`,
+      ...projectBoulderActive ? { boulderActive: true } : {}
+    };
+  }
   const latest = stats[0];
-  const content = await readFile5(latest.path, "utf8");
-  const totalMatches = content.match(/^- \[[ xX]\]/gm) ?? [];
-  const completedMatches = content.match(/^- \[[xX]\]/gm) ?? [];
-  const total = totalMatches.length;
-  const completed = completedMatches.length;
-  if (total === 0) {
-    return {
-      ready: false,
-      reason: "plan-empty",
-      detail: `${latest.name}: no checkboxes found`
-    };
-  }
-  if (completed >= total) {
-    return {
-      ready: false,
-      reason: "all-plans-complete",
-      detail: `${latest.name}: ${completed}/${total} complete`
-    };
-  }
-  return {
-    ready: true,
-    planPath: latest.path,
-    planName: latest.name.replace(/\.md$/, ""),
-    total,
-    completed
-  };
+  return readPlanProgress(latest.path, latest.name.replace(/\.md$/, ""), projectBoulderActive);
 }
 async function recheckSessionIdle(client, sessionId) {
   const result = await client.session.status();
@@ -2052,6 +2260,8 @@ function planReadinessKorean(result) {
     }
     case "boulder-active":
       return "boulder \uD65C\uC131";
+    case "no-session-plan":
+      return "\uC138\uC158 \uC5F0\uACB0 plan \uC5C6\uC74C";
   }
 }
 function planLine(result) {
@@ -2061,7 +2271,7 @@ function planLine(result) {
   return `<b>\uD50C\uB79C \uC0C1\uD0DC</b>: ${planReadinessKorean(result)}`;
 }
 function boulderLine(result) {
-  const active = !result.ready && result.reason === "boulder-active";
+  const active = result.boulderActive === true || !result.ready && result.reason === "boulder-active";
   return active ? "<b>Boulder</b>: \uD65C\uC131" : "<b>Boulder</b>: \uC5C6\uC74C";
 }
 function createStatusDispatcher(deps) {
@@ -2162,11 +2372,18 @@ function createStatusDispatcher(deps) {
       return;
     }
     const projectRoot = resolveProjectRoot(session);
-    const planReady = await checkPlanReadiness({ projectRoot });
+    const rawTitle = session.title ?? entry.title;
+    const rawAgent = entry.agent ?? session.agent;
+    const planReady = await checkPlanReadiness({
+      projectRoot,
+      sessionId: entry.sessionId,
+      planHint: rawTitle,
+      allowLatestFallback: rawAgent === "plan"
+    });
     const userSnippet = buildSnippet(findLastByRole(messages, "user"));
     const assistantSnippet = buildSnippet(findLastByRole(messages, "assistant"));
-    const title = escapeHtml(session.title ?? "");
-    const agent = entry.agent ? escapeHtml(entry.agent) : "?";
+    const title = escapeHtml(rawTitle ?? "");
+    const agent = rawAgent ? escapeHtml(rawAgent) : "?";
     const text = [
       `<b>\uC138\uC158 #${n}</b>: ${title}`,
       `\uC5D0\uC774\uC804\uD2B8: ${agent}`,
@@ -2208,6 +2425,8 @@ function readinessMessage(reason) {
       return "plan \uC758 \uBAA8\uB4E0 task \uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC0C8 plan \uC791\uC131 \uD544\uC694";
     case "boulder-active":
       return ".omo/boulder.json \uC774 \uC774\uBBF8 \uC874\uC7AC\uD569\uB2C8\uB2E4. \uAE30\uC874 \uC791\uC5C5\uC774 \uC9C4\uD589 \uC911\uC774\uAC70\uB098 archive \uAC00 \uD544\uC694\uD569\uB2C8\uB2E4";
+    case "no-session-plan":
+      return "\uD574\uB2F9 \uC138\uC158\uACFC \uC5F0\uACB0\uB41C plan \uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
   }
 }
 function isSessionNotFoundError(err) {

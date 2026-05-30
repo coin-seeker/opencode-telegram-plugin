@@ -384,6 +384,8 @@ function parsePending(text) {
     throw new Error("Invalid pending permission: requestID");
   if (typeof parsed.sessionID !== "string")
     throw new Error("Invalid pending permission: sessionID");
+  if (parsed.directory !== void 0 && typeof parsed.directory !== "string")
+    throw new Error("Invalid pending permission: directory");
   if (typeof parsed.title !== "string") throw new Error("Invalid pending permission: title");
   if (typeof parsed.permission !== "string")
     throw new Error("Invalid pending permission: permission");
@@ -537,10 +539,34 @@ function replyLabel(reply) {
   if (reply === "always") return "Always allowed";
   return "Rejected";
 }
+async function upgradeLegacyPendingPermission(permission, ctx) {
+  const found = await ctx.pendingPermissions.findByRequestID(
+    permission.requestID,
+    permission.sessionID,
+    ctx.serverUrl.href
+  );
+  if (!found || found.data.endpoint === "request") return;
+  await ctx.pendingPermissions.savePending(found.shortHash, {
+    ...found.data,
+    directory: ctx.directory,
+    title: permission.title,
+    permission: permission.permission,
+    patterns: permission.patterns,
+    always: permission.always,
+    endpoint: "request"
+  });
+  ctx.logger.info("permission pending upgraded to request endpoint", {
+    requestID: permission.requestID,
+    sessionID: permission.sessionID
+  });
+}
 async function handleNormalizedPermission(permission, ctx) {
   const permissionKey = `${ctx.serverUrl.href}:${permission.sessionID}:${permission.requestID}`;
   const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `permission:${permissionKey}` });
-  if (!claimed) return;
+  if (!claimed) {
+    if (permission.endpoint === "request") await upgradeLegacyPendingPermission(permission, ctx);
+    return;
+  }
   const shortHash = createPermissionShortHash(
     permission.requestID,
     permission.sessionID,
@@ -558,6 +584,7 @@ async function handleNormalizedPermission(permission, ctx) {
       requestID: permission.requestID,
       sessionID: permission.sessionID,
       serverUrl: ctx.serverUrl.href,
+      directory: ctx.directory,
       title: permission.title,
       permission: permission.permission,
       patterns: permission.patterns,
@@ -641,7 +668,8 @@ function createPermissionDispatcher(ctx) {
           pending.sessionID,
           reply,
           pending.endpoint,
-          pending.serverUrl
+          pending.serverUrl,
+          pending.directory
         );
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
@@ -661,7 +689,10 @@ ${pending.permission}: ${pending.title}`
         );
         ctx.logger.error("failed to send permission reply", {
           error: String(err),
-          requestID: pending.requestID
+          requestID: pending.requestID,
+          endpoint: pending.endpoint,
+          serverUrl: pending.serverUrl,
+          directory: pending.directory
         });
       } finally {
         await ctx.pendingPermissions.deletePending(shortHash);
@@ -3097,6 +3128,12 @@ var SessionTitleService = class {
 
 // src/telegram-remote.ts
 var pluginDir = dirname6(fileURLToPath(import.meta.url));
+function withDirectoryQuery(path, directory) {
+  if (directory === void 0) return path;
+  const url = new URL(path, "http://opencode.local");
+  url.searchParams.set("directory", directory);
+  return `${url.pathname}${url.search}`;
+}
 async function postToServer(serverUrl, path, body) {
   const safeServerUrl = normalizeOpenCodeServerUrl(serverUrl);
   if (!safeServerUrl) throw new Error("Invalid OpenCode server URL");
@@ -3169,9 +3206,12 @@ var TelegramRemote = async (input) => {
         throwOnError: true
       });
     };
-    const replyToPermission = async (requestID, sessionID, reply, endpoint2, serverUrl = input.serverUrl.href) => {
+    const replyToPermission = async (requestID, sessionID, reply, endpoint2, serverUrl = input.serverUrl.href, directory = input.directory) => {
       if (endpoint2 === "request") {
-        const path2 = `/permission/${encodeURIComponent(requestID)}/reply`;
+        const path2 = withDirectoryQuery(
+          `/permission/${encodeURIComponent(requestID)}/reply`,
+          directory
+        );
         if (serverUrl !== input.serverUrl.href) {
           await postToServer(serverUrl, path2, { reply });
           return;
@@ -3184,7 +3224,10 @@ var TelegramRemote = async (input) => {
         });
         return;
       }
-      const path = `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`;
+      const path = withDirectoryQuery(
+        `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
+        directory
+      );
       if (serverUrl !== input.serverUrl.href) {
         await postToServer(serverUrl, path, { response: reply });
         return;
@@ -3286,6 +3329,7 @@ var TelegramRemote = async (input) => {
       claimsDir,
       pluginDir,
       serverUrl: input.serverUrl,
+      directory: input.directory,
       tokenHash,
       pendingQuestions,
       pendingPermissions,

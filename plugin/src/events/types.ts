@@ -23,6 +23,7 @@ export interface EventHandlerContext {
   claimsDir: string;
   pluginDir: string;
   serverUrl: URL;
+  directory: string;
   tokenHash: string;
   pendingQuestions: PendingQuestionStore;
   pendingPermissions: PendingPermissionStore;
@@ -37,6 +38,7 @@ export interface EventHandlerContext {
     reply: PermissionReply,
     endpoint: "request" | "session",
     serverUrl?: string,
+    directory?: string,
   ): Promise<void>;
   runSessionCommand(sessionID: string, command: string, serverUrl?: string): Promise<void>;
 }

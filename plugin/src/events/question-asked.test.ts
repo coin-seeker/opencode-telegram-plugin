@@ -102,6 +102,7 @@ function createContext(
     claimsDir: join(dir, `claims-${requestID}`),
     pluginDir: dir,
     serverUrl: new URL("http://localhost:4096"),
+    directory: dir,
     tokenHash: "tok",
     pendingQuestions: createPendingQuestionStore({
       tokenHash: "tok",

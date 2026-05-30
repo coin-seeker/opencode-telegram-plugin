@@ -9,6 +9,7 @@ export interface PendingPermissionState {
   requestID: string;
   sessionID: string;
   serverUrl?: string;
+  directory?: string;
   title: string;
   permission: string;
   patterns: string[];
@@ -51,6 +52,8 @@ function parsePending(text: string): PendingPermissionState {
     throw new Error("Invalid pending permission: requestID");
   if (typeof parsed.sessionID !== "string")
     throw new Error("Invalid pending permission: sessionID");
+  if (parsed.directory !== undefined && typeof parsed.directory !== "string")
+    throw new Error("Invalid pending permission: directory");
   if (typeof parsed.title !== "string") throw new Error("Invalid pending permission: title");
   if (typeof parsed.permission !== "string")
     throw new Error("Invalid pending permission: permission");

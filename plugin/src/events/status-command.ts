@@ -24,9 +24,11 @@ export type StatusDispatcher = (ctx: {
   args: string[];
 }) => Promise<void>;
 
+type StatusLogData = Record<string, string | number | boolean | null | undefined>;
+
 interface StatusLogger {
-  info(msg: string, data?: Record<string, unknown>): void;
-  error(msg: string, data?: Record<string, unknown>): void;
+  info(msg: string, data?: StatusLogData): void;
+  error(msg: string, data?: StatusLogData): void;
 }
 
 interface StatusSessionTitleService {
@@ -103,6 +105,8 @@ function planReadinessKorean(result: PlanReadinessResult): string {
     }
     case "boulder-active":
       return "boulder 활성";
+    case "no-session-plan":
+      return "세션 연결 plan 없음";
   }
 }
 
@@ -114,7 +118,7 @@ function planLine(result: PlanReadinessResult): string {
 }
 
 function boulderLine(result: PlanReadinessResult): string {
-  const active = !result.ready && result.reason === "boulder-active";
+  const active = result.boulderActive === true || (!result.ready && result.reason === "boulder-active");
   return active ? "<b>Boulder</b>: 활성" : "<b>Boulder</b>: 없음";
 }
 
@@ -223,13 +227,20 @@ export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispat
     }
 
     const projectRoot = resolveProjectRoot(session);
-    const planReady = await checkPlanReadiness({ projectRoot });
+    const rawTitle = session.title ?? entry.title;
+    const rawAgent = entry.agent ?? session.agent;
+    const planReady = await checkPlanReadiness({
+      projectRoot,
+      sessionId: entry.sessionId,
+      planHint: rawTitle,
+      allowLatestFallback: rawAgent === "plan",
+    });
 
     const userSnippet = buildSnippet(findLastByRole(messages, "user"));
     const assistantSnippet = buildSnippet(findLastByRole(messages, "assistant"));
 
-    const title = escapeHtml(session.title ?? "");
-    const agent = entry.agent ? escapeHtml(entry.agent) : "?";
+    const title = escapeHtml(rawTitle ?? "");
+    const agent = rawAgent ? escapeHtml(rawAgent) : "?";
 
     const text = [
       `<b>세션 #${n}</b>: ${title}`,

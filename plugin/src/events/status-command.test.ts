@@ -235,7 +235,7 @@ describe("status-command dispatcher", () => {
     const logs: LogCall[] = [];
     const dispatcher = createStatusDispatcher({
       snapshotStore: makeSnapshotStore([
-        makeEntry({ index: 3, sessionId: "ses_happy", agent: "build" }),
+        makeEntry({ index: 3, sessionId: "ses_happy", agent: "plan" }),
       ]),
       sessionTitleService,
       client: makeClient({
@@ -270,7 +270,7 @@ describe("status-command dispatcher", () => {
     assert.equal(sendCalls.length, 1);
     const text = sendCalls[0]?.text ?? "";
     assert.match(text, /<b>세션 #3<\/b>: Happy Title/);
-    assert.match(text, /에이전트: build/);
+    assert.match(text, /에이전트: plan/);
     assert.match(text, /상태: busy/);
     assert.match(text, /유저: hello world/);
     assert.match(text, /에이전트: all good/);
@@ -286,6 +286,103 @@ describe("status-command dispatcher", () => {
     assert.equal(log?.data?.snapshotIndex, 3);
     assert.equal(Object.prototype.hasOwnProperty.call(log?.data ?? {}, "text"), false);
     assert.equal(Object.prototype.hasOwnProperty.call(log?.data ?? {}, "body"), false);
+  });
+
+  test("session-linked boulder works show distinct plan progress per status index", async () => {
+    const projectRoot = await freshProject();
+    const plansDir = join(projectRoot, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "one.md"), "- [x] one done\n- [ ] one open\n", "utf8");
+    await writeFile(
+      join(plansDir, "two.md"),
+      "- [x] two done\n- [x] two done again\n- [ ] two open\n",
+      "utf8",
+    );
+    await writeFile(
+      join(projectRoot, ".omo", "boulder.json"),
+      JSON.stringify({
+        schema_version: 2,
+        active_work_id: "two-work",
+        works: {
+          "one-work": {
+            active_plan: ".omo/plans/one.md",
+            plan_name: "one",
+            status: "active",
+            started_at: "2026-05-30T00:00:00.000Z",
+            updated_at: "2026-05-30T00:00:00.000Z",
+            session_ids: ["ses_one"],
+          },
+          "two-work": {
+            active_plan: ".omo/plans/two.md",
+            plan_name: "two",
+            status: "active",
+            started_at: "2026-05-31T00:00:00.000Z",
+            updated_at: "2026-05-31T00:00:00.000Z",
+            session_ids: ["ses_two"],
+          },
+        },
+        active_plan: ".omo/plans/two.md",
+        plan_name: "two",
+        status: "active",
+        session_ids: ["ses_two"],
+      }),
+      "utf8",
+    );
+
+    const sendCalls: SendCall[] = [];
+    const dispatcher = createStatusDispatcher({
+      snapshotStore: makeSnapshotStore([
+        makeEntry({ index: 1, sessionId: "ses_one", agent: "build", title: "One" }),
+        makeEntry({ index: 2, sessionId: "ses_two", agent: "build", title: "Two" }),
+      ]),
+      sessionTitleService,
+      client: makeClient({
+        async get(args) {
+          return {
+            data: { directory: projectRoot, title: args.path.id, id: args.path.id },
+          };
+        },
+      }),
+      logger: makeLogger([]),
+    });
+
+    await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
+    await dispatcher({ chatId: 7, userId: 1, bot: makeBot(sendCalls), args: ["2"] });
+
+    const first = sendCalls[0]?.text ?? "";
+    const second = sendCalls[1]?.text ?? "";
+    assert.match(first, /<b>플랜 진행도<\/b>: 1\/2 \(one\)/);
+    assert.match(second, /<b>플랜 진행도<\/b>: 2\/3 \(two\)/);
+    assert.match(first, /<b>Boulder<\/b>: 활성/);
+    assert.match(second, /<b>Boulder<\/b>: 활성/);
+  });
+
+  test("non-plan sessions do not fall back to the latest project plan", async () => {
+    const projectRoot = await freshProject();
+    const plansDir = join(projectRoot, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "latest.md"), "- [x] shared\n- [ ] shared\n", "utf8");
+
+    const sendCalls: SendCall[] = [];
+    const dispatcher = createStatusDispatcher({
+      snapshotStore: makeSnapshotStore([makeEntry({ index: 1, sessionId: "ses_build", agent: "build" })]),
+      sessionTitleService,
+      client: makeClient({
+        async get() {
+          return {
+            data: { directory: projectRoot, title: "Build Session", id: "ses_build" },
+          };
+        },
+      }),
+      logger: makeLogger([]),
+    });
+
+    await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.match(text, /<b>플랜 상태<\/b>: 세션 연결 plan 없음/);
+    assert.ok(!text.includes("latest"));
+    assert.ok(!text.includes("1/2"));
   });
 
   test("0 messages: snippets render as '메시지 없음'", async () => {
@@ -583,10 +680,21 @@ describe("status-command dispatcher", () => {
     assert.match(text, /<b>Boulder<\/b>: 없음/);
   });
 
-  test("boulder active: shows '활성' for Boulder line and plan status 'boulder 활성'", async () => {
+  test("boulder active: shows '활성' for Boulder line", async () => {
     const projectRoot = await freshProject();
-    await mkdir(join(projectRoot, ".omo"), { recursive: true });
-    await writeFile(join(projectRoot, ".omo", "boulder.json"), "{}", "utf8");
+    const plansDir = join(projectRoot, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "run-plan.md"), "- [ ] running\n", "utf8");
+    await writeFile(
+      join(projectRoot, ".omo", "boulder.json"),
+      JSON.stringify({
+        active_plan: ".omo/plans/run-plan.md",
+        plan_name: "run-plan",
+        status: "active",
+        session_ids: ["ses_boulder"],
+      }),
+      "utf8",
+    );
 
     const sendCalls: SendCall[] = [];
     const dispatcher = createStatusDispatcher({
@@ -605,7 +713,7 @@ describe("status-command dispatcher", () => {
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
 
     const text = sendCalls[0]?.text ?? "";
-    assert.match(text, /<b>플랜 상태<\/b>: boulder 활성/);
+    assert.match(text, /<b>플랜 진행도<\/b>: 0\/1 \(run-plan\)/);
     assert.match(text, /<b>Boulder<\/b>: 활성/);
   });
 

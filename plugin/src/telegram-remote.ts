@@ -64,6 +64,13 @@ type OpencodeClientWithInternalHttp = PluginInput["client"] & {
   _client: InternalOpencodeHttpClient;
 };
 
+function withDirectoryQuery(path: string, directory: string | undefined): string {
+  if (directory === undefined) return path;
+  const url = new URL(path, "http://opencode.local");
+  url.searchParams.set("directory", directory);
+  return `${url.pathname}${url.search}`;
+}
+
 async function postToServer(
   serverUrl: string,
   path: string,
@@ -161,9 +168,13 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       reply: PermissionReply,
       endpoint: "request" | "session",
       serverUrl = input.serverUrl.href,
+      directory = input.directory,
     ): Promise<void> => {
       if (endpoint === "request") {
-        const path = `/permission/${encodeURIComponent(requestID)}/reply`;
+        const path = withDirectoryQuery(
+          `/permission/${encodeURIComponent(requestID)}/reply`,
+          directory,
+        );
         if (serverUrl !== input.serverUrl.href) {
           await postToServer(serverUrl, path, { reply });
           return;
@@ -176,7 +187,10 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
         });
         return;
       }
-      const path = `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`;
+      const path = withDirectoryQuery(
+        `/session/${encodeURIComponent(sessionID)}/permissions/${encodeURIComponent(requestID)}`,
+        directory,
+      );
       if (serverUrl !== input.serverUrl.href) {
         await postToServer(serverUrl, path, { response: reply });
         return;
@@ -288,6 +302,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       claimsDir,
       pluginDir,
       serverUrl: input.serverUrl,
+      directory: input.directory,
       tokenHash,
       pendingQuestions,
       pendingPermissions,

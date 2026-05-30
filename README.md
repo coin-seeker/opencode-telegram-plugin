@@ -1,6 +1,6 @@
 # OpenCode Telegram Plugin
 
-Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin@1.1.1`, then configure your Telegram bot credentials in a private local env file.
+Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin@1.1.2`, then configure your Telegram bot credentials in a private local env file.
 
 > **Disclaimer:** This project is not affiliated with, endorsed by, or sponsored by OpenCode, SST, or any of their affiliates. OpenCode is a trademark of SST.
 
@@ -35,7 +35,7 @@ https://raw.githubusercontent.com/coin-seeker/opencode-telegram-plugin/refs/head
 
 OpenCode resolves the npm package on startup automatically.
 
-Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.1`.
+Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.2`.
 
 For a step-by-step manual install guide and an AI-agent-friendly install prompt, see [`docs/installation.md`](docs/installation.md).
 
@@ -85,7 +85,7 @@ Open `~/.config/opencode/opencode.json` and add the pinned npm package name to t
 ```json
 {
   "plugin": [
-    "@coinseeker/opencode-telegram-plugin@1.1.1"
+    "@coinseeker/opencode-telegram-plugin@1.1.2"
   ]
 }
 ```
@@ -93,6 +93,18 @@ Open `~/.config/opencode/opencode.json` and add the pinned npm package name to t
 The `plugin` key is a **singular string array**. Each entry is either an npm package name or a `file://` absolute path. There is no `plugins` (plural) key and no `{name, path}` object format.
 
 Restart OpenCode after changing this file.
+
+### Updating an Existing npm Install
+
+Replace the old pinned package entry in `~/.config/opencode/opencode.json` with the current version:
+
+```json
+{
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.2"]
+}
+```
+
+Keep all other plugin entries unchanged, then restart OpenCode. npm package plugins are resolved when OpenCode starts, so running sessions keep the previous version until restart.
 
 ### 7. Connect Telegram
 
@@ -243,7 +255,7 @@ The correct schema uses `"plugin"` (singular) with string entries:
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.1"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.2"]
 }
 ```
 

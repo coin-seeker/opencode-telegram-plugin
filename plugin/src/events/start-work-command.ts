@@ -54,6 +54,8 @@ function readinessMessage(reason: PlanReadinessFailureReason): string {
       return "plan 의 모든 task 가 완료되었습니다. 새 plan 작성 필요";
     case "boulder-active":
       return ".omo/boulder.json 이 이미 존재합니다. 기존 작업이 진행 중이거나 archive 가 필요합니다";
+    case "no-session-plan":
+      return "해당 세션과 연결된 plan 이 없습니다";
   }
 }
 

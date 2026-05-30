@@ -143,6 +143,60 @@ describe("checkPlanReadiness", () => {
       assert.equal(result.completed, 0);
     }
   });
+
+  test("sessionId without linked work does not select latest plan", async () => {
+    const root = join(dir, "session-no-work");
+    const plansDir = join(root, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "latest.md"), "- [x] Done\n- [ ] Pending\n");
+
+    const result = await checkPlanReadiness({ projectRoot: root, sessionId: "ses_build" });
+
+    assert.equal(result.ready, false);
+    if (!result.ready) {
+      assert.equal(result.reason, "no-session-plan");
+    }
+  });
+
+  test("sessionId selects matching boulder work plan", async () => {
+    const root = join(dir, "session-boulder-work");
+    const plansDir = join(root, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "alpha.md"), "- [x] Alpha done\n- [ ] Alpha open\n");
+    await writeFile(join(plansDir, "beta.md"), "- [ ] Beta open\n");
+    await writeFile(
+      join(root, ".omo", "boulder.json"),
+      JSON.stringify({
+        active_work_id: "beta-work",
+        works: {
+          "alpha-work": {
+            active_plan: ".omo/plans/alpha.md",
+            plan_name: "alpha",
+            status: "active",
+            updated_at: "2026-05-30T00:00:00.000Z",
+            session_ids: ["ses_alpha"],
+          },
+          "beta-work": {
+            active_plan: ".omo/plans/beta.md",
+            plan_name: "beta",
+            status: "active",
+            updated_at: "2026-05-31T00:00:00.000Z",
+            session_ids: ["ses_beta"],
+          },
+        },
+      }),
+    );
+
+    const result = await checkPlanReadiness({ projectRoot: root, sessionId: "ses_alpha" });
+
+    assert.equal(result.ready, true);
+    if (result.ready) {
+      assert.equal(result.planName, "alpha");
+      assert.equal(result.total, 2);
+      assert.equal(result.completed, 1);
+      assert.equal(result.boulderActive, true);
+    }
+  });
 });
 
 describe("recheckSessionIdle", () => {

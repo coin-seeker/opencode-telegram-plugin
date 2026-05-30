@@ -102,6 +102,7 @@ function createContext(
     reply: PermissionReply;
     endpoint: "request" | "session";
     serverUrl?: string;
+    directory?: string;
   }>,
 ): EventHandlerContext {
   return {
@@ -114,6 +115,7 @@ function createContext(
     claimsDir: join(dir, "claims"),
     pluginDir: dir,
     serverUrl: new URL("http://localhost:4096"),
+    directory: dir,
     tokenHash: "tok",
     pendingQuestions: createPendingQuestionStore({
       tokenHash: "tok",
@@ -129,8 +131,9 @@ function createContext(
     }),
     sessionRegistry: createSessionRegistry(),
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
-    async replyToPermission(requestID, sessionID, reply, endpoint, serverUrl) {
-      replies.push({ requestID, sessionID, reply, endpoint, serverUrl });
+    async replyToPermission(requestID, sessionID, reply, endpoint, serverUrl, directory) {
+      const record = { requestID, sessionID, reply, endpoint, serverUrl };
+      replies.push(directory === undefined ? record : { ...record, directory });
     },
     async runSessionCommand() {},
   };
@@ -216,6 +219,7 @@ describe("permission updated flow", () => {
     const pending = await ctx.pendingPermissions.loadPending(shortHash);
     assert.deepEqual(pending?.patterns, [".env"]);
     assert.equal(pending?.serverUrl, "http://localhost:4096/");
+    assert.equal(pending?.directory, join(dir, "asked"));
 
     const dispatcher = createPermissionDispatcher(ctx);
     await dispatcher.handleCallbackQuery(`p:${shortHash}:o`, 10);
@@ -227,6 +231,7 @@ describe("permission updated flow", () => {
         reply: "once",
         endpoint: "request",
         serverUrl: "http://localhost:4096/",
+        directory: join(dir, "asked"),
       },
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
@@ -261,6 +266,7 @@ describe("permission updated flow", () => {
         reply: "reject",
         endpoint: "session",
         serverUrl: "http://localhost:4096/",
+        directory: join(dir, "updated"),
       },
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
@@ -342,6 +348,68 @@ describe("permission updated flow", () => {
     );
 
     assert.equal(sentMessages.length, 1);
+  });
+
+  test("upgrades legacy pending permission when v2 asked event arrives later", async () => {
+    const { bot, sentMessages, editedMessages } = createBot();
+    const replies: Array<{
+      requestID: string;
+      sessionID: string;
+      reply: PermissionReply;
+      endpoint: "request" | "session";
+      serverUrl?: string;
+    }> = [];
+    const ctx = createContext(bot, join(dir, "legacy-upgrade"), replies);
+
+    await handlePermissionUpdated(
+      permissionUpdatedEvent({
+        id: "per_env_example",
+        sessionID: "ses_env",
+        title: "Read .env.example",
+        pattern: ".env.example",
+      }),
+      ctx,
+    );
+
+    const legacyHash = createPermissionShortHash(
+      "per_env_example",
+      "ses_env",
+      "session",
+      "http://localhost:4096/",
+    );
+    assert.equal((await ctx.pendingPermissions.loadPending(legacyHash))?.endpoint, "session");
+
+    await handlePermissionAsked(
+      permissionAskedEvent({
+        id: "per_env_example",
+        sessionID: "ses_env",
+        patterns: [".env.example"],
+        always: [".env.example"],
+      }),
+      ctx,
+    );
+
+    const pending = await ctx.pendingPermissions.loadPending(legacyHash);
+    assert.equal(sentMessages.length, 1);
+    assert.equal(pending?.endpoint, "request");
+    assert.deepEqual(pending?.patterns, [".env.example"]);
+    assert.deepEqual(pending?.always, [".env.example"]);
+    assert.equal(pending?.directory, join(dir, "legacy-upgrade"));
+
+    const dispatcher = createPermissionDispatcher(ctx);
+    await dispatcher.handleCallbackQuery(`p:${legacyHash}:o`, 10);
+
+    assert.deepEqual(replies, [
+      {
+        requestID: "per_env_example",
+        sessionID: "ses_env",
+        reply: "once",
+        endpoint: "request",
+        serverUrl: "http://localhost:4096/",
+        directory: join(dir, "legacy-upgrade"),
+      },
+    ]);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Allowed once/);
   });
 
   test("detects v1 and v2 permission.replied events", () => {

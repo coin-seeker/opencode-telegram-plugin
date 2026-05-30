@@ -113,13 +113,42 @@ function replyLabel(reply: PermissionReply): string {
   return "Rejected";
 }
 
+async function upgradeLegacyPendingPermission(
+  permission: NormalizedPermissionRequest,
+  ctx: EventHandlerContext,
+): Promise<void> {
+  const found = await ctx.pendingPermissions.findByRequestID(
+    permission.requestID,
+    permission.sessionID,
+    ctx.serverUrl.href,
+  );
+  if (!found || found.data.endpoint === "request") return;
+
+  await ctx.pendingPermissions.savePending(found.shortHash, {
+    ...found.data,
+    directory: ctx.directory,
+    title: permission.title,
+    permission: permission.permission,
+    patterns: permission.patterns,
+    always: permission.always,
+    endpoint: "request",
+  });
+  ctx.logger.info("permission pending upgraded to request endpoint", {
+    requestID: permission.requestID,
+    sessionID: permission.sessionID,
+  });
+}
+
 async function handleNormalizedPermission(
   permission: NormalizedPermissionRequest,
   ctx: EventHandlerContext,
 ): Promise<void> {
   const permissionKey = `${ctx.serverUrl.href}:${permission.sessionID}:${permission.requestID}`;
   const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `permission:${permissionKey}` });
-  if (!claimed) return;
+  if (!claimed) {
+    if (permission.endpoint === "request") await upgradeLegacyPendingPermission(permission, ctx);
+    return;
+  }
 
   const shortHash = createPermissionShortHash(
     permission.requestID,
@@ -138,6 +167,7 @@ async function handleNormalizedPermission(
       requestID: permission.requestID,
       sessionID: permission.sessionID,
       serverUrl: ctx.serverUrl.href,
+      directory: ctx.directory,
       title: permission.title,
       permission: permission.permission,
       patterns: permission.patterns,
@@ -253,6 +283,7 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
           reply,
           pending.endpoint,
           pending.serverUrl,
+          pending.directory,
         );
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
@@ -271,6 +302,9 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
         ctx.logger.error("failed to send permission reply", {
           error: String(err),
           requestID: pending.requestID,
+          endpoint: pending.endpoint,
+          serverUrl: pending.serverUrl,
+          directory: pending.directory,
         });
       } finally {
         await ctx.pendingPermissions.deletePending(shortHash);

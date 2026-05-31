@@ -83,6 +83,22 @@ function createBot() {
   return { bot, sentMessages, editedMessages };
 }
 
+function createFailingPermissionBot() {
+  const { bot, sentMessages, editedMessages } = createBot();
+  let failNext = true;
+  const failingBot: TelegramBotManager = {
+    ...bot,
+    async sendMessage(text, options) {
+      if (failNext) {
+        failNext = false;
+        throw new Error("telegram unavailable");
+      }
+      return bot.sendMessage(text, options);
+    },
+  };
+  return { bot: failingBot, sentMessages, editedMessages };
+}
+
 function createSessionRegistry(): SessionRegistryStore {
   return {
     async upsertSession() {},
@@ -529,7 +545,7 @@ describe("permission updated flow", () => {
     assert.deepEqual(editedMessages, []);
   });
 
-  test("late permission callbacks still attempt the opencode reply", async () => {
+  test("late permission callbacks expire without replying to opencode", async () => {
     const { bot, editedMessages } = createBot();
     const replies: Array<{
       requestID: string;
@@ -563,16 +579,32 @@ describe("permission updated flow", () => {
     const dispatcher = createPermissionDispatcher(ctx);
     await dispatcher.handleCallbackQuery(`p:${shortHash}:a`, 10);
 
-    assert.deepEqual(replies, [
-      {
-        requestID: "per_expired",
-        sessionID: "ses_test",
-        reply: "always",
-        endpoint: "request",
-        serverUrl: "http://localhost:4096/",
-      },
-    ]);
+    assert.deepEqual(replies, []);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Always allowed/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /expired/i);
+  });
+
+  test("failed permission prompt send can be retried immediately", async () => {
+    const { bot, sentMessages } = createFailingPermissionBot();
+    const replies: Array<{
+      requestID: string;
+      sessionID: string;
+      reply: PermissionReply;
+      endpoint: "request" | "session";
+      serverUrl?: string;
+    }> = [];
+    const ctx = createContext(bot, join(dir, "retry-send-failure"), replies);
+
+    await handlePermissionAsked(permissionAskedEvent({ id: "per_retry_send_failure" }), ctx);
+    await handlePermissionAsked(permissionAskedEvent({ id: "per_retry_send_failure" }), ctx);
+
+    const shortHash = createPermissionShortHash(
+      "per_retry_send_failure",
+      "ses_test",
+      "request",
+      "http://localhost:4096/",
+    );
+    assert.equal(sentMessages.length, 1);
+    assert.ok(await ctx.pendingPermissions.loadPending(shortHash));
   });
 });

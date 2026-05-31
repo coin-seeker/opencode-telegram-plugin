@@ -1,9 +1,9 @@
-import { chmod, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Session } from "@opencode-ai/sdk";
+import type { SessionStatusType } from "../services/session-title-service.js";
 import { normalizeOpenCodeServerUrl } from "./opencode-http.js";
 import type { SessionWithAgent } from "./sdk-augmentation.js";
-import type { SessionStatusType } from "../services/session-title-service.js";
 
 export interface SessionRegistryEntry {
   sessionId: string;
@@ -40,15 +40,11 @@ interface SessionRegistryStoreOptions {
 }
 
 function filenameForSession(sessionId: string): string {
-  return Buffer.from(sessionId).toString("base64url") + ".json";
+  return `${Buffer.from(sessionId).toString("base64url")}.json`;
 }
 
 function hasCode(err: unknown, code: string): boolean {
-  return (
-    err instanceof Error &&
-    "code" in err &&
-    (err as NodeJS.ErrnoException).code === code
-  );
+  return err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === code;
 }
 
 function normalizeEntry(entry: SessionRegistryEntry): SessionRegistryEntry {
@@ -77,7 +73,12 @@ function isRegistryFile(value: unknown): value is SessionRegistryFile {
   if (typeof e.title !== "string") return false;
   if (e.parentID !== null && typeof e.parentID !== "string") return false;
   if (e.agent !== undefined && typeof e.agent !== "string") return false;
-  if (e.status !== undefined && e.status !== "idle" && e.status !== "busy" && e.status !== "retry") {
+  if (
+    e.status !== undefined &&
+    e.status !== "idle" &&
+    e.status !== "busy" &&
+    e.status !== "retry"
+  ) {
     return false;
   }
   if (typeof e.serverUrl !== "string") return false;
@@ -156,8 +157,7 @@ export function createSessionRegistryStore(
     } catch (err) {
       try {
         await unlink(tmp);
-      } catch {
-      }
+      } catch {}
       throw err;
     }
     await chmod(target, 0o600);
@@ -184,7 +184,7 @@ export function createSessionRegistryStore(
       ...patch,
       sessionId,
       title: patch.title ?? existing.title,
-      parentID: patch.parentID ?? existing.parentID,
+      parentID: patch.parentID === undefined ? existing.parentID : patch.parentID,
       serverUrl: patch.serverUrl ?? existing.serverUrl,
       updatedAt: patch.updatedAt ?? Date.now(),
     });

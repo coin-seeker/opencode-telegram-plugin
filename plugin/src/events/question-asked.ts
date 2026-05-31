@@ -1,6 +1,6 @@
 import type { EventQuestionAsked, QuestionInfo } from "@opencode-ai/sdk/v2";
 import type { TelegramQuestionDispatcher } from "../bot.js";
-import { claimOnce } from "../lib/claim.js";
+import { claimOnce, releaseClaim } from "../lib/claim.js";
 import { createQuestionShortHash, type PendingQuestionState } from "../lib/pending-questions.js";
 import { pendingQuestionText } from "../lib/question-format.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
@@ -136,7 +136,7 @@ async function completeIfReady(
   pending: PendingQuestionState,
   shortHash: string,
 ): Promise<void> {
-  const nextIndex = pending.answersInProgress.findIndex((answer) => answer === null);
+  const nextIndex = pending.answersInProgress.indexOf(null);
   if (nextIndex >= 0) {
     pending.currentQuestionIndex = nextIndex;
     await ctx.pendingQuestions.savePending(shortHash, pending);
@@ -174,11 +174,8 @@ export async function handleQuestionAsked(
   const request = event.properties;
   if (request.questions.length === 0) return;
 
-  const claimed = await claimOnce({
-    claimsDir: ctx.claimsDir,
-    key: `question:${ctx.serverUrl.href}:${request.sessionID}:${request.id}`,
-    ttlMs: 5_000,
-  });
+  const claimKey = `question:${ctx.serverUrl.href}:${request.sessionID}:${request.id}`;
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: claimKey, ttlMs: 5_000 });
   if (!claimed) return;
 
   const shortHash = createQuestionShortHash(request.id, request.sessionID, ctx.serverUrl.href);
@@ -216,6 +213,7 @@ export async function handleQuestionAsked(
       count: request.questions.length,
     });
   } catch (err) {
+    await releaseClaim({ claimsDir: ctx.claimsDir, key: claimKey });
     ctx.logger.error("failed to send question prompt", {
       error: String(err),
       requestID: request.id,
@@ -234,6 +232,11 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       const pending = await ctx.pendingQuestions.loadPending(shortHash);
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
+        return;
+      }
+      if (pending.expiresAt < Date.now()) {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
+        await ctx.pendingQuestions.deletePending(shortHash);
         return;
       }
       pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
@@ -295,6 +298,11 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       if (!match) return;
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
+      if (match.data.expiresAt < Date.now()) {
+        await ctx.bot.sendMessage("This question has expired.");
+        await ctx.pendingQuestions.deletePending(match.shortHash);
+        return;
+      }
       match.data.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = match.data.questions[awaiting.questionIndex];
       if (question?.multiple === true) {

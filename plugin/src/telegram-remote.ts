@@ -341,6 +341,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
         sessionTitleService,
         client: input.client,
         serverUrl: input.serverUrl.href,
+        pendingStartWorks,
         runSessionCommand,
         logger,
       }),

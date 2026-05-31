@@ -7,8 +7,13 @@ import { after, before, describe, test } from "node:test";
 import type { Session } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
 import type { OpenCodeFetcher } from "../lib/opencode-http.js";
-import type { SnapshotEntry, SnapshotStore } from "../lib/session-snapshot.js";
+import {
+  createPendingStartWorkStore,
+  createStartWorkShortHash,
+  type PendingStartWorkStore,
+} from "../lib/pending-start-work.js";
 import type { SessionWithAgent } from "../lib/sdk-augmentation.js";
+import type { SnapshotEntry, SnapshotStore } from "../lib/session-snapshot.js";
 import { createStartWorkCommandDispatcher } from "./start-work-command.js";
 import type { OpencodeClient } from "./types.js";
 
@@ -28,6 +33,11 @@ interface LogCall {
   data: Record<string, unknown> | undefined;
 }
 
+interface EditCall {
+  messageId: number;
+  text: string;
+}
+
 interface StatusError extends Error {
   status: number;
 }
@@ -41,15 +51,19 @@ interface HarnessOptions {
   serviceAgent?: string;
   serverUrl?: string;
   currentServerUrl?: string;
+  pendingStartWorks?: PendingStartWorkStore;
   opencodeFetch?: OpenCodeFetcher;
   runError?: Error;
 }
 
-function makeBot(sendCalls: SendCall[]): TelegramBotManager {
+function makeBot(sendCalls: SendCall[], editCalls: EditCall[]): TelegramBotManager {
   return {
     sendMessage: async (text: string, opts?: unknown) => {
       sendCalls.push({ text, opts });
       return { message_id: sendCalls.length };
+    },
+    editMessageRemoveKeyboard: async (messageId: number, finalText: string) => {
+      editCalls.push({ messageId, text: finalText });
     },
   } as unknown as TelegramBotManager;
 }
@@ -126,13 +140,15 @@ function makeClient(args: {
 
 function makeHarness(options: HarnessOptions) {
   const sendCalls: SendCall[] = [];
+  const editCalls: EditCall[] = [];
   const commands: CommandCall[] = [];
   const infoLogs: LogCall[] = [];
   const errorLogs: LogCall[] = [];
   const statusCalls = { count: 0 };
   const session = options.session ?? makeSession("ses_plan", options.projectRoot);
-  const snapshot = options.snapshot === undefined ? [makeEntry({ sessionId: session.id })] : options.snapshot;
-  const bot = makeBot(sendCalls);
+  const snapshot =
+    options.snapshot === undefined ? [makeEntry({ sessionId: session.id })] : options.snapshot;
+  const bot = makeBot(sendCalls, editCalls);
   const dispatcher = createStartWorkCommandDispatcher({
     snapshotStore: makeSnapshotStore(snapshot),
     sessionTitleService: {
@@ -150,6 +166,7 @@ function makeHarness(options: HarnessOptions) {
       statusCalls,
     }),
     serverUrl: options.currentServerUrl,
+    pendingStartWorks: options.pendingStartWorks,
     opencodeFetch: options.opencodeFetch,
     async runSessionCommand(sessionId, command, serverUrl) {
       if (options.runError) throw options.runError;
@@ -167,6 +184,7 @@ function makeHarness(options: HarnessOptions) {
 
   return {
     sendCalls,
+    editCalls,
     commands,
     infoLogs,
     errorLogs,
@@ -228,7 +246,10 @@ describe("start-work-command dispatcher", () => {
 
     await harness.run([]);
 
-    assert.equal(harness.sendCalls[0]?.text, "사용법: /start_work <번호>. 먼저 /sessions 로 목록 확인");
+    assert.equal(
+      harness.sendCalls[0]?.text,
+      "사용법: /start_work <번호>. 먼저 /sessions 로 목록 확인",
+    );
     assert.equal(harness.commands.length, 0);
     assert.equal(harness.statusCalls.count, 0);
   });
@@ -359,6 +380,40 @@ describe("start-work-command dispatcher", () => {
     assert.equal(harness.statusCalls.count, 1);
   });
 
+  test("happy path clears existing inline start-work buttons for the same session", async () => {
+    const projectRoot = await createReadyProject(dir, "happy-clears-inline-buttons");
+    const pendingStartWorks = createPendingStartWorkStore({
+      tokenHash: "tok",
+      baseDir: join(dir, "happy-clears-inline-buttons-pending"),
+    });
+    const shortHash = createStartWorkShortHash("ses_plan");
+    await pendingStartWorks.savePending(shortHash, {
+      sessionID: "ses_plan",
+      serverUrl: "http://localhost:7777/",
+      title: "Plan session",
+      sentAt: 1,
+      expiresAt: Date.now() + 10_000,
+      telegramMessageId: 10,
+      telegramMessageIds: [10, 11],
+    });
+    const harness = makeHarness({
+      projectRoot,
+      serviceAgent: "plan",
+      pendingStartWorks,
+    });
+
+    await harness.run(["1"]);
+
+    assert.deepEqual(
+      harness.editCalls.map((call) => call.messageId),
+      [10, 11],
+    );
+    assert.equal((await pendingStartWorks.loadPending(shortHash))?.status, "consumed");
+    assert.deepEqual(harness.commands, [
+      { sessionId: "ses_plan", command: "start-work", serverUrl: undefined },
+    ]);
+  });
+
   test("Prometheus Plan Builder label dispatches start-work command", async () => {
     const projectRoot = await createReadyProject(dir, "prometheus-plan-builder");
     const session = makeSession("ses_plan", projectRoot, "build");
@@ -407,10 +462,13 @@ describe("start-work-command dispatcher", () => {
     await harness.run(["1"]);
 
     assert.equal(harness.statusCalls.count, 0);
-    assert.deepEqual(requested.sort(), [
-      "http://127.0.0.1:8888/session/ses_remote_plan",
-      "http://127.0.0.1:8888/session/status",
-    ].sort());
+    assert.deepEqual(
+      requested.sort(),
+      [
+        "http://127.0.0.1:8888/session/ses_remote_plan",
+        "http://127.0.0.1:8888/session/status",
+      ].sort(),
+    );
     assert.deepEqual(harness.commands, [
       { sessionId: "ses_remote_plan", command: "start-work", serverUrl: "http://127.0.0.1:8888/" },
     ]);
@@ -449,13 +507,16 @@ describe("start-work-command dispatcher", () => {
 
     await harness.run(["1"]);
 
-    assert.deepEqual(requested.sort(), [
-      "http://127.0.0.1:8888/session/ses_remote_plan",
-      "http://127.0.0.1:8888/session/status",
-    ].sort());
+    assert.deepEqual(
+      requested.sort(),
+      [
+        "http://127.0.0.1:8888/session/ses_remote_plan",
+        "http://127.0.0.1:8888/session/status",
+      ].sort(),
+    );
     assert.equal(harness.commands.length, 0);
     assert.equal(harness.sendCalls[0]?.text, "세션 상태 확인 실패. /sessions 재실행 필요");
-    assert.ok(!((harness.sendCalls[0]?.text ?? "").includes("do-not-leak")));
+    assert.ok(!(harness.sendCalls[0]?.text ?? "").includes("do-not-leak"));
     assert.equal(harness.errorLogs[0]?.msg, "start-work idle recheck failed");
   });
 
@@ -484,7 +545,10 @@ describe("start-work-command dispatcher", () => {
     assert.equal(fetchCalled, false);
     assert.equal(harness.statusCalls.count, 0);
     assert.equal(harness.commands.length, 0);
-    assert.equal(harness.sendCalls[0]?.text, "세션 서버 정보가 유효하지 않습니다. /sessions 재실행 필요");
+    assert.equal(
+      harness.sendCalls[0]?.text,
+      "세션 서버 정보가 유효하지 않습니다. /sessions 재실행 필요",
+    );
     assert.equal(harness.errorLogs[0]?.msg, "start-work invalid server url");
   });
 

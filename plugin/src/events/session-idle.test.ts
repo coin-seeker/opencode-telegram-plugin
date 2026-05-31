@@ -254,7 +254,7 @@ describe("session idle notifications", () => {
     assert.deepEqual(sentMessages, []);
   });
 
-  test("shows start-work button only when a root plan session finishes", async () => {
+  test("sends plan completion message without start-work button when a root plan session finishes", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("plan-session", "Remove earnings estimate"));
     service.setSessionAgent("plan-session", "plan");
@@ -264,13 +264,39 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("plan-session"), ctx);
 
     assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nRemove earnings estimate"]);
-    assert.match(JSON.stringify(sentOptions[0]), /Run \/start-work/);
-    assert.ok(await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-session")));
+    assert.equal(sentOptions[0], undefined);
+    assert.equal(
+      (await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-session")))?.status,
+      "consumed",
+    );
   });
 
-  test("shows start-work button when a Plan Builder session finishes", async () => {
+  test("does not send another plan completion notice while one is already recorded", async () => {
     const service = new SessionTitleService();
-    service.setSessionInfo(createSession("plan-builder-session", "CRM SaaS 전환 및 Status 서버 구축"));
+    service.setSessionInfo(createSession("plan-duplicate", "Duplicate plan"));
+    service.setSessionAgent("plan-duplicate", "plan");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "plan-duplicate"), service);
+    await ctx.pendingStartWorks.savePending(createStartWorkShortHash("plan-duplicate"), {
+      sessionID: "plan-duplicate",
+      serverUrl: "http://localhost:4096/",
+      title: "Duplicate plan",
+      sentAt: Date.now(),
+      expiresAt: Date.now() + 10_000,
+      telegramMessageId: 99,
+      status: "consumed",
+    });
+
+    await handleSessionIdle(idleEvent("plan-duplicate"), ctx);
+
+    assert.deepEqual(sentMessages, []);
+  });
+
+  test("sends plan completion message without start-work button when a Plan Builder session finishes", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(
+      createSession("plan-builder-session", "CRM SaaS 전환 및 Status 서버 구축"),
+    );
     service.setSessionAgent("plan-builder-session", "Prometheus - Plan Builder");
     const { bot, sentMessages, sentOptions } = createBot();
     const ctx = createContext(bot, join(dir, "plan-builder-complete"), service);
@@ -278,8 +304,12 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("plan-builder-session"), ctx);
 
     assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nCRM SaaS 전환 및 Status 서버 구축"]);
-    assert.match(JSON.stringify(sentOptions[0]), /Run \/start-work/);
-    assert.ok(await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-builder-session")));
+    assert.equal(sentOptions[0], undefined);
+    assert.equal(
+      (await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-builder-session")))
+        ?.status,
+      "consumed",
+    );
   });
 
   test("does not show start-work button for non-plan root completion", async () => {

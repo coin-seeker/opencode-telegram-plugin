@@ -76,6 +76,22 @@ function createBot() {
   return { bot, sentMessages, editedMessages };
 }
 
+function createFailingPromptBot() {
+  const { bot, sentMessages, editedMessages } = createBot();
+  let failNext = true;
+  const failingBot: TelegramBotManager = {
+    ...bot,
+    async sendQuestionWithKeyboard(question, callbackData) {
+      if (failNext) {
+        failNext = false;
+        throw new Error("telegram unavailable");
+      }
+      return bot.sendQuestionWithKeyboard(question, callbackData);
+    },
+  };
+  return { bot: failingBot, sentMessages, editedMessages };
+}
+
 function createSessionRegistry(): SessionRegistryStore {
   return {
     async upsertSession() {},
@@ -387,7 +403,7 @@ describe("question asked flow", () => {
     assert.ok(refreshed.expiresAt >= Date.now() + 4 * 60_000);
   });
 
-  test("late tap on a past-deadline question still replies to opencode", async () => {
+  test("late tap on a past-deadline question expires without replying to opencode", async () => {
     const { bot, editedMessages } = createBot();
     const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
     const ctx = createContext(bot, "que_stale", dir, replies);
@@ -403,11 +419,26 @@ describe("question asked flow", () => {
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
 
-    assert.deepEqual(replies, [
-      { requestID: "que_stale", answers: [["A"]], serverUrl: "http://localhost:4096/" },
-    ]);
+    assert.deepEqual(replies, []);
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /expired/i);
+  });
+
+  test("failed question prompt send can be retried immediately", async () => {
+    const { bot, sentMessages } = createFailingPromptBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_retry_after_send_failure", dir, replies);
+
+    await handleQuestionAsked(singleQuestionEvent("que_retry_after_send_failure"), ctx);
+    await handleQuestionAsked(singleQuestionEvent("que_retry_after_send_failure"), ctx);
+
+    const shortHash = createQuestionShortHash(
+      "que_retry_after_send_failure",
+      "ses_test",
+      "http://localhost:4096/",
+    );
+    assert.equal(sentMessages.length, 1);
+    assert.ok(await ctx.pendingQuestions.loadPending(shortHash));
   });
 
   test("keeps concurrent questions separate across sessions", async () => {

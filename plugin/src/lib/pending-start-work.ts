@@ -10,6 +10,9 @@ export interface PendingStartWorkState {
   sentAt: number;
   expiresAt: number;
   telegramMessageId: number;
+  telegramMessageIds?: number[];
+  status?: "pending" | "consumed";
+  handledAt?: number;
 }
 
 export interface PendingStartWorkStoreOptions {
@@ -46,6 +49,18 @@ function parsePending(text: string): PendingStartWorkState {
     throw new Error("Invalid pending start-work: expiresAt");
   if (typeof parsed.telegramMessageId !== "number")
     throw new Error("Invalid pending start-work: telegramMessageId");
+  if (
+    parsed.telegramMessageIds !== undefined &&
+    (!Array.isArray(parsed.telegramMessageIds) ||
+      !parsed.telegramMessageIds.every((messageId) => typeof messageId === "number"))
+  )
+    throw new Error("Invalid pending start-work: telegramMessageIds");
+  if (parsed.status !== undefined && parsed.status !== "pending" && parsed.status !== "consumed")
+    throw new Error("Invalid pending start-work: status");
+  if (parsed.handledAt !== undefined && typeof parsed.handledAt !== "number")
+    throw new Error("Invalid pending start-work: handledAt");
+  parsed.telegramMessageIds = parsed.telegramMessageIds ?? [parsed.telegramMessageId];
+  parsed.status = parsed.status ?? "pending";
   return parsed;
 }
 

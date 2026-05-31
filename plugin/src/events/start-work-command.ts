@@ -1,4 +1,5 @@
 import type { TelegramBotManager } from "../bot.js";
+import type { OpencodeClient } from "../events/types.js";
 import { escapeHtml } from "../lib/html-escape.js";
 import {
   getRemoteSession,
@@ -7,11 +8,11 @@ import {
   normalizeOpenCodeServerUrl,
   type OpenCodeFetcher,
 } from "../lib/opencode-http.js";
+import { createStartWorkShortHash, type PendingStartWorkStore } from "../lib/pending-start-work.js";
 import { isPlanSessionAgent } from "../lib/plan-agent.js";
 import type { PlanReadinessResult } from "../lib/plan-readiness.js";
 import { checkPlanReadiness, recheckSessionIdle } from "../lib/plan-readiness.js";
 import type { SnapshotStore } from "../lib/session-snapshot.js";
-import type { OpencodeClient } from "../events/types.js";
 
 export type StartWorkCommandDispatcher = (ctx: {
   chatId: number;
@@ -78,6 +79,50 @@ async function sendPlain(bot: TelegramBotManager, text: string): Promise<void> {
   await bot.sendMessage(text);
 }
 
+function pendingMessageIds(pending: {
+  telegramMessageId: number;
+  telegramMessageIds?: number[];
+}): number[] {
+  return [...new Set([...(pending.telegramMessageIds ?? [pending.telegramMessageId])])];
+}
+
+async function consumeInlineStartWorkButtons(
+  bot: TelegramBotManager,
+  pendingStartWorks: PendingStartWorkStore | undefined,
+  sessionId: string,
+  logger: { error(msg: string, data?: Record<string, unknown>): void },
+): Promise<void> {
+  if (!pendingStartWorks) return;
+  const shortHash = createStartWorkShortHash(sessionId);
+  const pending = await pendingStartWorks.loadPending(shortHash);
+  if (!pending) return;
+  if (pending.expiresAt < Date.now()) {
+    await pendingStartWorks.deletePending(shortHash);
+    return;
+  }
+
+  await pendingStartWorks.savePending(shortHash, {
+    ...pending,
+    status: "consumed",
+    handledAt: Date.now(),
+  });
+
+  for (const messageId of pendingMessageIds(pending)) {
+    try {
+      await bot.editMessageRemoveKeyboard(
+        messageId,
+        "This /start-work request was already handled. Use /start_work <number> from /sessions.",
+      );
+    } catch (err) {
+      logger.error("failed to clear start-work keyboard after command dispatch", {
+        sessionId,
+        messageId,
+        error: String(err),
+      });
+    }
+  }
+}
+
 export function createStartWorkCommandDispatcher(deps: {
   snapshotStore: SnapshotStore;
   sessionTitleService: {
@@ -86,6 +131,7 @@ export function createStartWorkCommandDispatcher(deps: {
   };
   client: OpencodeClient;
   serverUrl?: string;
+  pendingStartWorks?: PendingStartWorkStore;
   opencodeFetch?: OpenCodeFetcher;
   runSessionCommand: (sessionId: string, command: string, serverUrl?: string) => Promise<void>;
   logger: {
@@ -154,7 +200,10 @@ export function createStartWorkCommandDispatcher(deps: {
       return;
     }
 
-    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession(session) ?? entry.agent;
+    const agent =
+      deps.sessionTitleService.getSessionAgent(sessionId) ??
+      agentFromSession(session) ??
+      entry.agent;
     if (!isPlanSessionAgent(agent)) {
       await sendPlain(
         bot,
@@ -165,9 +214,11 @@ export function createStartWorkCommandDispatcher(deps: {
 
     let idle: boolean;
     try {
-      idle = sourceServerUrl && useRemoteServer
-        ? ((await getRemoteStatusMap(sourceServerUrl, deps.opencodeFetch))[sessionId]?.type ?? "idle") === "idle"
-        : await recheckSessionIdle(deps.client, sessionId);
+      idle =
+        sourceServerUrl && useRemoteServer
+          ? ((await getRemoteStatusMap(sourceServerUrl, deps.opencodeFetch))[sessionId]?.type ??
+              "idle") === "idle"
+          : await recheckSessionIdle(deps.client, sessionId);
     } catch (err) {
       await sendPlain(bot, "세션 상태 확인 실패. /sessions 재실행 필요");
       deps.logger.error("start-work idle recheck failed", { sessionId, error: String(err) });
@@ -186,6 +237,7 @@ export function createStartWorkCommandDispatcher(deps: {
 
     try {
       await deps.runSessionCommand(sessionId, "start-work", sourceServerUrl);
+      await consumeInlineStartWorkButtons(bot, deps.pendingStartWorks, sessionId, deps.logger);
       await sendHtml(
         bot,
         `${index}번 세션에 opencode /start-work 슬래시 커맨드 전송 완료. (${escapeHtml(entry.title)})`,

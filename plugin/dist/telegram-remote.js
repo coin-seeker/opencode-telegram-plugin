@@ -269,11 +269,24 @@ This chat is now active for OpenCode notifications.`
 }
 
 // src/config.ts
+function parseInteger(value) {
+  if (!/^-?\d+$/.test(value)) return void 0;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : void 0;
+}
 function parseAllowedUserIds(value) {
   if (!value || value.trim() === "") {
-    return [];
+    return void 0;
   }
-  return value.split(",").map((id2) => id2.trim()).filter((id2) => id2 !== "").map((id2) => Number.parseInt(id2, 10)).filter((id2) => !Number.isNaN(id2));
+  const tokens = value.split(",").map((id2) => id2.trim()).filter((id2) => id2 !== "");
+  if (tokens.length === 0) return void 0;
+  const parsed = [];
+  for (const token of tokens) {
+    const id2 = parseInteger(token);
+    if (id2 === void 0) return void 0;
+    parsed.push(id2);
+  }
+  return parsed;
 }
 function loadConfig(opts) {
   const { logger, env } = opts;
@@ -285,18 +298,23 @@ function loadConfig(opts) {
     throw new Error("Missing required environment variable: TELEGRAM_BOT_TOKEN");
   }
   const allowedUserIds = parseAllowedUserIds(allowedUserIdsStr);
-  if (allowedUserIds.length === 0) {
+  if (allowedUserIds === void 0) {
     logger.error("missing or invalid TELEGRAM_ALLOWED_USER_IDS");
     throw new Error("Missing or invalid TELEGRAM_ALLOWED_USER_IDS");
   }
   let chatId;
   if (chatIdStr && chatIdStr.trim() !== "") {
-    const parsed = Number.parseInt(chatIdStr.trim(), 10);
-    if (!Number.isNaN(parsed)) {
-      chatId = parsed;
+    const parsed = parseInteger(chatIdStr.trim());
+    if (parsed === void 0) {
+      logger.error("invalid TELEGRAM_CHAT_ID");
+      throw new Error("Invalid TELEGRAM_CHAT_ID");
     }
+    chatId = parsed;
   }
-  logger.info("config loaded", { allowedUserCount: allowedUserIds.length, hasChatId: chatId !== void 0 });
+  logger.info("config loaded", {
+    allowedUserCount: allowedUserIds.length,
+    hasChatId: chatId !== void 0
+  });
   return {
     botToken,
     allowedUserIds,
@@ -305,9 +323,9 @@ function loadConfig(opts) {
 }
 
 // src/lib/claim.ts
+import { createHash } from "crypto";
 import { mkdir, open, readdir, stat, unlink } from "fs/promises";
 import { join } from "path";
-import { createHash } from "crypto";
 var DEFAULT_TTL_MS = 6e4;
 var sweptDirs = /* @__PURE__ */ new Set();
 function hasCode(err, code) {
@@ -322,16 +340,18 @@ async function sweep(claimsDir, ttlMs) {
   sweptDirs.add(claimsDir);
   try {
     const entries = await readdir(claimsDir, { withFileTypes: true });
-    await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith(".claim")).map(async (entry) => {
-      const filePath = join(claimsDir, entry.name);
-      try {
-        const fileStat = await stat(filePath);
-        if (Date.now() - fileStat.mtimeMs > ttlMs * 2) {
-          await unlink(filePath);
+    await Promise.all(
+      entries.filter((entry) => entry.isFile() && entry.name.endsWith(".claim")).map(async (entry) => {
+        const filePath = join(claimsDir, entry.name);
+        try {
+          const fileStat = await stat(filePath);
+          if (Date.now() - fileStat.mtimeMs > ttlMs * 2) {
+            await unlink(filePath);
+          }
+        } catch {
         }
-      } catch {
-      }
-    }));
+      })
+    );
   } catch {
   }
 }
@@ -365,6 +385,13 @@ async function claimOnce(opts) {
     }
   }
   return false;
+}
+async function releaseClaim(opts) {
+  try {
+    await unlink(claimPath(opts.claimsDir, opts.key));
+  } catch (err) {
+    if (!(err instanceof Error) || !hasCode(err, "ENOENT")) throw err;
+  }
 }
 
 // src/lib/pending-permissions.ts
@@ -562,7 +589,8 @@ async function upgradeLegacyPendingPermission(permission, ctx) {
 }
 async function handleNormalizedPermission(permission, ctx) {
   const permissionKey = `${ctx.serverUrl.href}:${permission.sessionID}:${permission.requestID}`;
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `permission:${permissionKey}` });
+  const claimKey = `permission:${permissionKey}`;
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: claimKey });
   if (!claimed) {
     if (permission.endpoint === "request") await upgradeLegacyPendingPermission(permission, ctx);
     return;
@@ -596,6 +624,7 @@ async function handleNormalizedPermission(permission, ctx) {
     };
     await ctx.pendingPermissions.savePending(shortHash, pending);
   } catch (err) {
+    await releaseClaim({ claimsDir: ctx.claimsDir, key: claimKey });
     ctx.logger.error("failed to send permission notification", { error: String(err) });
   }
 }
@@ -660,6 +689,11 @@ function createPermissionDispatcher(ctx) {
       const pending = await ctx.pendingPermissions.loadPending(shortHash);
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
+        return;
+      }
+      if (pending.expiresAt < Date.now()) {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
+        await ctx.pendingPermissions.deletePending(shortHash);
         return;
       }
       try {
@@ -887,7 +921,7 @@ async function editPromptForQuestion(ctx, pending, shortHash, questionIndex) {
   });
 }
 async function completeIfReady(ctx, pending, shortHash) {
-  const nextIndex = pending.answersInProgress.findIndex((answer) => answer === null);
+  const nextIndex = pending.answersInProgress.indexOf(null);
   if (nextIndex >= 0) {
     pending.currentQuestionIndex = nextIndex;
     await ctx.pendingQuestions.savePending(shortHash, pending);
@@ -920,11 +954,8 @@ ${answerSummary(pending.questions, answers)}`
 async function handleQuestionAsked(event, ctx) {
   const request = event.properties;
   if (request.questions.length === 0) return;
-  const claimed = await claimOnce({
-    claimsDir: ctx.claimsDir,
-    key: `question:${ctx.serverUrl.href}:${request.sessionID}:${request.id}`,
-    ttlMs: 5e3
-  });
+  const claimKey = `question:${ctx.serverUrl.href}:${request.sessionID}:${request.id}`;
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: claimKey, ttlMs: 5e3 });
   if (!claimed) return;
   const shortHash = createQuestionShortHash(request.id, request.sessionID, ctx.serverUrl.href);
   const firstQuestion = request.questions[0];
@@ -957,6 +988,7 @@ async function handleQuestionAsked(event, ctx) {
       count: request.questions.length
     });
   } catch (err) {
+    await releaseClaim({ claimsDir: ctx.claimsDir, key: claimKey });
     ctx.logger.error("failed to send question prompt", {
       error: String(err),
       requestID: request.id
@@ -974,6 +1006,11 @@ function createQuestionDispatcher(ctx) {
       const pending = await ctx.pendingQuestions.loadPending(shortHash);
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
+        return;
+      }
+      if (pending.expiresAt < Date.now()) {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
+        await ctx.pendingQuestions.deletePending(shortHash);
         return;
       }
       pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
@@ -1030,6 +1067,11 @@ function createQuestionDispatcher(ctx) {
       if (!match) return;
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
+      if (match.data.expiresAt < Date.now()) {
+        await ctx.bot.sendMessage("This question has expired.");
+        await ctx.pendingQuestions.deletePending(match.shortHash);
+        return;
+      }
       match.data.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = match.data.questions[awaiting.questionIndex];
       if (question?.multiple === true) {
@@ -1084,7 +1126,7 @@ async function handleQuestionReplied(event, ctx) {
 }
 
 // src/lib/session-registry.ts
-import { chmod, mkdir as mkdir4, readFile as readFile3, readdir as readdir4, rename as rename3, unlink as unlink4, writeFile as writeFile3 } from "fs/promises";
+import { chmod, mkdir as mkdir4, readdir as readdir4, readFile as readFile3, rename as rename3, unlink as unlink4, writeFile as writeFile3 } from "fs/promises";
 import { join as join4 } from "path";
 
 // src/lib/opencode-http.ts
@@ -1221,7 +1263,7 @@ async function getRemoteMessages(serverUrl, sessionId, limit, fetcher = fetch) {
 
 // src/lib/session-registry.ts
 function filenameForSession(sessionId) {
-  return Buffer.from(sessionId).toString("base64url") + ".json";
+  return `${Buffer.from(sessionId).toString("base64url")}.json`;
 }
 function hasCode4(err, code) {
   return err instanceof Error && "code" in err && err.code === code;
@@ -1341,7 +1383,7 @@ function createSessionRegistryStore(opts) {
       ...patch,
       sessionId,
       title: patch.title ?? existing.title,
-      parentID: patch.parentID ?? existing.parentID,
+      parentID: patch.parentID === void 0 ? existing.parentID : patch.parentID,
       serverUrl: patch.serverUrl ?? existing.serverUrl,
       updatedAt: patch.updatedAt ?? Date.now()
     });
@@ -1460,6 +1502,14 @@ function parsePending3(text) {
     throw new Error("Invalid pending start-work: expiresAt");
   if (typeof parsed.telegramMessageId !== "number")
     throw new Error("Invalid pending start-work: telegramMessageId");
+  if (parsed.telegramMessageIds !== void 0 && (!Array.isArray(parsed.telegramMessageIds) || !parsed.telegramMessageIds.every((messageId) => typeof messageId === "number")))
+    throw new Error("Invalid pending start-work: telegramMessageIds");
+  if (parsed.status !== void 0 && parsed.status !== "pending" && parsed.status !== "consumed")
+    throw new Error("Invalid pending start-work: status");
+  if (parsed.handledAt !== void 0 && typeof parsed.handledAt !== "number")
+    throw new Error("Invalid pending start-work: handledAt");
+  parsed.telegramMessageIds = parsed.telegramMessageIds ?? [parsed.telegramMessageId];
+  parsed.status = parsed.status ?? "pending";
   return parsed;
 }
 async function listPendingFiles3(dir) {
@@ -1520,14 +1570,7 @@ function createStartWorkShortHash(sessionID) {
 
 // src/events/start-work.ts
 var CALLBACK_RE3 = /^sw:([^:]+)$/;
-var START_WORK_COMMAND = "start-work";
 var START_WORK_EXPIRY_MS = 24 * 60 * 6e4;
-function startWorkKeyboard(shortHash) {
-  const callbackData = `sw:${shortHash}`;
-  if (Buffer.byteLength(callbackData, "utf8") > 64)
-    throw new Error("Telegram callback_data exceeds 64 bytes");
-  return [[{ text: "\u25B6\uFE0F Run /start-work", callback_data: callbackData }]];
-}
 function planCompleteMessage(title) {
   return title ? `plan \uC791\uC131\uC774 \uB05D\uB0AC\uC5B4\uC694.
 
@@ -1541,7 +1584,9 @@ function createPendingStartWork(sessionID, title, serverUrl, telegramMessageId) 
     title: title ?? void 0,
     sentAt,
     expiresAt: sentAt + START_WORK_EXPIRY_MS,
-    telegramMessageId
+    telegramMessageId,
+    telegramMessageIds: [telegramMessageId],
+    status: "pending"
   };
 }
 function startWorkShortHash(sessionID) {
@@ -1551,6 +1596,34 @@ async function expirePending(ctx, shortHash, pending, messageId) {
   await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 /start-work request expired");
   await ctx.pendingStartWorks.deletePending(shortHash);
   ctx.logger.info("pending start-work expired", { sessionID: pending.sessionID });
+}
+var START_WORK_BUTTON_DISABLED_MESSAGE = "This /start-work button is no longer used. Use /sessions and /start_work <number> instead.";
+function messageIdsFor(pending, currentMessageId) {
+  return [
+    .../* @__PURE__ */ new Set([...pending.telegramMessageIds ?? [pending.telegramMessageId], currentMessageId])
+  ];
+}
+async function editDuplicateMessages(ctx, pending, currentMessageId) {
+  for (const messageId of messageIdsFor(pending, currentMessageId)) {
+    if (messageId === currentMessageId) continue;
+    try {
+      await ctx.bot.editMessageRemoveKeyboard(messageId, START_WORK_BUTTON_DISABLED_MESSAGE);
+    } catch (err) {
+      ctx.logger.warn("failed to clear duplicate start-work keyboard", {
+        messageId,
+        error: String(err)
+      });
+    }
+  }
+}
+async function consumePending(ctx, shortHash, pending, messageId) {
+  await ctx.pendingStartWorks.savePending(shortHash, {
+    ...pending,
+    telegramMessageId: messageId,
+    telegramMessageIds: messageIdsFor(pending, messageId),
+    status: "consumed",
+    handledAt: Date.now()
+  });
 }
 function createStartWorkDispatcher(ctx) {
   return {
@@ -1563,32 +1636,18 @@ function createStartWorkDispatcher(ctx) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This /start-work request has expired.");
         return;
       }
+      if (pending.status === "consumed") {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, START_WORK_BUTTON_DISABLED_MESSAGE);
+        return;
+      }
       if (pending.expiresAt < Date.now()) {
         await expirePending(ctx, shortHash, pending, messageId);
         return;
       }
-      try {
-        await ctx.runSessionCommand(pending.sessionID, START_WORK_COMMAND, pending.serverUrl);
-        const label = pending.title ?? pending.sessionID;
-        await ctx.bot.editMessageRemoveKeyboard(
-          messageId,
-          `\u25B6\uFE0F Sent /start-work to opencode.
-
-Session: ${label}`
-        );
-        ctx.logger.info("start-work command sent", { sessionID: pending.sessionID });
-      } catch (err) {
-        await ctx.bot.editMessageRemoveKeyboard(
-          messageId,
-          "\u26A0\uFE0F Failed to send /start-work to opencode"
-        );
-        ctx.logger.error("failed to send start-work command", {
-          sessionID: pending.sessionID,
-          error: String(err)
-        });
-      } finally {
-        await ctx.pendingStartWorks.deletePending(shortHash);
-      }
+      await consumePending(ctx, shortHash, pending, messageId);
+      await ctx.bot.editMessageRemoveKeyboard(messageId, START_WORK_BUTTON_DISABLED_MESSAGE);
+      await editDuplicateMessages(ctx, pending, messageId);
+      ctx.logger.info("legacy start-work button disabled", { sessionID: pending.sessionID });
     }
   };
 }
@@ -1641,7 +1700,11 @@ async function hydrateDescendants(sessionId, ctx, seen = /* @__PURE__ */ new Set
     for (const child of result.data ?? []) {
       ctx.sessionTitleService.setSessionInfo(child);
       await ctx.sessionRegistry.upsertSession(
-        registryEntryFromSession(child, ctx.serverUrl.href, ctx.sessionTitleService.getSessionStatus(child.id))
+        registryEntryFromSession(
+          child,
+          ctx.serverUrl.href,
+          ctx.sessionTitleService.getSessionStatus(child.id)
+        )
       );
       await hydrateDescendants(child.id, ctx, seen);
     }
@@ -1667,13 +1730,19 @@ async function sendIdleNotification(sessionId, ctx) {
   try {
     if (isPlanSession) {
       const shortHash = startWorkShortHash(sessionId);
-      const message = await ctx.bot.sendMessage(text, {
-        reply_markup: { inline_keyboard: startWorkKeyboard(shortHash) }
+      const pending = await ctx.pendingStartWorks.loadPending(shortHash);
+      if (pending && pending.expiresAt >= Date.now()) {
+        ctx.logger.info("plan completion notice already sent - skipping duplicate", { sessionId });
+        return;
+      }
+      if (pending) await ctx.pendingStartWorks.deletePending(shortHash);
+      const message = await ctx.bot.sendMessage(text);
+      const sentAt = Date.now();
+      await ctx.pendingStartWorks.savePending(shortHash, {
+        ...createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id),
+        status: "consumed",
+        handledAt: sentAt
       });
-      await ctx.pendingStartWorks.savePending(
-        shortHash,
-        createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id)
-      );
     } else {
       await ctx.bot.sendMessage(text);
     }
@@ -1778,7 +1847,10 @@ async function handleSessionStatus(event, ctx) {
     return;
   }
   if (previousStatus !== statusType) {
-    await ctx.sessionRegistry.updateSession(sessionId, { status: statusType, updatedAt: Date.now() });
+    await ctx.sessionRegistry.updateSession(sessionId, {
+      status: statusType,
+      updatedAt: Date.now()
+    });
   }
 }
 
@@ -2477,6 +2549,38 @@ async function sendHtml(bot, text) {
 async function sendPlain(bot, text) {
   await bot.sendMessage(text);
 }
+function pendingMessageIds(pending) {
+  return [.../* @__PURE__ */ new Set([...pending.telegramMessageIds ?? [pending.telegramMessageId]])];
+}
+async function consumeInlineStartWorkButtons(bot, pendingStartWorks, sessionId, logger) {
+  if (!pendingStartWorks) return;
+  const shortHash = createStartWorkShortHash(sessionId);
+  const pending = await pendingStartWorks.loadPending(shortHash);
+  if (!pending) return;
+  if (pending.expiresAt < Date.now()) {
+    await pendingStartWorks.deletePending(shortHash);
+    return;
+  }
+  await pendingStartWorks.savePending(shortHash, {
+    ...pending,
+    status: "consumed",
+    handledAt: Date.now()
+  });
+  for (const messageId of pendingMessageIds(pending)) {
+    try {
+      await bot.editMessageRemoveKeyboard(
+        messageId,
+        "This /start-work request was already handled. Use /start_work <number> from /sessions."
+      );
+    } catch (err) {
+      logger.error("failed to clear start-work keyboard after command dispatch", {
+        sessionId,
+        messageId,
+        error: String(err)
+      });
+    }
+  }
+}
 function createStartWorkCommandDispatcher(deps) {
   return async ({ chatId, bot, args }) => {
     const rawIndex = args[0]?.trim();
@@ -2561,6 +2665,7 @@ function createStartWorkCommandDispatcher(deps) {
     }
     try {
       await deps.runSessionCommand(sessionId, "start-work", sourceServerUrl);
+      await consumeInlineStartWorkButtons(bot, deps.pendingStartWorks, sessionId, deps.logger);
       await sendHtml(
         bot,
         `${index}\uBC88 \uC138\uC158\uC5D0 opencode /start-work \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1 \uC644\uB8CC. (${escapeHtml(entry.title)})`
@@ -3374,6 +3479,7 @@ var TelegramRemote = async (input) => {
         sessionTitleService,
         client: input.client,
         serverUrl: input.serverUrl.href,
+        pendingStartWorks,
         runSessionCommand,
         logger
       })

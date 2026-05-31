@@ -3,12 +3,7 @@ import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import { claimOnce } from "../lib/claim.js";
 import { isPlanSessionAgent } from "../lib/plan-agent.js";
 import { registryEntryFromSession } from "../lib/session-registry.js";
-import {
-  createPendingStartWork,
-  planCompleteMessage,
-  startWorkKeyboard,
-  startWorkShortHash,
-} from "./start-work.js";
+import { createPendingStartWork, planCompleteMessage, startWorkShortHash } from "./start-work.js";
 import type { EventHandlerContext } from "./types.js";
 
 const ROOT_IDLE_RECHECK_DELAY_MS = 2_500;
@@ -73,7 +68,11 @@ async function hydrateDescendants(
     for (const child of result.data ?? []) {
       ctx.sessionTitleService.setSessionInfo(child);
       await ctx.sessionRegistry.upsertSession(
-        registryEntryFromSession(child, ctx.serverUrl.href, ctx.sessionTitleService.getSessionStatus(child.id)),
+        registryEntryFromSession(
+          child,
+          ctx.serverUrl.href,
+          ctx.sessionTitleService.getSessionStatus(child.id),
+        ),
       );
       await hydrateDescendants(child.id, ctx, seen);
     }
@@ -102,13 +101,19 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
   try {
     if (isPlanSession) {
       const shortHash = startWorkShortHash(sessionId);
-      const message = await ctx.bot.sendMessage(text, {
-        reply_markup: { inline_keyboard: startWorkKeyboard(shortHash) },
+      const pending = await ctx.pendingStartWorks.loadPending(shortHash);
+      if (pending && pending.expiresAt >= Date.now()) {
+        ctx.logger.info("plan completion notice already sent - skipping duplicate", { sessionId });
+        return;
+      }
+      if (pending) await ctx.pendingStartWorks.deletePending(shortHash);
+      const message = await ctx.bot.sendMessage(text);
+      const sentAt = Date.now();
+      await ctx.pendingStartWorks.savePending(shortHash, {
+        ...createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id),
+        status: "consumed",
+        handledAt: sentAt,
       });
-      await ctx.pendingStartWorks.savePending(
-        shortHash,
-        createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id),
-      );
     } else {
       await ctx.bot.sendMessage(text);
     }
@@ -244,6 +249,9 @@ export async function handleSessionStatus(
   // works, and awaiting a registry write per event backs up OpenCode's awaited event
   // delivery and freezes the TUI. Do not persist every busy event.
   if (previousStatus !== statusType) {
-    await ctx.sessionRegistry.updateSession(sessionId, { status: statusType, updatedAt: Date.now() });
+    await ctx.sessionRegistry.updateSession(sessionId, {
+      status: statusType,
+      updatedAt: Date.now(),
+    });
   }
 }

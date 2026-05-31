@@ -1,6 +1,6 @@
+import { createHash } from "node:crypto";
 import { mkdir, open, readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 
 export interface ClaimOptions {
   claimsDir: string;
@@ -25,17 +25,21 @@ async function sweep(claimsDir: string, ttlMs: number): Promise<void> {
   sweptDirs.add(claimsDir);
   try {
     const entries = await readdir(claimsDir, { withFileTypes: true });
-    await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith(".claim")).map(async (entry) => {
-      const filePath = join(claimsDir, entry.name);
-      try {
-        const fileStat = await stat(filePath);
-        if (Date.now() - fileStat.mtimeMs > ttlMs * 2) {
-          await unlink(filePath);
-        }
-      } catch {
-        // best-effort sweep
-      }
-    }));
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".claim"))
+        .map(async (entry) => {
+          const filePath = join(claimsDir, entry.name);
+          try {
+            const fileStat = await stat(filePath);
+            if (Date.now() - fileStat.mtimeMs > ttlMs * 2) {
+              await unlink(filePath);
+            }
+          } catch {
+            // best-effort sweep
+          }
+        }),
+    );
   } catch {
     // directory may not exist yet
   }
@@ -73,4 +77,12 @@ export async function claimOnce(opts: ClaimOptions): Promise<boolean> {
     }
   }
   return false;
+}
+
+export async function releaseClaim(opts: ClaimOptions): Promise<void> {
+  try {
+    await unlink(claimPath(opts.claimsDir, opts.key));
+  } catch (err) {
+    if (!(err instanceof Error) || !hasCode(err, "ENOENT")) throw err;
+  }
 }

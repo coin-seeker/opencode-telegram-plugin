@@ -1,10 +1,10 @@
-import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { claimOnce } from "./claim.js";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
+import { claimOnce, releaseClaim } from "./claim.js";
 
 describe("claimOnce", () => {
   let dir = "";
@@ -21,6 +21,23 @@ describe("claimOnce", () => {
     const claimsDir = join(dir, "happy");
     assert.equal(await claimOnce({ claimsDir, key: "event-1" }), true);
     assert.equal(await claimOnce({ claimsDir, key: "event-1" }), false);
+  });
+
+  test("release allows immediate retry", async () => {
+    const claimsDir = join(dir, "release");
+    assert.equal(await claimOnce({ claimsDir, key: "event-release" }), true);
+    assert.equal(await claimOnce({ claimsDir, key: "event-release" }), false);
+
+    await releaseClaim({ claimsDir, key: "event-release" });
+
+    assert.equal(await claimOnce({ claimsDir, key: "event-release" }), true);
+  });
+
+  test("releasing a missing claim is harmless", async () => {
+    const claimsDir = join(dir, "release-missing");
+    await releaseClaim({ claimsDir, key: "missing-event" });
+
+    assert.equal(await claimOnce({ claimsDir, key: "missing-event" }), true);
   });
 
   test("creates missing directory", async () => {

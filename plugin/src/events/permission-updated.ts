@@ -1,7 +1,7 @@
 import type { EventPermissionUpdated, Permission } from "@opencode-ai/sdk";
 import type { EventPermissionAsked, PermissionRequest } from "@opencode-ai/sdk/v2";
 import type { TelegramPermissionDispatcher } from "../bot.js";
-import { claimOnce } from "../lib/claim.js";
+import { claimOnce, releaseClaim } from "../lib/claim.js";
 import {
   createPermissionShortHash,
   type PendingPermissionState,
@@ -144,7 +144,8 @@ async function handleNormalizedPermission(
   ctx: EventHandlerContext,
 ): Promise<void> {
   const permissionKey = `${ctx.serverUrl.href}:${permission.sessionID}:${permission.requestID}`;
-  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: `permission:${permissionKey}` });
+  const claimKey = `permission:${permissionKey}`;
+  const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: claimKey });
   if (!claimed) {
     if (permission.endpoint === "request") await upgradeLegacyPendingPermission(permission, ctx);
     return;
@@ -179,6 +180,7 @@ async function handleNormalizedPermission(
     };
     await ctx.pendingPermissions.savePending(shortHash, pending);
   } catch (err) {
+    await releaseClaim({ claimsDir: ctx.claimsDir, key: claimKey });
     ctx.logger.error("failed to send permission notification", { error: String(err) });
   }
 }
@@ -274,6 +276,11 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
       const pending = await ctx.pendingPermissions.loadPending(shortHash);
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
+        return;
+      }
+      if (pending.expiresAt < Date.now()) {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
+        await ctx.pendingPermissions.deletePending(shortHash);
         return;
       }
       try {

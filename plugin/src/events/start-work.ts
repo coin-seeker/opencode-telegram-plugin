@@ -3,7 +3,6 @@ import { createStartWorkShortHash, type PendingStartWorkState } from "../lib/pen
 import type { EventHandlerContext } from "./types.js";
 
 const CALLBACK_RE = /^sw:([^:]+)$/;
-const START_WORK_COMMAND = "start-work";
 const START_WORK_EXPIRY_MS = 24 * 60 * 60_000;
 
 export function startWorkKeyboard(
@@ -33,6 +32,8 @@ export function createPendingStartWork(
     sentAt,
     expiresAt: sentAt + START_WORK_EXPIRY_MS,
     telegramMessageId,
+    telegramMessageIds: [telegramMessageId],
+    status: "pending",
   };
 }
 
@@ -51,6 +52,48 @@ async function expirePending(
   ctx.logger.info("pending start-work expired", { sessionID: pending.sessionID });
 }
 
+const START_WORK_BUTTON_DISABLED_MESSAGE =
+  "This /start-work button is no longer used. Use /sessions and /start_work <number> instead.";
+
+function messageIdsFor(pending: PendingStartWorkState, currentMessageId: number): number[] {
+  return [
+    ...new Set([...(pending.telegramMessageIds ?? [pending.telegramMessageId]), currentMessageId]),
+  ];
+}
+
+async function editDuplicateMessages(
+  ctx: EventHandlerContext,
+  pending: PendingStartWorkState,
+  currentMessageId: number,
+): Promise<void> {
+  for (const messageId of messageIdsFor(pending, currentMessageId)) {
+    if (messageId === currentMessageId) continue;
+    try {
+      await ctx.bot.editMessageRemoveKeyboard(messageId, START_WORK_BUTTON_DISABLED_MESSAGE);
+    } catch (err) {
+      ctx.logger.warn("failed to clear duplicate start-work keyboard", {
+        messageId,
+        error: String(err),
+      });
+    }
+  }
+}
+
+async function consumePending(
+  ctx: EventHandlerContext,
+  shortHash: string,
+  pending: PendingStartWorkState,
+  messageId: number,
+): Promise<void> {
+  await ctx.pendingStartWorks.savePending(shortHash, {
+    ...pending,
+    telegramMessageId: messageId,
+    telegramMessageIds: messageIdsFor(pending, messageId),
+    status: "consumed",
+    handledAt: Date.now(),
+  });
+}
+
 export function createStartWorkDispatcher(ctx: EventHandlerContext): TelegramStartWorkDispatcher {
   return {
     async handleCallbackQuery(data, messageId) {
@@ -63,31 +106,19 @@ export function createStartWorkDispatcher(ctx: EventHandlerContext): TelegramSta
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This /start-work request has expired.");
         return;
       }
+      if (pending.status === "consumed") {
+        await ctx.bot.editMessageRemoveKeyboard(messageId, START_WORK_BUTTON_DISABLED_MESSAGE);
+        return;
+      }
       if (pending.expiresAt < Date.now()) {
         await expirePending(ctx, shortHash, pending, messageId);
         return;
       }
 
-      try {
-        await ctx.runSessionCommand(pending.sessionID, START_WORK_COMMAND, pending.serverUrl);
-        const label = pending.title ?? pending.sessionID;
-        await ctx.bot.editMessageRemoveKeyboard(
-          messageId,
-          `▶️ Sent /start-work to opencode.\n\nSession: ${label}`,
-        );
-        ctx.logger.info("start-work command sent", { sessionID: pending.sessionID });
-      } catch (err) {
-        await ctx.bot.editMessageRemoveKeyboard(
-          messageId,
-          "⚠️ Failed to send /start-work to opencode",
-        );
-        ctx.logger.error("failed to send start-work command", {
-          sessionID: pending.sessionID,
-          error: String(err),
-        });
-      } finally {
-        await ctx.pendingStartWorks.deletePending(shortHash);
-      }
+      await consumePending(ctx, shortHash, pending, messageId);
+      await ctx.bot.editMessageRemoveKeyboard(messageId, START_WORK_BUTTON_DISABLED_MESSAGE);
+      await editDuplicateMessages(ctx, pending, messageId);
+      ctx.logger.info("legacy start-work button disabled", { sessionID: pending.sessionID });
     },
   };
 }

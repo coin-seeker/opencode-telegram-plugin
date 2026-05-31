@@ -15,15 +15,15 @@ Configure the npm package in `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.3"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.4"]
 }
 ```
 
-Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.3`.
+Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.4`.
 
 Restart OpenCode after editing the config. OpenCode resolves npm package plugins on startup.
 
-To update an existing install, replace the previous pinned package entry with `@coinseeker/opencode-telegram-plugin@1.1.3`, keep the rest of the `plugin` array unchanged, and restart OpenCode.
+To update an existing install, replace the previous pinned package entry with `@coinseeker/opencode-telegram-plugin@1.1.4`, keep the rest of the `plugin` array unchanged, and restart OpenCode.
 
 ## Configure Telegram
 
@@ -62,7 +62,7 @@ Keep this file private. Never commit or share your Telegram bot token.
 - Multi-session-safe Telegram polling through a file-lock leader model.
 - Log file output instead of stdout terminal spam.
 - Cross-process remote session listing via `/sessions`, `/status N`, `/start_work N`, `/help` slash commands.
-- Safety-gated remote `/start-work` execution: verifies agent=plan, idle status, incomplete plan, and no active boulder before dispatching.
+- Safety-gated remote `/start-work` execution: verifies a raw `plan` agent or Prometheus Plan Builder label, idle status, incomplete plan, and no active boulder before dispatching.
 
 ## Logs
 

@@ -1,6 +1,6 @@
 # OpenCode Telegram Plugin
 
-Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin@1.1.3`, then configure your Telegram bot credentials in a private local env file.
+Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin@1.1.4`, then configure your Telegram bot credentials in a private local env file.
 
 > **Disclaimer:** This project is not affiliated with, endorsed by, or sponsored by OpenCode, SST, or any of their affiliates. OpenCode is a trademark of SST.
 
@@ -35,7 +35,7 @@ https://raw.githubusercontent.com/coin-seeker/opencode-telegram-plugin/refs/head
 
 OpenCode resolves the npm package on startup automatically.
 
-Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.3`.
+Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.4`.
 
 For a step-by-step manual install guide and an AI-agent-friendly install prompt, see [`docs/installation.md`](docs/installation.md).
 
@@ -85,7 +85,7 @@ Open `~/.config/opencode/opencode.json` and add the pinned npm package name to t
 ```json
 {
   "plugin": [
-    "@coinseeker/opencode-telegram-plugin@1.1.3"
+    "@coinseeker/opencode-telegram-plugin@1.1.4"
   ]
 }
 ```
@@ -100,7 +100,7 @@ Replace the old pinned package entry in `~/.config/opencode/opencode.json` with 
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.3"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.4"]
 }
 ```
 
@@ -193,7 +193,7 @@ Session numbers come from the most recent `/sessions` call. The mapping snapshot
 
 `/start_work <N>` only dispatches opencode's `/start-work` command when ALL conditions are met:
 
-1. `agent === 'plan'` — session must be a planning session
+1. `agent` is `plan`, `prometheus`, or a Prometheus Plan Builder label such as `Prometheus - Plan Builder` — session must be a planning session
 2. `status === 'idle'` — re-validated via live API call (TOCTOU-safe)
 3. An incomplete `.omo/plans/*.md` plan file exists in the session's project
 4. No `.omo/boulder.json` file exists (prevents duplicate execution)
@@ -255,7 +255,7 @@ The correct schema uses `"plugin"` (singular) with string entries:
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.3"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.4"]
 }
 ```
 

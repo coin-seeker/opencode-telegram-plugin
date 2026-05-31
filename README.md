@@ -1,6 +1,6 @@
 # OpenCode Telegram Plugin
 
-Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin@1.1.6`, then configure your Telegram bot credentials in a private local env file.
+Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin@1.1.7`, then configure your Telegram bot credentials in a private local env file.
 
 > **Disclaimer:** This project is not affiliated with, endorsed by, or sponsored by OpenCode, SST, or any of their affiliates. OpenCode is a trademark of SST.
 
@@ -35,7 +35,7 @@ https://raw.githubusercontent.com/coin-seeker/opencode-telegram-plugin/refs/head
 
 OpenCode resolves the npm package on startup automatically.
 
-Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.6`.
+Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.7`.
 
 For a step-by-step manual install guide and an AI-agent-friendly install prompt, see [`docs/installation.md`](docs/installation.md).
 
@@ -85,7 +85,7 @@ Open `~/.config/opencode/opencode.json` and add the pinned npm package name to t
 ```json
 {
   "plugin": [
-    "@coinseeker/opencode-telegram-plugin@1.1.6"
+    "@coinseeker/opencode-telegram-plugin@1.1.7"
   ]
 }
 ```
@@ -100,7 +100,7 @@ Replace the old pinned package entry in `~/.config/opencode/opencode.json` with 
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.6"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.7"]
 }
 ```
 
@@ -255,7 +255,7 @@ The correct schema uses `"plugin"` (singular) with string entries:
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.6"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.7"]
 }
 ```
 

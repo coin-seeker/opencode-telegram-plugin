@@ -7,6 +7,7 @@ import {
   normalizeOpenCodeServerUrl,
   type OpenCodeFetcher,
 } from "../lib/opencode-http.js";
+import { isPlanSessionAgent } from "../lib/plan-agent.js";
 import type { PlanReadinessResult } from "../lib/plan-readiness.js";
 import { checkPlanReadiness, recheckSessionIdle } from "../lib/plan-readiness.js";
 import type { SnapshotStore } from "../lib/session-snapshot.js";
@@ -154,10 +155,10 @@ export function createStartWorkCommandDispatcher(deps: {
     }
 
     const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession(session) ?? entry.agent;
-    if (agent !== "plan") {
+    if (!isPlanSessionAgent(agent)) {
       await sendPlain(
         bot,
-        `${index}번 세션의 에이전트는 'plan' 이 아닙니다 (현재: ${agent ?? "unknown"}). /start_work 는 plan 세션에서만 가능합니다`,
+        `${index}번 세션의 에이전트는 plan builder 가 아닙니다 (현재: ${agent ?? "unknown"}). /start_work 는 plan 세션에서만 가능합니다`,
       );
       return;
     }

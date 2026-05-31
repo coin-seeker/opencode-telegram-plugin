@@ -385,6 +385,40 @@ describe("status-command dispatcher", () => {
     assert.ok(!text.includes("1/2"));
   });
 
+  test("Plan Builder labels can fall back to the latest project plan", async () => {
+    const projectRoot = await freshProject();
+    const plansDir = join(projectRoot, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "latest.md"), "- [x] shared\n- [ ] shared\n", "utf8");
+
+    const sendCalls: SendCall[] = [];
+    const dispatcher = createStatusDispatcher({
+      snapshotStore: makeSnapshotStore([
+        makeEntry({
+          index: 1,
+          sessionId: "ses_prometheus",
+          agent: "Prometheus - Plan Builder",
+          title: "CRM SaaS 전환 및 Status 서버 구축",
+        }),
+      ]),
+      sessionTitleService,
+      client: makeClient({
+        async get() {
+          return {
+            data: { directory: projectRoot, title: "CRM SaaS 전환 및 Status 서버 구축", id: "ses_prometheus" },
+          };
+        },
+      }),
+      logger: makeLogger([]),
+    });
+
+    await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
+
+    const text = sendCalls[0]?.text ?? "";
+    assert.match(text, /에이전트: Prometheus - Plan Builder/);
+    assert.match(text, /<b>플랜 진행도<\/b>: 1\/2 \(latest\)/);
+  });
+
   test("0 messages: snippets render as '메시지 없음'", async () => {
     const projectRoot = await freshProject();
     const sendCalls: SendCall[] = [];

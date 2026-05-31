@@ -1,6 +1,7 @@
 import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
 import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import { claimOnce } from "../lib/claim.js";
+import { isPlanSessionAgent } from "../lib/plan-agent.js";
 import { registryEntryFromSession } from "../lib/session-registry.js";
 import {
   createPendingStartWork,
@@ -96,7 +97,7 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
 
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
   const agent = ctx.sessionTitleService.getSessionAgent(sessionId);
-  const isPlanSession = agent === "plan";
+  const isPlanSession = isPlanSessionAgent(agent);
   const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
     if (isPlanSession) {

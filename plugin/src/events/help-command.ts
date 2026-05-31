@@ -17,7 +17,7 @@ const HELP_TEXT = `<b>OpenCode Telegram Plugin — 명령 도움말</b>
 
 <b>/start_work &lt;번호&gt;</b>
 해당 세션에 opencode <code>/start-work</code> 슬래시 커맨드 전송.
-안전 게이트: agent='plan' AND status=idle AND .omo/plans 에 미완료 plan 존재 AND .omo/boulder.json 부재.
+안전 게이트: raw plan agent 또는 Prometheus Plan Builder 라벨 AND status=idle AND .omo/plans 에 미완료 plan 존재 AND .omo/boulder.json 부재.
 조건 미충족시 구체적 사유 안내.
 (Telegram 봇 명령은 <code>/start_work</code>, 내부 트리거 대상은 opencode 의 <code>/start-work</code>)
 

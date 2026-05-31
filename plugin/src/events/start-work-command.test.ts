@@ -282,7 +282,7 @@ describe("start-work-command dispatcher", () => {
 
     assert.match(
       harness.sendCalls[0]?.text ?? "",
-      /에이전트는 'plan' 이 아닙니다 \(현재: build\)/,
+      /에이전트는 plan builder 가 아닙니다 \(현재: build\)/,
     );
     assert.equal(harness.commands.length, 0);
     assert.equal(harness.statusCalls.count, 0);
@@ -356,6 +356,24 @@ describe("start-work-command dispatcher", () => {
     assert.deepEqual(harness.sendCalls[0]?.opts, { parse_mode: "HTML" });
     assert.equal(harness.infoLogs[0]?.msg, "start-work dispatched");
     assert.equal(harness.infoLogs[0]?.data?.sessionId, "ses_plan");
+    assert.equal(harness.statusCalls.count, 1);
+  });
+
+  test("Prometheus Plan Builder label dispatches start-work command", async () => {
+    const projectRoot = await createReadyProject(dir, "prometheus-plan-builder");
+    const session = makeSession("ses_plan", projectRoot, "build");
+    const harness = makeHarness({
+      projectRoot,
+      session,
+      serviceAgent: "Prometheus - Plan Builder",
+    });
+
+    await harness.run(["1"]);
+
+    assert.deepEqual(harness.commands, [
+      { sessionId: "ses_plan", command: "start-work", serverUrl: undefined },
+    ]);
+    assert.match(harness.sendCalls[0]?.text ?? "", /전송 완료/);
     assert.equal(harness.statusCalls.count, 1);
   });
 

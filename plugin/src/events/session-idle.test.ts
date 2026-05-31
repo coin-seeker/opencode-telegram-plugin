@@ -268,6 +268,20 @@ describe("session idle notifications", () => {
     assert.ok(await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-session")));
   });
 
+  test("shows start-work button when a Plan Builder session finishes", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("plan-builder-session", "CRM SaaS 전환 및 Status 서버 구축"));
+    service.setSessionAgent("plan-builder-session", "Prometheus - Plan Builder");
+    const { bot, sentMessages, sentOptions } = createBot();
+    const ctx = createContext(bot, join(dir, "plan-builder-complete"), service);
+
+    await handleSessionIdle(idleEvent("plan-builder-session"), ctx);
+
+    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nCRM SaaS 전환 및 Status 서버 구축"]);
+    assert.match(JSON.stringify(sentOptions[0]), /Run \/start-work/);
+    assert.ok(await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-builder-session")));
+  });
+
   test("does not show start-work button for non-plan root completion", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("build-session", "Build task"));

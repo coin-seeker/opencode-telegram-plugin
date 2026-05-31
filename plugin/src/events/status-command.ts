@@ -13,6 +13,7 @@ import {
   type OpenCodeMessageEnvelope,
   type OpenCodeSessionData,
 } from "../lib/opencode-http.js";
+import { isPlanSessionAgent } from "../lib/plan-agent.js";
 import { checkPlanReadiness, type PlanReadinessResult } from "../lib/plan-readiness.js";
 import type { SnapshotStore } from "../lib/session-snapshot.js";
 import type { OpencodeClient } from "./types.js";
@@ -233,7 +234,7 @@ export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispat
       projectRoot,
       sessionId: entry.sessionId,
       planHint: rawTitle,
-      allowLatestFallback: rawAgent === "plan",
+      allowLatestFallback: isPlanSessionAgent(rawAgent),
     });
 
     const userSnippet = buildSnippet(findLastByRole(messages, "user"));

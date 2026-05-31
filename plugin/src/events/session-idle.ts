@@ -20,6 +20,42 @@ export function agentFinishedMessage(title: string | null, agent: string | undef
   return agent ? `${base} (${agent})` : base;
 }
 
+function selectPlanSessionAgent(candidates: Array<string | undefined>): string | undefined {
+  return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== undefined);
+}
+
+async function resolveSessionAgent(
+  sessionId: string,
+  ctx: EventHandlerContext,
+): Promise<string | undefined> {
+  const candidates: Array<string | undefined> = [
+    ctx.sessionTitleService.getSessionAgent(sessionId),
+  ];
+
+  try {
+    const registryEntry = (await ctx.sessionRegistry.listSessions()).find(
+      (entry) => entry.sessionId === sessionId,
+    );
+    candidates.push(registryEntry?.agent);
+  } catch (err) {
+    ctx.logger.warn("session registry agent lookup failed", { sessionId, error: String(err) });
+  }
+
+  try {
+    const result = await ctx.client.session.get({ path: { id: sessionId } });
+    if (result.data) {
+      ctx.sessionTitleService.setSessionInfo(result.data);
+      candidates.push(ctx.sessionTitleService.getSessionAgent(sessionId));
+    }
+  } catch (err) {
+    ctx.logger.warn("session agent live lookup failed", { sessionId, error: String(err) });
+  }
+
+  const agent = selectPlanSessionAgent(candidates);
+  if (agent !== undefined) ctx.sessionTitleService.setSessionAgent(sessionId, agent);
+  return agent;
+}
+
 function cancelDeferredParentConfirm(sessionId: string): void {
   const timer = deferredConfirmTimers.get(sessionId);
   if (timer === undefined) return;
@@ -95,7 +131,7 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
   if (!claimed) return;
 
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const agent = ctx.sessionTitleService.getSessionAgent(sessionId);
+  const agent = await resolveSessionAgent(sessionId, ctx);
   const isPlanSession = isPlanSessionAgent(agent);
   const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
@@ -118,7 +154,7 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
       await ctx.bot.sendMessage(text);
     }
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
-    ctx.logger.info("idle notification sent", { sessionId, title });
+    ctx.logger.info("idle notification sent", { sessionId, title, agent, isPlanSession });
   } catch (err) {
     ctx.logger.error("failed to send idle notification", { error: String(err) });
   }

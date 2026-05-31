@@ -312,6 +312,34 @@ describe("session idle notifications", () => {
     );
   });
 
+  test("uses registry Plan Builder agent when local cache has stale raw agent", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("registry-plan-session", "Registry-backed plan"));
+    service.setSessionAgent("registry-plan-session", "build");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "registry-plan-complete"), service);
+    ctx.sessionRegistry = {
+      async upsertSession() {},
+      async updateSession() {},
+      async listSessions() {
+        return [
+          {
+            sessionId: "registry-plan-session",
+            title: "Registry-backed plan",
+            parentID: null,
+            agent: "Prometheus - Plan Builder",
+            serverUrl: "http://localhost:4096/",
+            updatedAt: Date.now(),
+          },
+        ];
+      },
+    };
+
+    await handleSessionIdle(idleEvent("registry-plan-session"), ctx);
+
+    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nRegistry-backed plan"]);
+  });
+
   test("does not show start-work button for non-plan root completion", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("build-session", "Build task"));

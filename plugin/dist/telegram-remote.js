@@ -1474,8 +1474,8 @@ async function handleSessionError(event, ctx) {
 // src/lib/plan-agent.ts
 function isPlanSessionAgent(agent) {
   if (!agent) return false;
-  const normalized = agent.trim().replace(/[–—]/g, "-").replace(/\s+/g, " ").toLowerCase();
-  return normalized === "plan" || normalized === "prometheus" || normalized === "prometheus - plan builder" || normalized === "prometheus (plan builder)";
+  const normalized = agent.normalize("NFKC").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/[‐‑‒–—―]/g, "-").replace(/\s+/g, " ").replace(/\s*-\s*/g, " - ").trim().toLowerCase();
+  return normalized === "plan" || normalized === "prometheus" || normalized === "prometheus - plan builder" || normalized === "prometheus (plan builder)" || normalized.includes("prometheus") && normalized.includes("plan builder");
 }
 
 // src/lib/pending-start-work.ts
@@ -1663,6 +1663,34 @@ function agentFinishedMessage(title, agent) {
   const base = title ? `Agent has finished: ${title}` : "Agent has finished.";
   return agent ? `${base} (${agent})` : base;
 }
+function selectPlanSessionAgent(candidates) {
+  return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== void 0);
+}
+async function resolveSessionAgent(sessionId, ctx) {
+  const candidates = [
+    ctx.sessionTitleService.getSessionAgent(sessionId)
+  ];
+  try {
+    const registryEntry = (await ctx.sessionRegistry.listSessions()).find(
+      (entry) => entry.sessionId === sessionId
+    );
+    candidates.push(registryEntry?.agent);
+  } catch (err) {
+    ctx.logger.warn("session registry agent lookup failed", { sessionId, error: String(err) });
+  }
+  try {
+    const result = await ctx.client.session.get({ path: { id: sessionId } });
+    if (result.data) {
+      ctx.sessionTitleService.setSessionInfo(result.data);
+      candidates.push(ctx.sessionTitleService.getSessionAgent(sessionId));
+    }
+  } catch (err) {
+    ctx.logger.warn("session agent live lookup failed", { sessionId, error: String(err) });
+  }
+  const agent = selectPlanSessionAgent(candidates);
+  if (agent !== void 0) ctx.sessionTitleService.setSessionAgent(sessionId, agent);
+  return agent;
+}
 function cancelDeferredParentConfirm(sessionId) {
   const timer = deferredConfirmTimers.get(sessionId);
   if (timer === void 0) return;
@@ -1724,7 +1752,7 @@ async function sendIdleNotification(sessionId, ctx) {
   });
   if (!claimed) return;
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const agent = ctx.sessionTitleService.getSessionAgent(sessionId);
+  const agent = await resolveSessionAgent(sessionId, ctx);
   const isPlanSession = isPlanSessionAgent(agent);
   const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
@@ -1747,7 +1775,7 @@ async function sendIdleNotification(sessionId, ctx) {
       await ctx.bot.sendMessage(text);
     }
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
-    ctx.logger.info("idle notification sent", { sessionId, title });
+    ctx.logger.info("idle notification sent", { sessionId, title, agent, isPlanSession });
   } catch (err) {
     ctx.logger.error("failed to send idle notification", { error: String(err) });
   }
@@ -2523,6 +2551,9 @@ function agentFromSession3(session) {
 function resolveProjectRoot2(session) {
   return session.directory;
 }
+function selectPlanSessionAgent2(candidates) {
+  return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== void 0);
+}
 function readinessMessage(reason) {
   switch (reason) {
     case "no-omo-dir":
@@ -2638,7 +2669,11 @@ function createStartWorkCommandDispatcher(deps) {
       deps.logger.error("start-work session lookup failed", { sessionId, error: String(err) });
       return;
     }
-    const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession3(session) ?? entry.agent;
+    const agent = selectPlanSessionAgent2([
+      deps.sessionTitleService.getSessionAgent(sessionId),
+      entry.agent,
+      agentFromSession3(session)
+    ]);
     if (!isPlanSessionAgent(agent)) {
       await sendPlain(
         bot,

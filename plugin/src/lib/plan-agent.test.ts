@@ -9,6 +9,8 @@ describe("isPlanSessionAgent", () => {
     assert.equal(isPlanSessionAgent("Prometheus - Plan Builder"), true);
     assert.equal(isPlanSessionAgent("Prometheus — Plan Builder"), true);
     assert.equal(isPlanSessionAgent("Prometheus (Plan Builder)"), true);
+    assert.equal(isPlanSessionAgent("Prometheus\u200B - Plan Builder"), true);
+    assert.equal(isPlanSessionAgent("Prometheus - Plan Builder (custom label)"), true);
   });
 
   test("rejects executor and non-plan labels", () => {

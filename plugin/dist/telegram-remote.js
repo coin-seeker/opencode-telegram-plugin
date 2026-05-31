@@ -1655,6 +1655,8 @@ function createStartWorkDispatcher(ctx) {
 // src/events/session-idle.ts
 var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
 var DEFERRED_PARENT_CONFIRM_DELAY_MS = 2500;
+var PLAN_COMPLETION_MESSAGE_LIMIT = 5;
+var START_WORK_COMMAND_RE = /(?:^|[\s`"'(])\/?start[_-]work(?:$|[\s`"').,!?])/i;
 var deferredConfirmTimers = /* @__PURE__ */ new Map();
 function sleep(ms) {
   return new Promise((resolve2) => setTimeout(resolve2, ms));
@@ -1665,6 +1667,42 @@ function agentFinishedMessage(title, agent) {
 }
 function selectPlanSessionAgent(candidates) {
   return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== void 0);
+}
+function extractTextFromParts(parts) {
+  const pieces = [];
+  for (const part of parts) {
+    if (part.type === "text" && typeof part.text === "string") pieces.push(part.text);
+  }
+  return pieces.join(" ");
+}
+function findLatestAssistantMessage(messages) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.info.role === "assistant") return message;
+  }
+  return void 0;
+}
+function hasStartWorkCommandInstruction(text) {
+  return START_WORK_COMMAND_RE.test(text);
+}
+async function latestAssistantText(sessionId, ctx) {
+  try {
+    const result = await ctx.client.session.messages({
+      path: { id: sessionId },
+      query: { limit: PLAN_COMPLETION_MESSAGE_LIMIT }
+    });
+    const message = findLatestAssistantMessage(normalizeMessages(result.data));
+    return message ? extractTextFromParts(message.parts) : void 0;
+  } catch (err) {
+    ctx.logger.warn("plan completion message lookup failed", { sessionId, error: String(err) });
+    return void 0;
+  }
+}
+async function shouldSendPlanCompletion(sessionId, ctx) {
+  const text = await latestAssistantText(sessionId, ctx);
+  if (text !== void 0 && hasStartWorkCommandInstruction(text)) return true;
+  ctx.logger.info("skipping plan completion notice - no start-work instruction", { sessionId });
+  return false;
 }
 async function resolveSessionAgent(sessionId, ctx) {
   const candidates = [
@@ -1745,15 +1783,16 @@ async function sendIdleNotification(sessionId, ctx) {
     ctx.logger.info("idle suppressed - session was aborted", { sessionId });
     return;
   }
+  const title = ctx.sessionTitleService.getSessionTitle(sessionId);
+  const agent = await resolveSessionAgent(sessionId, ctx);
+  const isPlanSession = isPlanSessionAgent(agent);
+  if (isPlanSession && !await shouldSendPlanCompletion(sessionId, ctx)) return;
   const claimed = await claimOnce({
     claimsDir: ctx.claimsDir,
     key: `session.idle:${sessionId}`,
     ttlMs: 5e3
   });
   if (!claimed) return;
-  const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const agent = await resolveSessionAgent(sessionId, ctx);
-  const isPlanSession = isPlanSessionAgent(agent);
   const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
     if (isPlanSession) {
@@ -2352,7 +2391,7 @@ function resolveProjectRoot(session) {
   if (!session.directory) throw new Error("session directory missing");
   return session.directory;
 }
-function extractTextFromParts(parts) {
+function extractTextFromParts2(parts) {
   const pieces = [];
   for (const part of parts) {
     if (part.type === "text" && typeof part.text === "string") {
@@ -2364,7 +2403,7 @@ function extractTextFromParts(parts) {
 function buildSnippet(envelope) {
   if (!envelope) return EMPTY_MESSAGE;
   try {
-    const raw = extractTextFromParts(envelope.parts);
+    const raw = extractTextFromParts2(envelope.parts);
     const cleaned = stripCodeFences(raw);
     const truncated = truncateForTelegram(cleaned, SNIPPET_MAX_CHARS);
     if (!truncated) return EMPTY_MESSAGE;

@@ -1429,6 +1429,13 @@ async function handleSessionError(event, ctx) {
   ctx.logger.info("session abort recorded", { sessionId: event.properties.sessionID ?? "global" });
 }
 
+// src/lib/plan-agent.ts
+function isPlanSessionAgent(agent) {
+  if (!agent) return false;
+  const normalized = agent.trim().replace(/[–—]/g, "-").replace(/\s+/g, " ").toLowerCase();
+  return normalized === "plan" || normalized === "prometheus" || normalized === "prometheus - plan builder" || normalized === "prometheus (plan builder)";
+}
+
 // src/lib/pending-start-work.ts
 import { createHash as createHash4 } from "crypto";
 import { mkdir as mkdir5, readdir as readdir5, readFile as readFile4, rename as rename4, unlink as unlink5, writeFile as writeFile4 } from "fs/promises";
@@ -1655,7 +1662,7 @@ async function sendIdleNotification(sessionId, ctx) {
   if (!claimed) return;
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
   const agent = ctx.sessionTitleService.getSessionAgent(sessionId);
-  const isPlanSession = agent === "plan";
+  const isPlanSession = isPlanSessionAgent(agent);
   const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
     if (isPlanSession) {
@@ -2409,7 +2416,7 @@ function createStatusDispatcher(deps) {
       projectRoot,
       sessionId: entry.sessionId,
       planHint: rawTitle,
-      allowLatestFallback: rawAgent === "plan"
+      allowLatestFallback: isPlanSessionAgent(rawAgent)
     });
     const userSnippet = buildSnippet(findLastByRole(messages, "user"));
     const assistantSnippet = buildSnippet(findLastByRole(messages, "assistant"));
@@ -2528,10 +2535,10 @@ function createStartWorkCommandDispatcher(deps) {
       return;
     }
     const agent = deps.sessionTitleService.getSessionAgent(sessionId) ?? agentFromSession3(session) ?? entry.agent;
-    if (agent !== "plan") {
+    if (!isPlanSessionAgent(agent)) {
       await sendPlain(
         bot,
-        `${index}\uBC88 \uC138\uC158\uC758 \uC5D0\uC774\uC804\uD2B8\uB294 'plan' \uC774 \uC544\uB2D9\uB2C8\uB2E4 (\uD604\uC7AC: ${agent ?? "unknown"}). /start_work \uB294 plan \uC138\uC158\uC5D0\uC11C\uB9CC \uAC00\uB2A5\uD569\uB2C8\uB2E4`
+        `${index}\uBC88 \uC138\uC158\uC758 \uC5D0\uC774\uC804\uD2B8\uB294 plan builder \uAC00 \uC544\uB2D9\uB2C8\uB2E4 (\uD604\uC7AC: ${agent ?? "unknown"}). /start_work \uB294 plan \uC138\uC158\uC5D0\uC11C\uB9CC \uAC00\uB2A5\uD569\uB2C8\uB2E4`
       );
       return;
     }
@@ -2577,7 +2584,7 @@ var HELP_TEXT = `<b>OpenCode Telegram Plugin \u2014 \uBA85\uB839 \uB3C4\uC6C0\uB
 
 <b>/start_work &lt;\uBC88\uD638&gt;</b>
 \uD574\uB2F9 \uC138\uC158\uC5D0 opencode <code>/start-work</code> \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1.
-\uC548\uC804 \uAC8C\uC774\uD2B8: agent='plan' AND status=idle AND .omo/plans \uC5D0 \uBBF8\uC644\uB8CC plan \uC874\uC7AC AND .omo/boulder.json \uBD80\uC7AC.
+\uC548\uC804 \uAC8C\uC774\uD2B8: raw plan agent \uB610\uB294 Prometheus Plan Builder \uB77C\uBCA8 AND status=idle AND .omo/plans \uC5D0 \uBBF8\uC644\uB8CC plan \uC874\uC7AC AND .omo/boulder.json \uBD80\uC7AC.
 \uC870\uAC74 \uBBF8\uCDA9\uC871\uC2DC \uAD6C\uCCB4\uC801 \uC0AC\uC720 \uC548\uB0B4.
 (Telegram \uBD07 \uBA85\uB839\uC740 <code>/start_work</code>, \uB0B4\uBD80 \uD2B8\uB9AC\uAC70 \uB300\uC0C1\uC740 opencode \uC758 <code>/start-work</code>)
 

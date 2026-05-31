@@ -147,7 +147,9 @@ function makeHarness(options: HarnessOptions) {
   const statusCalls = { count: 0 };
   const session = options.session ?? makeSession("ses_plan", options.projectRoot);
   const snapshot =
-    options.snapshot === undefined ? [makeEntry({ sessionId: session.id })] : options.snapshot;
+    options.snapshot === undefined
+      ? [makeEntry({ sessionId: session.id, agent: session.agent })]
+      : options.snapshot;
   const bot = makeBot(sendCalls, editCalls);
   const dispatcher = createStartWorkCommandDispatcher({
     snapshotStore: makeSnapshotStore(snapshot),
@@ -421,6 +423,24 @@ describe("start-work-command dispatcher", () => {
       projectRoot,
       session,
       serviceAgent: "Prometheus - Plan Builder",
+    });
+
+    await harness.run(["1"]);
+
+    assert.deepEqual(harness.commands, [
+      { sessionId: "ses_plan", command: "start-work", serverUrl: undefined },
+    ]);
+    assert.match(harness.sendCalls[0]?.text ?? "", /전송 완료/);
+    assert.equal(harness.statusCalls.count, 1);
+  });
+
+  test("snapshot Prometheus Plan Builder label dispatches when live session agent is stale", async () => {
+    const projectRoot = await createReadyProject(dir, "snapshot-prometheus-plan-builder");
+    const session = makeSession("ses_plan", projectRoot, "build");
+    const harness = makeHarness({
+      projectRoot,
+      session,
+      snapshot: [makeEntry({ agent: "Prometheus - Plan Builder" })],
     });
 
     await harness.run(["1"]);

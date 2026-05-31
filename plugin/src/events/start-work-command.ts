@@ -44,6 +44,10 @@ function resolveProjectRoot(session: StartWorkSession): string {
   return session.directory;
 }
 
+function selectPlanSessionAgent(candidates: Array<string | undefined>): string | undefined {
+  return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== undefined);
+}
+
 function readinessMessage(reason: PlanReadinessFailureReason): string {
   switch (reason) {
     case "no-omo-dir":
@@ -200,10 +204,11 @@ export function createStartWorkCommandDispatcher(deps: {
       return;
     }
 
-    const agent =
-      deps.sessionTitleService.getSessionAgent(sessionId) ??
-      agentFromSession(session) ??
-      entry.agent;
+    const agent = selectPlanSessionAgent([
+      deps.sessionTitleService.getSessionAgent(sessionId),
+      entry.agent,
+      agentFromSession(session),
+    ]);
     if (!isPlanSessionAgent(agent)) {
       await sendPlain(
         bot,

@@ -1,6 +1,7 @@
 import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
 import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import { claimOnce } from "../lib/claim.js";
+import { normalizeMessages, type OpenCodeMessageEnvelope } from "../lib/opencode-http.js";
 import { isPlanSessionAgent } from "../lib/plan-agent.js";
 import { registryEntryFromSession } from "../lib/session-registry.js";
 import { createPendingStartWork, planCompleteMessage, startWorkShortHash } from "./start-work.js";
@@ -8,6 +9,8 @@ import type { EventHandlerContext } from "./types.js";
 
 const ROOT_IDLE_RECHECK_DELAY_MS = 2_500;
 const DEFERRED_PARENT_CONFIRM_DELAY_MS = 2_500;
+const PLAN_COMPLETION_MESSAGE_LIMIT = 5;
+const START_WORK_COMMAND_RE = /(?:^|[\s`"'(])\/?start[_-]work(?:$|[\s`"').,!?])/i;
 
 const deferredConfirmTimers = new Map<string, NodeJS.Timeout>();
 
@@ -22,6 +25,55 @@ export function agentFinishedMessage(title: string | null, agent: string | undef
 
 function selectPlanSessionAgent(candidates: Array<string | undefined>): string | undefined {
   return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== undefined);
+}
+
+function extractTextFromParts(parts: OpenCodeMessageEnvelope["parts"]): string {
+  const pieces: string[] = [];
+  for (const part of parts) {
+    if (part.type === "text" && typeof part.text === "string") pieces.push(part.text);
+  }
+  return pieces.join(" ");
+}
+
+function findLatestAssistantMessage(
+  messages: Array<OpenCodeMessageEnvelope>,
+): OpenCodeMessageEnvelope | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.info.role === "assistant") return message;
+  }
+  return undefined;
+}
+
+export function hasStartWorkCommandInstruction(text: string): boolean {
+  return START_WORK_COMMAND_RE.test(text);
+}
+
+async function latestAssistantText(
+  sessionId: string,
+  ctx: EventHandlerContext,
+): Promise<string | undefined> {
+  try {
+    const result = await ctx.client.session.messages({
+      path: { id: sessionId },
+      query: { limit: PLAN_COMPLETION_MESSAGE_LIMIT },
+    });
+    const message = findLatestAssistantMessage(normalizeMessages(result.data));
+    return message ? extractTextFromParts(message.parts) : undefined;
+  } catch (err) {
+    ctx.logger.warn("plan completion message lookup failed", { sessionId, error: String(err) });
+    return undefined;
+  }
+}
+
+async function shouldSendPlanCompletion(
+  sessionId: string,
+  ctx: EventHandlerContext,
+): Promise<boolean> {
+  const text = await latestAssistantText(sessionId, ctx);
+  if (text !== undefined && hasStartWorkCommandInstruction(text)) return true;
+  ctx.logger.info("skipping plan completion notice - no start-work instruction", { sessionId });
+  return false;
 }
 
 async function resolveSessionAgent(
@@ -123,6 +175,11 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
     return;
   }
 
+  const title = ctx.sessionTitleService.getSessionTitle(sessionId);
+  const agent = await resolveSessionAgent(sessionId, ctx);
+  const isPlanSession = isPlanSessionAgent(agent);
+  if (isPlanSession && !(await shouldSendPlanCompletion(sessionId, ctx))) return;
+
   const claimed = await claimOnce({
     claimsDir: ctx.claimsDir,
     key: `session.idle:${sessionId}`,
@@ -130,9 +187,6 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
   });
   if (!claimed) return;
 
-  const title = ctx.sessionTitleService.getSessionTitle(sessionId);
-  const agent = await resolveSessionAgent(sessionId, ctx);
-  const isPlanSession = isPlanSessionAgent(agent);
   const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
     if (isPlanSession) {

@@ -14,8 +14,17 @@ import {
 } from "../lib/pending-start-work.js";
 import type { SessionRegistryStore } from "../lib/session-registry.js";
 import { SessionTitleService } from "../services/session-title-service.js";
-import { agentFinishedMessage, handleSessionIdle } from "./session-idle.js";
+import {
+  agentFinishedMessage,
+  handleSessionIdle,
+  hasStartWorkCommandInstruction,
+} from "./session-idle.js";
 import type { EventHandlerContext } from "./types.js";
+
+type TestMessageEnvelope = {
+  info: { role: string };
+  parts: Array<{ type: string; text?: string }>;
+};
 
 function createLogger() {
   return {
@@ -42,6 +51,10 @@ function createSession(id: string, title: string, parentID?: string): Session {
 
 function idleEvent(sessionID: string): EventSessionIdle {
   return { type: "session.idle", properties: { sessionID } };
+}
+
+function assistantMessage(text: string): TestMessageEnvelope {
+  return { info: { role: "assistant" }, parts: [{ type: "text", text }] };
 }
 
 function createBot() {
@@ -98,6 +111,7 @@ function createContext(
   service: SessionTitleService,
   childrenBySession: Record<string, Session[]> = {},
   sessionsById: Record<string, Session> = {},
+  messagesBySession: Record<string, TestMessageEnvelope[]> = {},
 ): EventHandlerContext {
   return {
     client: {
@@ -107,6 +121,9 @@ function createContext(
         },
         async children(options: { path: { id: string } }) {
           return { data: childrenBySession[options.path.id] ?? [] };
+        },
+        async messages(options: { path: { id: string }; query?: { limit?: number } }) {
+          return { data: messagesBySession[options.path.id] ?? [] };
         },
       },
     } as unknown as EventHandlerContext["client"],
@@ -259,7 +276,16 @@ describe("session idle notifications", () => {
     service.setSessionInfo(createSession("plan-session", "Remove earnings estimate"));
     service.setSessionAgent("plan-session", "plan");
     const { bot, sentMessages, sentOptions } = createBot();
-    const ctx = createContext(bot, join(dir, "plan-complete"), service);
+    const ctx = createContext(
+      bot,
+      join(dir, "plan-complete"),
+      service,
+      {},
+      {},
+      {
+        "plan-session": [assistantMessage("Plan ready. Use /start_work 1 to execute it.")],
+      },
+    );
 
     await handleSessionIdle(idleEvent("plan-session"), ctx);
 
@@ -271,12 +297,46 @@ describe("session idle notifications", () => {
     );
   });
 
+  test("skips plan completion message when latest assistant message lacks start-work instruction", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("plan-still-writing", "Portfolio trading plan"));
+    service.setSessionAgent("plan-still-writing", "Prometheus - Plan Builder");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(
+      bot,
+      join(dir, "plan-still-writing"),
+      service,
+      {},
+      {},
+      {
+        "plan-still-writing": [assistantMessage("Research subagents are still running.")],
+      },
+    );
+
+    await handleSessionIdle(idleEvent("plan-still-writing"), ctx);
+
+    assert.deepEqual(sentMessages, []);
+    assert.equal(
+      await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-still-writing")),
+      undefined,
+    );
+  });
+
   test("does not send another plan completion notice while one is already recorded", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("plan-duplicate", "Duplicate plan"));
     service.setSessionAgent("plan-duplicate", "plan");
     const { bot, sentMessages } = createBot();
-    const ctx = createContext(bot, join(dir, "plan-duplicate"), service);
+    const ctx = createContext(
+      bot,
+      join(dir, "plan-duplicate"),
+      service,
+      {},
+      {},
+      {
+        "plan-duplicate": [assistantMessage("Plan ready. Run /start_work 1.")],
+      },
+    );
     await ctx.pendingStartWorks.savePending(createStartWorkShortHash("plan-duplicate"), {
       sessionID: "plan-duplicate",
       serverUrl: "http://localhost:4096/",
@@ -299,7 +359,16 @@ describe("session idle notifications", () => {
     );
     service.setSessionAgent("plan-builder-session", "Prometheus - Plan Builder");
     const { bot, sentMessages, sentOptions } = createBot();
-    const ctx = createContext(bot, join(dir, "plan-builder-complete"), service);
+    const ctx = createContext(
+      bot,
+      join(dir, "plan-builder-complete"),
+      service,
+      {},
+      {},
+      {
+        "plan-builder-session": [assistantMessage("Final plan is ready. Use /start-work.")],
+      },
+    );
 
     await handleSessionIdle(idleEvent("plan-builder-session"), ctx);
 
@@ -317,7 +386,16 @@ describe("session idle notifications", () => {
     service.setSessionInfo(createSession("registry-plan-session", "Registry-backed plan"));
     service.setSessionAgent("registry-plan-session", "build");
     const { bot, sentMessages } = createBot();
-    const ctx = createContext(bot, join(dir, "registry-plan-complete"), service);
+    const ctx = createContext(
+      bot,
+      join(dir, "registry-plan-complete"),
+      service,
+      {},
+      {},
+      {
+        "registry-plan-session": [assistantMessage("Ready for execution: /start_work 1")],
+      },
+    );
     ctx.sessionRegistry = {
       async upsertSession() {},
       async updateSession() {},
@@ -374,6 +452,15 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("unknown-agent-session"), ctx);
 
     assert.deepEqual(sentMessages, ["Agent has finished: Untracked task"]);
+  });
+});
+
+describe("hasStartWorkCommandInstruction", () => {
+  test("matches Telegram and OpenCode start-work command spellings", () => {
+    assert.equal(hasStartWorkCommandInstruction("Run /start_work 1"), true);
+    assert.equal(hasStartWorkCommandInstruction("Use /start-work now"), true);
+    assert.equal(hasStartWorkCommandInstruction("start_work is available"), true);
+    assert.equal(hasStartWorkCommandInstruction("Research is still running"), false);
   });
 });
 

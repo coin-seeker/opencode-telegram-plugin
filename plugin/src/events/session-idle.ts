@@ -102,6 +102,27 @@ function statusForHydratedSession(
   return ctx.sessionTitleService.getSessionStatus(sessionId);
 }
 
+function refreshSessionStatus(
+  sessionId: string,
+  ctx: EventHandlerContext,
+  statusMap: Record<string, OpenCodeStatusEntry> | undefined,
+): "busy" | "idle" | "retry" | undefined {
+  const status = statusForHydratedSession(sessionId, ctx, statusMap);
+  if (status !== undefined) ctx.sessionTitleService.setSessionStatus(sessionId, status);
+  return status;
+}
+
+function refreshRootSessionStatus(
+  sessionId: string,
+  ctx: EventHandlerContext,
+  statusMap: Record<string, OpenCodeStatusEntry> | undefined,
+): "busy" | "idle" | "retry" | undefined {
+  const status =
+    statusMap?.[sessionId]?.type ?? ctx.sessionTitleService.getSessionStatus(sessionId);
+  if (status !== undefined) ctx.sessionTitleService.setSessionStatus(sessionId, status);
+  return status;
+}
+
 async function resolveSessionAgent(
   sessionId: string,
   ctx: EventHandlerContext,
@@ -182,9 +203,7 @@ async function hydrateDescendants(
     const result = await ctx.client.session.children({ path: { id: sessionId } });
     for (const child of result.data ?? []) {
       ctx.sessionTitleService.setSessionInfo(child);
-      const childStatus = statusForHydratedSession(child.id, ctx, statusMap);
-      if (childStatus !== undefined)
-        ctx.sessionTitleService.setSessionStatus(child.id, childStatus);
+      const childStatus = refreshSessionStatus(child.id, ctx, statusMap);
       await ctx.sessionRegistry.upsertSession(
         registryEntryFromSession(child, ctx.serverUrl.href, childStatus),
       );
@@ -279,14 +298,14 @@ async function confirmDeferredParentIdle(
   ctx: EventHandlerContext,
 ): Promise<void> {
   if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
-  if (ctx.sessionTitleService.getSessionStatus(parentID) !== "idle") {
+  const statusMap = await fetchSessionStatusMap(ctx);
+  if (refreshRootSessionStatus(parentID, ctx, statusMap) !== "idle") {
     ctx.sessionTitleService.clearDeferredIdleNotification(parentID);
     ctx.logger.info("clearing deferred parent idle notification - parent resumed during confirm", {
       sessionId: parentID,
     });
     return;
   }
-  const statusMap = await fetchSessionStatusMap(ctx);
   await hydrateDescendants(parentID, ctx, statusMap);
   if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) {
     ctx.logger.info("keeping deferred parent idle notification - descendants active again", {
@@ -302,9 +321,10 @@ async function confirmDeferredParentIdle(
 async function deferParentIdleIfDescendantsRunning(
   sessionId: string,
   ctx: EventHandlerContext,
+  statusMap?: Record<string, OpenCodeStatusEntry>,
 ): Promise<boolean> {
-  const statusMap = await fetchSessionStatusMap(ctx);
-  await hydrateDescendants(sessionId, ctx, statusMap);
+  const effectiveStatusMap = statusMap ?? (await fetchSessionStatusMap(ctx));
+  await hydrateDescendants(sessionId, ctx, effectiveStatusMap);
   if (!ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) return false;
   ctx.sessionTitleService.deferIdleNotification(sessionId);
   scheduleDeferredParentConfirm(sessionId, ctx);
@@ -337,14 +357,15 @@ export async function handleSessionIdle(
 
   await sleep(ctx.idleRecheckDelayMs ?? ROOT_IDLE_RECHECK_DELAY_MS);
 
-  if (ctx.sessionTitleService.getSessionStatus(sessionId) !== "idle") {
+  const statusMap = await fetchSessionStatusMap(ctx);
+  if (refreshRootSessionStatus(sessionId, ctx, statusMap) !== "idle") {
     ctx.logger.info("idle notification skipped - session resumed during recheck delay", {
       sessionId,
     });
     return;
   }
 
-  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx)) {
+  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx, statusMap)) {
     return;
   }
 

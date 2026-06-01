@@ -351,6 +351,57 @@ describe("session idle notifications", () => {
     assert.deepEqual(sentMessages, []);
   });
 
+  test("uses live busy parent status during root idle recheck", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent-live-busy", "Resumed parent"));
+    const statuses: Record<string, TestStatusEntry> = {};
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "parent-live-busy"), service, {}, {}, {}, statuses);
+
+    const parentIdle = handleSessionIdle(idleEvent("parent-live-busy"), ctx);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    statuses["parent-live-busy"] = { type: "busy" };
+    await parentIdle;
+
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.getSessionStatus("parent-live-busy"), "busy");
+  });
+
+  test("clears deferred parent when live parent status resumes during confirm", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent-confirm-busy", "Confirm parent"));
+    const statuses: Record<string, TestStatusEntry> = {
+      "child-confirm-busy": { type: "busy" },
+    };
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(
+      bot,
+      join(dir, "parent-confirm-busy"),
+      service,
+      {
+        "parent-confirm-busy": [
+          createSession("child-confirm-busy", "Confirm child", "parent-confirm-busy"),
+        ],
+      },
+      {},
+      {},
+      statuses,
+    );
+    ctx.deferredConfirmDelayMs = 20;
+
+    await handleSessionIdle(idleEvent("parent-confirm-busy"), ctx);
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.hasDeferredIdleNotification("parent-confirm-busy"), true);
+
+    statuses["parent-confirm-busy"] = { type: "busy" };
+    statuses["child-confirm-busy"] = { type: "idle" };
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.getSessionStatus("parent-confirm-busy"), "busy");
+    assert.equal(service.hasDeferredIdleNotification("parent-confirm-busy"), false);
+  });
+
   test("sends plan completion message without start-work button when a root plan session finishes", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("plan-session", "Remove earnings estimate"));

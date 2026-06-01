@@ -15,15 +15,15 @@ Configure the npm package in `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.8"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.9"]
 }
 ```
 
-Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.8`.
+Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.9`.
 
 Restart OpenCode after editing the config. OpenCode resolves npm package plugins on startup.
 
-To update an existing install, replace the previous pinned package entry with `@coinseeker/opencode-telegram-plugin@1.1.8`, keep the rest of the `plugin` array unchanged, and restart OpenCode.
+To update an existing install, replace the previous pinned package entry with `@coinseeker/opencode-telegram-plugin@1.1.9`, keep the rest of the `plugin` array unchanged, and restart OpenCode.
 
 ## Configure Telegram
 

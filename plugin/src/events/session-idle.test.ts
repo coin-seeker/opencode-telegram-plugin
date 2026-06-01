@@ -26,6 +26,8 @@ type TestMessageEnvelope = {
   parts: Array<{ type: string; text?: string }>;
 };
 
+type TestStatusEntry = { type: "busy" | "idle" | "retry" };
+
 function createLogger() {
   return {
     debug() {},
@@ -112,6 +114,7 @@ function createContext(
   childrenBySession: Record<string, Session[]> = {},
   sessionsById: Record<string, Session> = {},
   messagesBySession: Record<string, TestMessageEnvelope[]> = {},
+  statusesBySession: Record<string, TestStatusEntry> = {},
 ): EventHandlerContext {
   return {
     client: {
@@ -124,6 +127,9 @@ function createContext(
         },
         async messages(options: { path: { id: string }; query?: { limit?: number } }) {
           return { data: messagesBySession[options.path.id] ?? [] };
+        },
+        async status() {
+          return { data: statusesBySession };
         },
       },
     } as unknown as EventHandlerContext["client"],
@@ -201,9 +207,18 @@ describe("session idle notifications", () => {
     service.setSessionInfo(createSession("bg-child", "Subagent", "bg-parent"));
     service.setSessionStatus("bg-child", "busy");
     const { bot, sentMessages } = createBot();
-    const ctx = createContext(bot, join(dir, "bg-defer"), service, {
-      "bg-parent": [createSession("bg-child", "Subagent", "bg-parent")],
-    });
+    const statuses: Record<string, TestStatusEntry> = { "bg-child": { type: "busy" } };
+    const ctx = createContext(
+      bot,
+      join(dir, "bg-defer"),
+      service,
+      {
+        "bg-parent": [createSession("bg-child", "Subagent", "bg-parent")],
+      },
+      {},
+      {},
+      statuses,
+    );
     ctx.deferredConfirmDelayMs = 20;
 
     await handleSessionIdle(idleEvent("bg-parent"), ctx);
@@ -211,6 +226,7 @@ describe("session idle notifications", () => {
     assert.equal(service.hasDeferredIdleNotification("bg-parent"), true);
 
     service.setSessionStatus("bg-child", "idle");
+    statuses["bg-child"] = { type: "idle" };
     await handleSessionIdle(idleEvent("bg-child"), ctx);
     assert.deepEqual(sentMessages, []);
 
@@ -245,16 +261,80 @@ describe("session idle notifications", () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent-hydrate", "Plan builder"));
     const { bot, sentMessages } = createBot();
-    const ctx = createContext(bot, join(dir, "hydrate"), service, {
-      "parent-hydrate": [createSession("plan-check", "Plan checker", "parent-hydrate")],
-      "plan-check": [createSession("momus-check", "Momus accuracy check", "plan-check")],
-    });
+    const ctx = createContext(
+      bot,
+      join(dir, "hydrate"),
+      service,
+      {
+        "parent-hydrate": [createSession("plan-check", "Plan checker", "parent-hydrate")],
+        "plan-check": [createSession("momus-check", "Momus accuracy check", "plan-check")],
+      },
+      {},
+      {},
+      {
+        "plan-check": { type: "idle" },
+        "momus-check": { type: "busy" },
+      },
+    );
 
     await handleSessionIdle(idleEvent("parent-hydrate"), ctx);
 
     assert.deepEqual(sentMessages, []);
     assert.equal(service.hasDeferredIdleNotification("parent-hydrate"), true);
     assert.equal(service.getParentID("momus-check"), "plan-check");
+  });
+
+  test("uses live idle status for hydrated children instead of deferring forever", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent-live-idle", "Live idle children"));
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(
+      bot,
+      join(dir, "live-idle-children"),
+      service,
+      {
+        "parent-live-idle": [
+          createSession("child-live-idle", "Finished child", "parent-live-idle"),
+        ],
+      },
+      {},
+      {},
+      {},
+    );
+
+    await handleSessionIdle(idleEvent("parent-live-idle"), ctx);
+
+    assert.deepEqual(sentMessages, ["Agent has finished: Live idle children"]);
+    assert.equal(service.hasDeferredIdleNotification("parent-live-idle"), false);
+  });
+
+  test("rechecks deferred parent when child status changes without a child idle event", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent-poll", "Polling parent"));
+    const statuses: Record<string, TestStatusEntry> = { "child-poll": { type: "busy" } };
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(
+      bot,
+      join(dir, "poll-deferred"),
+      service,
+      {
+        "parent-poll": [createSession("child-poll", "Polling child", "parent-poll")],
+      },
+      {},
+      {},
+      statuses,
+    );
+    ctx.deferredConfirmDelayMs = 20;
+
+    await handleSessionIdle(idleEvent("parent-poll"), ctx);
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.hasDeferredIdleNotification("parent-poll"), true);
+
+    statuses["child-poll"] = { type: "idle" };
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.deepEqual(sentMessages, ["Agent has finished: Polling parent"]);
+    assert.equal(service.hasDeferredIdleNotification("parent-poll"), false);
   });
 
   test("skips stale root idle notification if parent resumes during recheck", async () => {

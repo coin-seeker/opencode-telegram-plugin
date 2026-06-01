@@ -1,7 +1,12 @@
 import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
 import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import { claimOnce } from "../lib/claim.js";
-import { normalizeMessages, type OpenCodeMessageEnvelope } from "../lib/opencode-http.js";
+import {
+  normalizeMessages,
+  normalizeStatusMap,
+  type OpenCodeMessageEnvelope,
+  type OpenCodeStatusEntry,
+} from "../lib/opencode-http.js";
 import { isPlanSessionAgent } from "../lib/plan-agent.js";
 import { registryEntryFromSession } from "../lib/session-registry.js";
 import { createPendingStartWork, planCompleteMessage, startWorkShortHash } from "./start-work.js";
@@ -76,6 +81,27 @@ async function shouldSendPlanCompletion(
   return false;
 }
 
+async function fetchSessionStatusMap(
+  ctx: EventHandlerContext,
+): Promise<Record<string, OpenCodeStatusEntry> | undefined> {
+  try {
+    const result = await ctx.client.session.status();
+    return normalizeStatusMap(result.data);
+  } catch (err) {
+    ctx.logger.warn("session status map fetch failed", { error: String(err) });
+    return undefined;
+  }
+}
+
+function statusForHydratedSession(
+  sessionId: string,
+  ctx: EventHandlerContext,
+  statusMap: Record<string, OpenCodeStatusEntry> | undefined,
+): "busy" | "idle" | "retry" | undefined {
+  if (statusMap !== undefined) return statusMap[sessionId]?.type ?? "idle";
+  return ctx.sessionTitleService.getSessionStatus(sessionId);
+}
+
 async function resolveSessionAgent(
   sessionId: string,
   ctx: EventHandlerContext,
@@ -146,6 +172,7 @@ async function resolveParentID(
 async function hydrateDescendants(
   sessionId: string,
   ctx: EventHandlerContext,
+  statusMap: Record<string, OpenCodeStatusEntry> | undefined,
   seen = new Set<string>(),
 ): Promise<void> {
   if (seen.has(sessionId)) return;
@@ -155,14 +182,13 @@ async function hydrateDescendants(
     const result = await ctx.client.session.children({ path: { id: sessionId } });
     for (const child of result.data ?? []) {
       ctx.sessionTitleService.setSessionInfo(child);
+      const childStatus = statusForHydratedSession(child.id, ctx, statusMap);
+      if (childStatus !== undefined)
+        ctx.sessionTitleService.setSessionStatus(child.id, childStatus);
       await ctx.sessionRegistry.upsertSession(
-        registryEntryFromSession(
-          child,
-          ctx.serverUrl.href,
-          ctx.sessionTitleService.getSessionStatus(child.id),
-        ),
+        registryEntryFromSession(child, ctx.serverUrl.href, childStatus),
       );
-      await hydrateDescendants(child.id, ctx, seen);
+      await hydrateDescendants(child.id, ctx, statusMap, seen);
     }
   } catch (err) {
     ctx.logger.warn("session children fetch failed", { sessionId, error: String(err) });
@@ -237,15 +263,13 @@ async function flushDeferredParentIfReady(
 function scheduleDeferredParentConfirm(parentID: string, ctx: EventHandlerContext): void {
   if (deferredConfirmTimers.has(parentID)) return;
   const delay = ctx.deferredConfirmDelayMs ?? DEFERRED_PARENT_CONFIRM_DELAY_MS;
-  // A foreground parent emits busy/retry within this window and cancels the timer;
-  // a background parent stays idle, so the deferred completion is sent after the delay.
   const timer = setTimeout(() => {
     deferredConfirmTimers.delete(parentID);
     void confirmDeferredParentIdle(parentID, ctx);
   }, delay);
   timer.unref?.();
   deferredConfirmTimers.set(parentID, timer);
-  ctx.logger.info("parent idle and descendants finished - confirming deferred notification", {
+  ctx.logger.info("deferred parent idle confirmation scheduled", {
     sessionId: parentID,
   });
 }
@@ -262,11 +286,13 @@ async function confirmDeferredParentIdle(
     });
     return;
   }
-  await hydrateDescendants(parentID, ctx);
+  const statusMap = await fetchSessionStatusMap(ctx);
+  await hydrateDescendants(parentID, ctx, statusMap);
   if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) {
     ctx.logger.info("keeping deferred parent idle notification - descendants active again", {
       sessionId: parentID,
     });
+    scheduleDeferredParentConfirm(parentID, ctx);
     return;
   }
   ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
@@ -277,9 +303,11 @@ async function deferParentIdleIfDescendantsRunning(
   sessionId: string,
   ctx: EventHandlerContext,
 ): Promise<boolean> {
-  await hydrateDescendants(sessionId, ctx);
+  const statusMap = await fetchSessionStatusMap(ctx);
+  await hydrateDescendants(sessionId, ctx, statusMap);
   if (!ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) return false;
   ctx.sessionTitleService.deferIdleNotification(sessionId);
+  scheduleDeferredParentConfirm(sessionId, ctx);
   ctx.logger.info("deferring parent idle notification - child sessions still running", {
     sessionId,
   });

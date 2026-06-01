@@ -1704,6 +1704,19 @@ async function shouldSendPlanCompletion(sessionId, ctx) {
   ctx.logger.info("skipping plan completion notice - no start-work instruction", { sessionId });
   return false;
 }
+async function fetchSessionStatusMap(ctx) {
+  try {
+    const result = await ctx.client.session.status();
+    return normalizeStatusMap(result.data);
+  } catch (err) {
+    ctx.logger.warn("session status map fetch failed", { error: String(err) });
+    return void 0;
+  }
+}
+function statusForHydratedSession(sessionId, ctx, statusMap) {
+  if (statusMap !== void 0) return statusMap[sessionId]?.type ?? "idle";
+  return ctx.sessionTitleService.getSessionStatus(sessionId);
+}
 async function resolveSessionAgent(sessionId, ctx) {
   const candidates = [
     ctx.sessionTitleService.getSessionAgent(sessionId)
@@ -1758,21 +1771,20 @@ async function resolveParentID(sessionId, ctx) {
     return void 0;
   }
 }
-async function hydrateDescendants(sessionId, ctx, seen = /* @__PURE__ */ new Set()) {
+async function hydrateDescendants(sessionId, ctx, statusMap, seen = /* @__PURE__ */ new Set()) {
   if (seen.has(sessionId)) return;
   seen.add(sessionId);
   try {
     const result = await ctx.client.session.children({ path: { id: sessionId } });
     for (const child of result.data ?? []) {
       ctx.sessionTitleService.setSessionInfo(child);
+      const childStatus = statusForHydratedSession(child.id, ctx, statusMap);
+      if (childStatus !== void 0)
+        ctx.sessionTitleService.setSessionStatus(child.id, childStatus);
       await ctx.sessionRegistry.upsertSession(
-        registryEntryFromSession(
-          child,
-          ctx.serverUrl.href,
-          ctx.sessionTitleService.getSessionStatus(child.id)
-        )
+        registryEntryFromSession(child, ctx.serverUrl.href, childStatus)
       );
-      await hydrateDescendants(child.id, ctx, seen);
+      await hydrateDescendants(child.id, ctx, statusMap, seen);
     }
   } catch (err) {
     ctx.logger.warn("session children fetch failed", { sessionId, error: String(err) });
@@ -1844,7 +1856,7 @@ function scheduleDeferredParentConfirm(parentID, ctx) {
   }, delay);
   timer.unref?.();
   deferredConfirmTimers.set(parentID, timer);
-  ctx.logger.info("parent idle and descendants finished - confirming deferred notification", {
+  ctx.logger.info("deferred parent idle confirmation scheduled", {
     sessionId: parentID
   });
 }
@@ -1857,20 +1869,24 @@ async function confirmDeferredParentIdle(parentID, ctx) {
     });
     return;
   }
-  await hydrateDescendants(parentID, ctx);
+  const statusMap = await fetchSessionStatusMap(ctx);
+  await hydrateDescendants(parentID, ctx, statusMap);
   if (ctx.sessionTitleService.hasUnfinishedDescendants(parentID)) {
     ctx.logger.info("keeping deferred parent idle notification - descendants active again", {
       sessionId: parentID
     });
+    scheduleDeferredParentConfirm(parentID, ctx);
     return;
   }
   ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
   await sendIdleNotification(parentID, ctx);
 }
 async function deferParentIdleIfDescendantsRunning(sessionId, ctx) {
-  await hydrateDescendants(sessionId, ctx);
+  const statusMap = await fetchSessionStatusMap(ctx);
+  await hydrateDescendants(sessionId, ctx, statusMap);
   if (!ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) return false;
   ctx.sessionTitleService.deferIdleNotification(sessionId);
+  scheduleDeferredParentConfirm(sessionId, ctx);
   ctx.logger.info("deferring parent idle notification - child sessions still running", {
     sessionId
   });

@@ -13,6 +13,11 @@ dist/
 .env.local
 .env.*.local
 
+# npm (never commit registry auth tokens or pack tarballs)
+.npmrc
+**/.npmrc
+*.tgz
+
 # IDE
 .vscode/
 .idea/

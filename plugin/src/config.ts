@@ -2,10 +2,13 @@ import type { Logger } from "./lib/logger.js";
 
 export const SERVICE_NAME = "TelegramRemote";
 
+export const DEFAULT_IDLE_SETTLE_DELAY_MS = 12_000;
+
 export interface Config {
   botToken: string;
   allowedUserIds: number[];
   chatId?: number;
+  idleSettleDelayMs: number;
 }
 
 export interface LoadConfigOptions {
@@ -64,14 +67,28 @@ export function loadConfig(opts: LoadConfigOptions): Config {
     chatId = parsed;
   }
 
+  const idleSettleDelayMs = parseIdleSettleDelayMs(env.TELEGRAM_IDLE_SETTLE_DELAY_MS, logger);
+
   logger.info("config loaded", {
     allowedUserCount: allowedUserIds.length,
     hasChatId: chatId !== undefined,
+    idleSettleDelayMs,
   });
 
   return {
     botToken,
     allowedUserIds,
     chatId,
+    idleSettleDelayMs,
   };
+}
+
+function parseIdleSettleDelayMs(value: string | undefined, logger: Logger): number {
+  if (value === undefined || value.trim() === "") return DEFAULT_IDLE_SETTLE_DELAY_MS;
+  const parsed = parseInteger(value.trim());
+  if (parsed === undefined || parsed < 0) {
+    logger.error("invalid TELEGRAM_IDLE_SETTLE_DELAY_MS");
+    throw new Error("Invalid TELEGRAM_IDLE_SETTLE_DELAY_MS");
+  }
+  return parsed;
 }

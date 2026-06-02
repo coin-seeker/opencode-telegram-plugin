@@ -1,6 +1,6 @@
 # OpenCode Telegram Plugin
 
-Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin@1.1.9`, then configure your Telegram bot credentials in a private local env file.
+Control and monitor OpenCode from Telegram. Install it as the npm package `@coinseeker/opencode-telegram-plugin@1.2.0`, then configure your Telegram bot credentials in a private local env file.
 
 > **Disclaimer:** This project is not affiliated with, endorsed by, or sponsored by OpenCode, SST, or any of their affiliates. OpenCode is a trademark of SST.
 
@@ -35,7 +35,7 @@ https://raw.githubusercontent.com/coin-seeker/opencode-telegram-plugin/refs/head
 
 OpenCode resolves the npm package on startup automatically.
 
-Current stable version: `@coinseeker/opencode-telegram-plugin@1.1.9`.
+Current stable version: `@coinseeker/opencode-telegram-plugin@1.2.0`.
 
 For a step-by-step manual install guide and an AI-agent-friendly install prompt, see [`docs/installation.md`](docs/installation.md).
 
@@ -85,7 +85,7 @@ Open `~/.config/opencode/opencode.json` and add the pinned npm package name to t
 ```json
 {
   "plugin": [
-    "@coinseeker/opencode-telegram-plugin@1.1.9"
+    "@coinseeker/opencode-telegram-plugin@1.2.0"
   ]
 }
 ```
@@ -100,7 +100,7 @@ Replace the old pinned package entry in `~/.config/opencode/opencode.json` with 
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.9"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.2.0"]
 }
 ```
 
@@ -248,6 +248,7 @@ You can get your chat ID by messaging the bot once, or using [@userinfobot](http
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather | `123456:ABC-DEF...` |
 | `TELEGRAM_ALLOWED_USER_IDS` | Yes | Comma-separated numeric user IDs | `123456789,987654321` |
 | `TELEGRAM_CHAT_ID` | No | Pre-configured chat ID (skips discovery) | `123456789` |
+| `TELEGRAM_IDLE_SETTLE_DELAY_MS` | No | Quiet period (ms) the root session must stay continuously idle before a completion notification is sent. Suppresses false "Agent has finished" pings when a harness (e.g. oh-my-opencode) re-triggers the session after background subagents, todo-continuation, or context compaction. Set to `0` to disable. Default `12000`. | `12000` |
 
 ### OpenCode Plugin Configuration
 
@@ -255,7 +256,7 @@ The correct schema uses `"plugin"` (singular) with string entries:
 
 ```json
 {
-  "plugin": ["@coinseeker/opencode-telegram-plugin@1.1.9"]
+  "plugin": ["@coinseeker/opencode-telegram-plugin@1.2.0"]
 }
 ```
 

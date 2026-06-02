@@ -113,7 +113,7 @@ function createContext(
     bot,
     sessionTitleService: new SessionTitleService(),
     stateStore: {} as EventHandlerContext["stateStore"],
-    config: { botToken: "token", allowedUserIds: [1] },
+    config: { botToken: "token", allowedUserIds: [1], idleSettleDelayMs: 40 },
     logger: createLogger(),
     claimsDir: join(dir, `claims-${requestID}`),
     pluginDir: dir,

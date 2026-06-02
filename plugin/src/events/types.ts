@@ -29,8 +29,8 @@ export interface EventHandlerContext {
   pendingPermissions: PendingPermissionStore;
   pendingStartWorks: PendingStartWorkStore;
   sessionRegistry: SessionRegistryStore;
-  idleRecheckDelayMs?: number;
   deferredConfirmDelayMs?: number;
+  idleSettleDelayMs?: number;
   replyToQuestion(requestID: string, answers: QuestionAnswer[], serverUrl?: string): Promise<void>;
   replyToPermission(
     requestID: string,

@@ -269,6 +269,7 @@ This chat is now active for OpenCode notifications.`
 }
 
 // src/config.ts
+var DEFAULT_IDLE_SETTLE_DELAY_MS = 12e3;
 function parseInteger(value) {
   if (!/^-?\d+$/.test(value)) return void 0;
   const parsed = Number(value);
@@ -311,15 +312,27 @@ function loadConfig(opts) {
     }
     chatId = parsed;
   }
+  const idleSettleDelayMs2 = parseIdleSettleDelayMs(env.TELEGRAM_IDLE_SETTLE_DELAY_MS, logger);
   logger.info("config loaded", {
     allowedUserCount: allowedUserIds.length,
-    hasChatId: chatId !== void 0
+    hasChatId: chatId !== void 0,
+    idleSettleDelayMs: idleSettleDelayMs2
   });
   return {
     botToken,
     allowedUserIds,
-    chatId
+    chatId,
+    idleSettleDelayMs: idleSettleDelayMs2
   };
+}
+function parseIdleSettleDelayMs(value, logger) {
+  if (value === void 0 || value.trim() === "") return DEFAULT_IDLE_SETTLE_DELAY_MS;
+  const parsed = parseInteger(value.trim());
+  if (parsed === void 0 || parsed < 0) {
+    logger.error("invalid TELEGRAM_IDLE_SETTLE_DELAY_MS");
+    throw new Error("Invalid TELEGRAM_IDLE_SETTLE_DELAY_MS");
+  }
+  return parsed;
 }
 
 // src/lib/claim.ts
@@ -1653,14 +1666,11 @@ function createStartWorkDispatcher(ctx) {
 }
 
 // src/events/session-idle.ts
-var ROOT_IDLE_RECHECK_DELAY_MS = 2500;
 var DEFERRED_PARENT_CONFIRM_DELAY_MS = 2500;
 var PLAN_COMPLETION_MESSAGE_LIMIT = 5;
 var START_WORK_COMMAND_RE = /(?:^|[\s`"'(])\/?start[_-]work(?:$|[\s`"').,!?])/i;
 var deferredConfirmTimers = /* @__PURE__ */ new Map();
-function sleep(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
-}
+var idleSettleTimers = /* @__PURE__ */ new Map();
 function agentFinishedMessage(title, agent) {
   const base = title ? `Agent has finished: ${title}` : "Agent has finished.";
   return agent ? `${base} (${agent})` : base;
@@ -1713,9 +1723,14 @@ async function fetchSessionStatusMap(ctx) {
     return void 0;
   }
 }
+function reconcileStatus(live, cached) {
+  if (live === "busy" || live === "retry") return live;
+  if (cached === "busy" || cached === "retry") return cached;
+  return live ?? cached;
+}
 function statusForHydratedSession(sessionId, ctx, statusMap) {
-  if (statusMap !== void 0) return statusMap[sessionId]?.type ?? "idle";
-  return ctx.sessionTitleService.getSessionStatus(sessionId);
+  if (statusMap === void 0) return ctx.sessionTitleService.getSessionStatus(sessionId);
+  return statusMap[sessionId]?.type ?? "idle";
 }
 function refreshSessionStatus(sessionId, ctx, statusMap) {
   const status = statusForHydratedSession(sessionId, ctx, statusMap);
@@ -1723,7 +1738,10 @@ function refreshSessionStatus(sessionId, ctx, statusMap) {
   return status;
 }
 function refreshRootSessionStatus(sessionId, ctx, statusMap) {
-  const status = statusMap?.[sessionId]?.type ?? ctx.sessionTitleService.getSessionStatus(sessionId);
+  const status = reconcileStatus(
+    statusMap?.[sessionId]?.type,
+    ctx.sessionTitleService.getSessionStatus(sessionId)
+  );
   if (status !== void 0) ctx.sessionTitleService.setSessionStatus(sessionId, status);
   return status;
 }
@@ -1801,18 +1819,31 @@ async function hydrateDescendants(sessionId, ctx, statusMap, seen = /* @__PURE__
 async function sendIdleNotification(sessionId, ctx) {
   if (shouldSuppressIdle(sessionId)) {
     ctx.logger.info("idle suppressed - session was aborted", { sessionId });
-    return;
+    return false;
   }
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
   const agent = await resolveSessionAgent(sessionId, ctx);
   const isPlanSession = isPlanSessionAgent(agent);
-  if (isPlanSession && !await shouldSendPlanCompletion(sessionId, ctx)) return;
+  if (isPlanSession && !await shouldSendPlanCompletion(sessionId, ctx)) return false;
+  const preSendStatusMap = await fetchSessionStatusMap(ctx);
+  if (refreshRootSessionStatus(sessionId, ctx, preSendStatusMap) !== "idle") {
+    ctx.sessionTitleService.clearIdleSettle(sessionId);
+    ctx.logger.info("idle notification aborted - session resumed before send", { sessionId });
+    return false;
+  }
+  await hydrateDescendants(sessionId, ctx, preSendStatusMap);
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) {
+    ctx.sessionTitleService.clearIdleSettle(sessionId);
+    await deferParentIdleIfDescendantsRunning(sessionId, ctx, preSendStatusMap);
+    ctx.logger.info("idle notification aborted - descendant active before send", { sessionId });
+    return false;
+  }
   const claimed = await claimOnce({
     claimsDir: ctx.claimsDir,
     key: `session.idle:${sessionId}`,
     ttlMs: 5e3
   });
-  if (!claimed) return;
+  if (!claimed) return false;
   const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
     if (isPlanSession) {
@@ -1820,24 +1851,99 @@ async function sendIdleNotification(sessionId, ctx) {
       const pending = await ctx.pendingStartWorks.loadPending(shortHash);
       if (pending && pending.expiresAt >= Date.now()) {
         ctx.logger.info("plan completion notice already sent - skipping duplicate", { sessionId });
-        return;
+        return false;
       }
       if (pending) await ctx.pendingStartWorks.deletePending(shortHash);
       const message = await ctx.bot.sendMessage(text);
-      const sentAt = Date.now();
-      await ctx.pendingStartWorks.savePending(shortHash, {
-        ...createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id),
-        status: "consumed",
-        handledAt: sentAt
-      });
+      try {
+        await ctx.pendingStartWorks.savePending(shortHash, {
+          ...createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id),
+          status: "consumed",
+          handledAt: Date.now()
+        });
+      } catch (saveErr) {
+        ctx.logger.warn("plan completion bookkeeping failed after send", {
+          sessionId,
+          error: String(saveErr)
+        });
+      }
     } else {
       await ctx.bot.sendMessage(text);
     }
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
     ctx.logger.info("idle notification sent", { sessionId, title, agent, isPlanSession });
+    return true;
   } catch (err) {
     ctx.logger.error("failed to send idle notification", { error: String(err) });
+    return false;
   }
+}
+function idleSettleDelayMs(ctx) {
+  return ctx.idleSettleDelayMs ?? DEFAULT_IDLE_SETTLE_DELAY_MS;
+}
+function cancelSettledIdleNotification(sessionId) {
+  const timer = idleSettleTimers.get(sessionId);
+  if (timer === void 0) return;
+  clearTimeout(timer);
+  idleSettleTimers.delete(sessionId);
+}
+function armSettleTimer(sessionId, ctx, delayMs) {
+  const timer = setTimeout(() => {
+    idleSettleTimers.delete(sessionId);
+    void confirmSettledIdleNotification(sessionId, ctx);
+  }, delayMs);
+  timer.unref?.();
+  idleSettleTimers.set(sessionId, timer);
+  ctx.logger.info("idle settle window armed", { sessionId, delayMs });
+}
+function scheduleSettledIdleNotification(sessionId, ctx) {
+  ctx.sessionTitleService.beginIdleSettle(sessionId);
+  if (idleSettleTimers.has(sessionId)) return;
+  armSettleTimer(
+    sessionId,
+    ctx,
+    ctx.sessionTitleService.remainingIdleSettleMs(sessionId, idleSettleDelayMs(ctx))
+  );
+}
+async function confirmSettledIdleNotification(sessionId, ctx) {
+  const statusMap = await fetchSessionStatusMap(ctx);
+  if (refreshRootSessionStatus(sessionId, ctx, statusMap) !== "idle") {
+    ctx.sessionTitleService.clearIdleSettle(sessionId);
+    ctx.logger.info("idle settle aborted - session resumed", { sessionId });
+    return;
+  }
+  await hydrateDescendants(sessionId, ctx, statusMap);
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) {
+    ctx.sessionTitleService.clearIdleSettle(sessionId);
+    await deferParentIdleIfDescendantsRunning(sessionId, ctx, statusMap);
+    ctx.logger.info("idle settle deferred - descendants active again", { sessionId });
+    return;
+  }
+  ctx.sessionTitleService.beginIdleSettle(sessionId);
+  const remaining = ctx.sessionTitleService.remainingIdleSettleMs(
+    sessionId,
+    idleSettleDelayMs(ctx)
+  );
+  if (remaining > 0) {
+    armSettleTimer(sessionId, ctx, remaining);
+    return;
+  }
+  if (ctx.sessionTitleService.hasIdleNotificationSent(sessionId)) {
+    ctx.logger.info("idle settle skipped - already notified this idle epoch", { sessionId });
+    return;
+  }
+  if (await sendIdleNotification(sessionId, ctx)) {
+    ctx.sessionTitleService.markIdleNotificationSent(sessionId);
+  }
+}
+function downgradeRootSettleToDeferred(rootId, ctx) {
+  cancelSettledIdleNotification(rootId);
+  ctx.sessionTitleService.clearIdleSettle(rootId);
+  ctx.sessionTitleService.deferIdleNotification(rootId);
+  scheduleDeferredParentConfirm(rootId, ctx);
+  ctx.logger.info("root settle downgraded to deferred - descendant became active", {
+    sessionId: rootId
+  });
 }
 async function flushDeferredParentIfReady(parentID, ctx) {
   if (!ctx.sessionTitleService.hasDeferredIdleNotification(parentID)) return;
@@ -1886,8 +1992,8 @@ async function confirmDeferredParentIdle(parentID, ctx) {
     scheduleDeferredParentConfirm(parentID, ctx);
     return;
   }
-  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
-  await sendIdleNotification(parentID, ctx);
+  ctx.logger.info("deferred parent reached idle settle window", { sessionId: parentID });
+  scheduleSettledIdleNotification(parentID, ctx);
 }
 async function deferParentIdleIfDescendantsRunning(sessionId, ctx, statusMap) {
   const effectiveStatusMap = statusMap ?? await fetchSessionStatusMap(ctx);
@@ -1916,18 +2022,7 @@ async function handleSessionIdle(event, ctx) {
   if (await deferParentIdleIfDescendantsRunning(sessionId, ctx)) {
     return;
   }
-  await sleep(ctx.idleRecheckDelayMs ?? ROOT_IDLE_RECHECK_DELAY_MS);
-  const statusMap = await fetchSessionStatusMap(ctx);
-  if (refreshRootSessionStatus(sessionId, ctx, statusMap) !== "idle") {
-    ctx.logger.info("idle notification skipped - session resumed during recheck delay", {
-      sessionId
-    });
-    return;
-  }
-  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx, statusMap)) {
-    return;
-  }
-  await sendIdleNotification(sessionId, ctx);
+  scheduleSettledIdleNotification(sessionId, ctx);
 }
 async function handleSessionStatus(event, ctx) {
   const sessionId = event.properties.sessionID;
@@ -1939,6 +2034,14 @@ async function handleSessionStatus(event, ctx) {
     return;
   }
   if (previousStatus !== statusType) {
+    cancelSettledIdleNotification(sessionId);
+    const parentID = ctx.sessionTitleService.getParentID(sessionId);
+    if (typeof parentID === "string") {
+      const rootId = ctx.sessionTitleService.getRootAncestorId(sessionId);
+      if (rootId !== void 0 && ctx.sessionTitleService.getSessionStatus(rootId) === "idle" && idleSettleTimers.has(rootId)) {
+        downgradeRootSettleToDeferred(rootId, ctx);
+      }
+    }
     await ctx.sessionRegistry.updateSession(sessionId, {
       status: statusType,
       updatedAt: Date.now()
@@ -3215,6 +3318,8 @@ var SessionTitleService = class {
       agent: agentFromSession4(info) ?? existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      idleSettleStartedAt: existing?.idleSettleStartedAt,
+      idleNotificationSentAt: existing?.idleNotificationSentAt,
       lastSeenAt: Date.now(),
       serverUrl: existing?.serverUrl
     });
@@ -3227,6 +3332,8 @@ var SessionTitleService = class {
       agent: existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      idleSettleStartedAt: existing?.idleSettleStartedAt,
+      idleNotificationSentAt: existing?.idleNotificationSentAt,
       lastSeenAt: Date.now(),
       serverUrl: existing?.serverUrl
     });
@@ -3239,18 +3346,23 @@ var SessionTitleService = class {
       agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      idleSettleStartedAt: existing?.idleSettleStartedAt,
+      idleNotificationSentAt: existing?.idleNotificationSentAt,
       lastSeenAt: Date.now(),
       serverUrl: existing?.serverUrl
     });
   }
   setSessionStatus(sessionId, status) {
     const existing = this.sessions.get(sessionId);
+    const resumed = status !== "idle";
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
       parentID: existing?.parentID,
       agent: existing?.agent,
       status,
-      idleNotificationPending: status === "idle" ? existing?.idleNotificationPending ?? false : false,
+      idleNotificationPending: resumed ? false : existing?.idleNotificationPending ?? false,
+      idleSettleStartedAt: resumed ? void 0 : existing?.idleSettleStartedAt,
+      idleNotificationSentAt: resumed ? void 0 : existing?.idleNotificationSentAt,
       lastSeenAt: Date.now(),
       serverUrl: existing?.serverUrl
     });
@@ -3304,6 +3416,18 @@ var SessionTitleService = class {
   getSessionStatus(sessionId) {
     return this.sessions.get(sessionId)?.status;
   }
+  getRootAncestorId(sessionId) {
+    let current = sessionId;
+    const seen = /* @__PURE__ */ new Set();
+    while (!seen.has(current)) {
+      seen.add(current);
+      const parentID = this.sessions.get(current)?.parentID;
+      if (parentID === null) return current;
+      if (typeof parentID !== "string") return void 0;
+      current = parentID;
+    }
+    return void 0;
+  }
   hasUnfinishedDescendants(parentID) {
     for (const [sessionID, session] of this.sessions.entries()) {
       if (session.parentID !== parentID) continue;
@@ -3320,6 +3444,8 @@ var SessionTitleService = class {
       agent: existing?.agent,
       status: existing?.status ?? "idle",
       idleNotificationPending: true,
+      idleSettleStartedAt: existing?.idleSettleStartedAt,
+      idleNotificationSentAt: existing?.idleNotificationSentAt,
       lastSeenAt: existing?.lastSeenAt ?? Date.now(),
       serverUrl: existing?.serverUrl
     });
@@ -3334,6 +3460,40 @@ var SessionTitleService = class {
       ...existing,
       idleNotificationPending: false
     });
+  }
+  ensureEntry(sessionId) {
+    const existing = this.sessions.get(sessionId);
+    if (existing) return existing;
+    const created = {
+      title: null,
+      parentID: void 0,
+      idleNotificationPending: false,
+      lastSeenAt: Date.now()
+    };
+    this.sessions.set(sessionId, created);
+    return created;
+  }
+  beginIdleSettle(sessionId, now = Date.now()) {
+    const entry = this.ensureEntry(sessionId);
+    if (entry.idleSettleStartedAt === void 0) entry.idleSettleStartedAt = now;
+    return entry.idleSettleStartedAt;
+  }
+  remainingIdleSettleMs(sessionId, delayMs, now = Date.now()) {
+    const startedAt = this.sessions.get(sessionId)?.idleSettleStartedAt;
+    if (startedAt === void 0) return delayMs;
+    return Math.max(0, delayMs - (now - startedAt));
+  }
+  clearIdleSettle(sessionId) {
+    const existing = this.sessions.get(sessionId);
+    if (!existing) return;
+    existing.idleSettleStartedAt = void 0;
+    existing.idleNotificationSentAt = void 0;
+  }
+  markIdleNotificationSent(sessionId, now = Date.now()) {
+    this.ensureEntry(sessionId).idleNotificationSentAt = now;
+  }
+  hasIdleNotificationSent(sessionId) {
+    return this.sessions.get(sessionId)?.idleNotificationSentAt !== void 0;
   }
 };
 
@@ -3536,6 +3696,7 @@ var TelegramRemote = async (input) => {
       sessionTitleService,
       stateStore,
       config,
+      idleSettleDelayMs: config.idleSettleDelayMs,
       logger,
       claimsDir,
       pluginDir,

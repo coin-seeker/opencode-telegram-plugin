@@ -9,6 +9,8 @@ interface SessionInfoCacheEntry {
   agent?: string;
   status?: SessionStatusType;
   idleNotificationPending: boolean;
+  idleSettleStartedAt?: number;
+  idleNotificationSentAt?: number;
   lastSeenAt: number;
   serverUrl?: string;
 }
@@ -29,6 +31,8 @@ export class SessionTitleService {
       agent: agentFromSession(info) ?? existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      idleSettleStartedAt: existing?.idleSettleStartedAt,
+      idleNotificationSentAt: existing?.idleNotificationSentAt,
       lastSeenAt: Date.now(),
       serverUrl: existing?.serverUrl,
     });
@@ -42,6 +46,8 @@ export class SessionTitleService {
       agent: existing?.agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      idleSettleStartedAt: existing?.idleSettleStartedAt,
+      idleNotificationSentAt: existing?.idleNotificationSentAt,
       lastSeenAt: Date.now(),
       serverUrl: existing?.serverUrl,
     });
@@ -55,6 +61,8 @@ export class SessionTitleService {
       agent,
       status: existing?.status,
       idleNotificationPending: existing?.idleNotificationPending ?? false,
+      idleSettleStartedAt: existing?.idleSettleStartedAt,
+      idleNotificationSentAt: existing?.idleNotificationSentAt,
       lastSeenAt: Date.now(),
       serverUrl: existing?.serverUrl,
     });
@@ -62,13 +70,16 @@ export class SessionTitleService {
 
   setSessionStatus(sessionId: string, status: SessionStatusType): void {
     const existing = this.sessions.get(sessionId);
+    // Resume (busy/retry) restarts the settle window so a fresh one must elapse before notifying.
+    const resumed = status !== "idle";
     this.sessions.set(sessionId, {
       title: existing?.title ?? null,
       parentID: existing?.parentID,
       agent: existing?.agent,
       status,
-      idleNotificationPending:
-        status === "idle" ? (existing?.idleNotificationPending ?? false) : false,
+      idleNotificationPending: resumed ? false : (existing?.idleNotificationPending ?? false),
+      idleSettleStartedAt: resumed ? undefined : existing?.idleSettleStartedAt,
+      idleNotificationSentAt: resumed ? undefined : existing?.idleNotificationSentAt,
       lastSeenAt: Date.now(),
       serverUrl: existing?.serverUrl,
     });
@@ -146,6 +157,19 @@ export class SessionTitleService {
     return this.sessions.get(sessionId)?.status;
   }
 
+  getRootAncestorId(sessionId: string): string | undefined {
+    let current = sessionId;
+    const seen = new Set<string>();
+    while (!seen.has(current)) {
+      seen.add(current);
+      const parentID = this.sessions.get(current)?.parentID;
+      if (parentID === null) return current;
+      if (typeof parentID !== "string") return undefined;
+      current = parentID;
+    }
+    return undefined;
+  }
+
   hasUnfinishedDescendants(parentID: string): boolean {
     for (const [sessionID, session] of this.sessions.entries()) {
       if (session.parentID !== parentID) continue;
@@ -163,6 +187,8 @@ export class SessionTitleService {
       agent: existing?.agent,
       status: existing?.status ?? "idle",
       idleNotificationPending: true,
+      idleSettleStartedAt: existing?.idleSettleStartedAt,
+      idleNotificationSentAt: existing?.idleNotificationSentAt,
       lastSeenAt: existing?.lastSeenAt ?? Date.now(),
       serverUrl: existing?.serverUrl,
     });
@@ -179,5 +205,45 @@ export class SessionTitleService {
       ...existing,
       idleNotificationPending: false,
     });
+  }
+
+  private ensureEntry(sessionId: string): SessionInfoCacheEntry {
+    const existing = this.sessions.get(sessionId);
+    if (existing) return existing;
+    const created: SessionInfoCacheEntry = {
+      title: null,
+      parentID: undefined,
+      idleNotificationPending: false,
+      lastSeenAt: Date.now(),
+    };
+    this.sessions.set(sessionId, created);
+    return created;
+  }
+
+  beginIdleSettle(sessionId: string, now: number = Date.now()): number {
+    const entry = this.ensureEntry(sessionId);
+    if (entry.idleSettleStartedAt === undefined) entry.idleSettleStartedAt = now;
+    return entry.idleSettleStartedAt;
+  }
+
+  remainingIdleSettleMs(sessionId: string, delayMs: number, now: number = Date.now()): number {
+    const startedAt = this.sessions.get(sessionId)?.idleSettleStartedAt;
+    if (startedAt === undefined) return delayMs;
+    return Math.max(0, delayMs - (now - startedAt));
+  }
+
+  clearIdleSettle(sessionId: string): void {
+    const existing = this.sessions.get(sessionId);
+    if (!existing) return;
+    existing.idleSettleStartedAt = undefined;
+    existing.idleNotificationSentAt = undefined;
+  }
+
+  markIdleNotificationSent(sessionId: string, now: number = Date.now()): void {
+    this.ensureEntry(sessionId).idleNotificationSentAt = now;
+  }
+
+  hasIdleNotificationSent(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.idleNotificationSentAt !== undefined;
   }
 }

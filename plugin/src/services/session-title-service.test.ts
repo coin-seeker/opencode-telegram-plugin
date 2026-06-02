@@ -177,3 +177,104 @@ describe("SessionTitleService", () => {
     assert.equal(service.hasDeferredIdleNotification("parent"), false);
   });
 });
+
+describe("SessionTitleService idle settle window", () => {
+  test("beginIdleSettle records the start time and is idempotent", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+
+    assert.equal(service.beginIdleSettle("root", 1000), 1000);
+    assert.equal(service.beginIdleSettle("root", 5000), 1000);
+  });
+
+  test("remainingIdleSettleMs counts down from the settle start", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+    service.beginIdleSettle("root", 1000);
+
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 1000), 12000);
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 7000), 6000);
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 13000), 0);
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 99999), 0);
+  });
+
+  test("remainingIdleSettleMs returns the full delay when settle not started", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 1000), 12000);
+  });
+
+  test("clearIdleSettle resets the settle start and the sent flag", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+    service.beginIdleSettle("root", 1000);
+    service.markIdleNotificationSent("root", 1000);
+
+    assert.equal(service.hasIdleNotificationSent("root"), true);
+
+    service.clearIdleSettle("root");
+
+    assert.equal(service.hasIdleNotificationSent("root"), false);
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 1000), 12000);
+  });
+
+  test("markIdleNotificationSent toggles hasIdleNotificationSent", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+
+    assert.equal(service.hasIdleNotificationSent("root"), false);
+
+    service.markIdleNotificationSent("root", 1000);
+
+    assert.equal(service.hasIdleNotificationSent("root"), true);
+  });
+
+  test("setSessionStatus non-idle clears settle start and sent flag", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+    service.beginIdleSettle("root", 1000);
+    service.markIdleNotificationSent("root", 1000);
+
+    service.setSessionStatus("root", "busy");
+
+    assert.equal(service.hasIdleNotificationSent("root"), false);
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 1000), 12000);
+  });
+
+  test("setSessionStatus retry clears settle start and sent flag", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+    service.beginIdleSettle("root", 1000);
+    service.markIdleNotificationSent("root", 1000);
+
+    service.setSessionStatus("root", "retry");
+
+    assert.equal(service.hasIdleNotificationSent("root"), false);
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 1000), 12000);
+  });
+
+  test("setSessionStatus idle preserves settle start and sent flag", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+    service.beginIdleSettle("root", 1000);
+    service.markIdleNotificationSent("root", 1000);
+
+    service.setSessionStatus("root", "idle");
+
+    assert.equal(service.hasIdleNotificationSent("root"), true);
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 7000), 6000);
+  });
+
+  test("setSessionInfo preserves settle start and sent flag", () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("root", "Root"));
+    service.beginIdleSettle("root", 1000);
+    service.markIdleNotificationSent("root", 1000);
+
+    service.setSessionInfo(createSession("root", "Root renamed"));
+
+    assert.equal(service.hasIdleNotificationSent("root"), true);
+    assert.equal(service.remainingIdleSettleMs("root", 12000, 7000), 6000);
+  });
+});

@@ -1,4 +1,5 @@
 import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
+import { DEFAULT_IDLE_SETTLE_DELAY_MS } from "../config.js";
 import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import { claimOnce } from "../lib/claim.js";
 import {
@@ -12,16 +13,12 @@ import { registryEntryFromSession } from "../lib/session-registry.js";
 import { createPendingStartWork, planCompleteMessage, startWorkShortHash } from "./start-work.js";
 import type { EventHandlerContext } from "./types.js";
 
-const ROOT_IDLE_RECHECK_DELAY_MS = 2_500;
 const DEFERRED_PARENT_CONFIRM_DELAY_MS = 2_500;
 const PLAN_COMPLETION_MESSAGE_LIMIT = 5;
 const START_WORK_COMMAND_RE = /(?:^|[\s`"'(])\/?start[_-]work(?:$|[\s`"').,!?])/i;
 
 const deferredConfirmTimers = new Map<string, NodeJS.Timeout>();
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const idleSettleTimers = new Map<string, NodeJS.Timeout>();
 
 export function agentFinishedMessage(title: string | null, agent: string | undefined): string {
   const base = title ? `Agent has finished: ${title}` : "Agent has finished.";
@@ -93,20 +90,36 @@ async function fetchSessionStatusMap(
   }
 }
 
+type SessionStatusValue = "busy" | "idle" | "retry";
+
+// Prefer a non-idle signal from either source so a stale or missing live "idle" never erases a
+// locally observed busy/retry that already invalidated the current settle epoch.
+function reconcileStatus(
+  live: SessionStatusValue | undefined,
+  cached: SessionStatusValue | undefined,
+): SessionStatusValue | undefined {
+  if (live === "busy" || live === "retry") return live;
+  if (cached === "busy" || cached === "retry") return cached;
+  return live ?? cached;
+}
+
 function statusForHydratedSession(
   sessionId: string,
   ctx: EventHandlerContext,
   statusMap: Record<string, OpenCodeStatusEntry> | undefined,
-): "busy" | "idle" | "retry" | undefined {
-  if (statusMap !== undefined) return statusMap[sessionId]?.type ?? "idle";
-  return ctx.sessionTitleService.getSessionStatus(sessionId);
+): SessionStatusValue | undefined {
+  if (statusMap === undefined) return ctx.sessionTitleService.getSessionStatus(sessionId);
+  // Descendants: the live status map is authoritative. A finished child legitimately drops off the
+  // map, so a missing entry means idle (matching OpenCode's status endpoint). Falling back to a
+  // cached busy here would defer the parent forever when no child idle event arrives.
+  return statusMap[sessionId]?.type ?? "idle";
 }
 
 function refreshSessionStatus(
   sessionId: string,
   ctx: EventHandlerContext,
   statusMap: Record<string, OpenCodeStatusEntry> | undefined,
-): "busy" | "idle" | "retry" | undefined {
+): SessionStatusValue | undefined {
   const status = statusForHydratedSession(sessionId, ctx, statusMap);
   if (status !== undefined) ctx.sessionTitleService.setSessionStatus(sessionId, status);
   return status;
@@ -116,9 +129,11 @@ function refreshRootSessionStatus(
   sessionId: string,
   ctx: EventHandlerContext,
   statusMap: Record<string, OpenCodeStatusEntry> | undefined,
-): "busy" | "idle" | "retry" | undefined {
-  const status =
-    statusMap?.[sessionId]?.type ?? ctx.sessionTitleService.getSessionStatus(sessionId);
+): SessionStatusValue | undefined {
+  const status = reconcileStatus(
+    statusMap?.[sessionId]?.type,
+    ctx.sessionTitleService.getSessionStatus(sessionId),
+  );
   if (status !== undefined) ctx.sessionTitleService.setSessionStatus(sessionId, status);
   return status;
 }
@@ -214,23 +229,41 @@ async function hydrateDescendants(
   }
 }
 
-async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext): Promise<void> {
+async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext): Promise<boolean> {
   if (shouldSuppressIdle(sessionId)) {
     ctx.logger.info("idle suppressed - session was aborted", { sessionId });
-    return;
+    return false;
   }
 
   const title = ctx.sessionTitleService.getSessionTitle(sessionId);
   const agent = await resolveSessionAgent(sessionId, ctx);
   const isPlanSession = isPlanSessionAgent(agent);
-  if (isPlanSession && !(await shouldSendPlanCompletion(sessionId, ctx))) return;
+  if (isPlanSession && !(await shouldSendPlanCompletion(sessionId, ctx))) return false;
+
+  // resolveSessionAgent / shouldSendPlanCompletion above issue async API calls during which the
+  // session can resume OR spawn a new descendant; re-verify FULL eligibility (root idle AND no
+  // unfinished descendants) before claiming/sending, since the downgrade hook cannot fire once the
+  // settle timer has already been consumed.
+  const preSendStatusMap = await fetchSessionStatusMap(ctx);
+  if (refreshRootSessionStatus(sessionId, ctx, preSendStatusMap) !== "idle") {
+    ctx.sessionTitleService.clearIdleSettle(sessionId);
+    ctx.logger.info("idle notification aborted - session resumed before send", { sessionId });
+    return false;
+  }
+  await hydrateDescendants(sessionId, ctx, preSendStatusMap);
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) {
+    ctx.sessionTitleService.clearIdleSettle(sessionId);
+    await deferParentIdleIfDescendantsRunning(sessionId, ctx, preSendStatusMap);
+    ctx.logger.info("idle notification aborted - descendant active before send", { sessionId });
+    return false;
+  }
 
   const claimed = await claimOnce({
     claimsDir: ctx.claimsDir,
     key: `session.idle:${sessionId}`,
     ttlMs: 5000,
   });
-  if (!claimed) return;
+  if (!claimed) return false;
 
   const text = isPlanSession ? planCompleteMessage(title) : agentFinishedMessage(title, agent);
   try {
@@ -239,24 +272,114 @@ async function sendIdleNotification(sessionId: string, ctx: EventHandlerContext)
       const pending = await ctx.pendingStartWorks.loadPending(shortHash);
       if (pending && pending.expiresAt >= Date.now()) {
         ctx.logger.info("plan completion notice already sent - skipping duplicate", { sessionId });
-        return;
+        return false;
       }
       if (pending) await ctx.pendingStartWorks.deletePending(shortHash);
       const message = await ctx.bot.sendMessage(text);
-      const sentAt = Date.now();
-      await ctx.pendingStartWorks.savePending(shortHash, {
-        ...createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id),
-        status: "consumed",
-        handledAt: sentAt,
-      });
+      // The Telegram send already happened; a bookkeeping failure here must NOT make the caller
+      // treat the notification as unsent (which would risk a duplicate on a later idle epoch).
+      try {
+        await ctx.pendingStartWorks.savePending(shortHash, {
+          ...createPendingStartWork(sessionId, title, ctx.serverUrl.href, message.message_id),
+          status: "consumed",
+          handledAt: Date.now(),
+        });
+      } catch (saveErr) {
+        ctx.logger.warn("plan completion bookkeeping failed after send", {
+          sessionId,
+          error: String(saveErr),
+        });
+      }
     } else {
       await ctx.bot.sendMessage(text);
     }
     ctx.sessionTitleService.clearDeferredIdleNotification(sessionId);
     ctx.logger.info("idle notification sent", { sessionId, title, agent, isPlanSession });
+    return true;
   } catch (err) {
     ctx.logger.error("failed to send idle notification", { error: String(err) });
+    return false;
   }
+}
+
+function idleSettleDelayMs(ctx: EventHandlerContext): number {
+  return ctx.idleSettleDelayMs ?? DEFAULT_IDLE_SETTLE_DELAY_MS;
+}
+
+export function cancelSettledIdleNotification(sessionId: string): void {
+  const timer = idleSettleTimers.get(sessionId);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  idleSettleTimers.delete(sessionId);
+}
+
+function armSettleTimer(sessionId: string, ctx: EventHandlerContext, delayMs: number): void {
+  const timer = setTimeout(() => {
+    idleSettleTimers.delete(sessionId);
+    void confirmSettledIdleNotification(sessionId, ctx);
+  }, delayMs);
+  timer.unref?.();
+  idleSettleTimers.set(sessionId, timer);
+  ctx.logger.info("idle settle window armed", { sessionId, delayMs });
+}
+
+function scheduleSettledIdleNotification(sessionId: string, ctx: EventHandlerContext): void {
+  ctx.sessionTitleService.beginIdleSettle(sessionId);
+  if (idleSettleTimers.has(sessionId)) return;
+  armSettleTimer(
+    sessionId,
+    ctx,
+    ctx.sessionTitleService.remainingIdleSettleMs(sessionId, idleSettleDelayMs(ctx)),
+  );
+}
+
+async function confirmSettledIdleNotification(
+  sessionId: string,
+  ctx: EventHandlerContext,
+): Promise<void> {
+  const statusMap = await fetchSessionStatusMap(ctx);
+  if (refreshRootSessionStatus(sessionId, ctx, statusMap) !== "idle") {
+    ctx.sessionTitleService.clearIdleSettle(sessionId);
+    ctx.logger.info("idle settle aborted - session resumed", { sessionId });
+    return;
+  }
+
+  await hydrateDescendants(sessionId, ctx, statusMap);
+  if (ctx.sessionTitleService.hasUnfinishedDescendants(sessionId)) {
+    ctx.sessionTitleService.clearIdleSettle(sessionId);
+    await deferParentIdleIfDescendantsRunning(sessionId, ctx, statusMap);
+    ctx.logger.info("idle settle deferred - descendants active again", { sessionId });
+    return;
+  }
+
+  ctx.sessionTitleService.beginIdleSettle(sessionId);
+  const remaining = ctx.sessionTitleService.remainingIdleSettleMs(
+    sessionId,
+    idleSettleDelayMs(ctx),
+  );
+  if (remaining > 0) {
+    armSettleTimer(sessionId, ctx, remaining);
+    return;
+  }
+
+  if (ctx.sessionTitleService.hasIdleNotificationSent(sessionId)) {
+    ctx.logger.info("idle settle skipped - already notified this idle epoch", { sessionId });
+    return;
+  }
+
+  if (await sendIdleNotification(sessionId, ctx)) {
+    ctx.sessionTitleService.markIdleNotificationSent(sessionId);
+  }
+}
+
+function downgradeRootSettleToDeferred(rootId: string, ctx: EventHandlerContext): void {
+  cancelSettledIdleNotification(rootId);
+  ctx.sessionTitleService.clearIdleSettle(rootId);
+  ctx.sessionTitleService.deferIdleNotification(rootId);
+  scheduleDeferredParentConfirm(rootId, ctx);
+  ctx.logger.info("root settle downgraded to deferred - descendant became active", {
+    sessionId: rootId,
+  });
 }
 
 async function flushDeferredParentIfReady(
@@ -314,8 +437,8 @@ async function confirmDeferredParentIdle(
     scheduleDeferredParentConfirm(parentID, ctx);
     return;
   }
-  ctx.logger.info("sending deferred parent idle notification", { sessionId: parentID });
-  await sendIdleNotification(parentID, ctx);
+  ctx.logger.info("deferred parent reached idle settle window", { sessionId: parentID });
+  scheduleSettledIdleNotification(parentID, ctx);
 }
 
 async function deferParentIdleIfDescendantsRunning(
@@ -355,21 +478,7 @@ export async function handleSessionIdle(
     return;
   }
 
-  await sleep(ctx.idleRecheckDelayMs ?? ROOT_IDLE_RECHECK_DELAY_MS);
-
-  const statusMap = await fetchSessionStatusMap(ctx);
-  if (refreshRootSessionStatus(sessionId, ctx, statusMap) !== "idle") {
-    ctx.logger.info("idle notification skipped - session resumed during recheck delay", {
-      sessionId,
-    });
-    return;
-  }
-
-  if (await deferParentIdleIfDescendantsRunning(sessionId, ctx, statusMap)) {
-    return;
-  }
-
-  await sendIdleNotification(sessionId, ctx);
+  scheduleSettledIdleNotification(sessionId, ctx);
 }
 
 export async function handleSessionStatus(
@@ -388,9 +497,28 @@ export async function handleSessionStatus(
   // works, and awaiting a registry write per event backs up OpenCode's awaited event
   // delivery and freezes the TUI. Do not persist every busy event.
   if (previousStatus !== statusType) {
+    cancelSettledIdleNotification(sessionId);
+    const parentID = ctx.sessionTitleService.getParentID(sessionId);
+    if (typeof parentID === "string") {
+      const rootId = ctx.sessionTitleService.getRootAncestorId(sessionId);
+      if (
+        rootId !== undefined &&
+        ctx.sessionTitleService.getSessionStatus(rootId) === "idle" &&
+        idleSettleTimers.has(rootId)
+      ) {
+        downgradeRootSettleToDeferred(rootId, ctx);
+      }
+    }
     await ctx.sessionRegistry.updateSession(sessionId, {
       status: statusType,
       updatedAt: Date.now(),
     });
   }
+}
+
+export function resetSessionIdleTimersForTest(): void {
+  for (const timer of idleSettleTimers.values()) clearTimeout(timer);
+  idleSettleTimers.clear();
+  for (const timer of deferredConfirmTimers.values()) clearTimeout(timer);
+  deferredConfirmTimers.clear();
 }

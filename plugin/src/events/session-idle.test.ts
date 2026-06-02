@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, test } from "node:test";
 import type { EventSessionIdle, Session } from "@opencode-ai/sdk";
 import type { TelegramBotManager } from "../bot.js";
 import { createPendingPermissionStore, type PermissionReply } from "../lib/pending-permissions.js";
@@ -17,7 +17,9 @@ import { SessionTitleService } from "../services/session-title-service.js";
 import {
   agentFinishedMessage,
   handleSessionIdle,
+  handleSessionStatus,
   hasStartWorkCommandInstruction,
+  resetSessionIdleTimersForTest,
 } from "./session-idle.js";
 import type { EventHandlerContext } from "./types.js";
 
@@ -27,6 +29,10 @@ type TestMessageEnvelope = {
 };
 
 type TestStatusEntry = { type: "busy" | "idle" | "retry" };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function createLogger() {
   return {
@@ -136,7 +142,7 @@ function createContext(
     bot,
     sessionTitleService: service,
     stateStore: {} as EventHandlerContext["stateStore"],
-    config: { botToken: "token", allowedUserIds: [1] },
+    config: { botToken: "token", allowedUserIds: [1], idleSettleDelayMs: 40 },
     logger: createLogger(),
     claimsDir: join(dir, "claims"),
     pluginDir: dir,
@@ -156,7 +162,8 @@ function createContext(
       baseDir: join(dir, "start-work"),
     }),
     sessionRegistry: createSessionRegistry(),
-    idleRecheckDelayMs: 20,
+    deferredConfirmDelayMs: 20,
+    idleSettleDelayMs: 40,
     async replyToQuestion(_requestID: string, _answers: QuestionAnswer[]) {},
     async replyToPermission(_requestID: string, _sessionID: string, _reply: PermissionReply) {},
     async runSessionCommand() {},
@@ -174,34 +181,66 @@ describe("session idle notifications", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  test("waits for checker child sessions created during root idle recheck", async () => {
-    const service = new SessionTitleService();
-    service.setSessionInfo(createSession("parent", "Plan builder"));
-    const { bot, sentMessages, sentOptions } = createBot();
-    const ctx = createContext(bot, join(dir, "race"), service);
-
-    const parentIdle = handleSessionIdle(idleEvent("parent"), ctx);
-    await new Promise((resolve) => setTimeout(resolve, 1));
-    service.setSessionInfo(createSession("momus", "Momus accuracy check", "parent"));
-    await parentIdle;
-
-    assert.deepEqual(sentMessages, []);
-    assert.equal(service.hasDeferredIdleNotification("parent"), true);
-
-    await handleSessionIdle(idleEvent("momus"), ctx);
-
-    assert.deepEqual(sentMessages, []);
-    assert.equal(sentOptions[0], undefined);
-    assert.equal(service.hasDeferredIdleNotification("parent"), true);
-
-    service.setSessionStatus("parent", "busy");
-    await handleSessionIdle(idleEvent("parent"), ctx);
-
-    assert.deepEqual(sentMessages, ["Agent has finished: Plan builder"]);
-    assert.equal(service.hasDeferredIdleNotification("parent"), false);
+  afterEach(() => {
+    resetSessionIdleTimersForTest();
   });
 
-  test("sends deferred parent notification after a background child finishes while parent stays idle", async () => {
+  test("suppresses child session idle and resolves parentID without notifying", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("parent-fetch", "Parent"));
+    const { bot, sentMessages } = createBot();
+    const child = createSession("child-fetch", "Child", "parent-fetch");
+    const ctx = createContext(
+      bot,
+      join(dir, "first-seen-child"),
+      service,
+      {},
+      { "child-fetch": child },
+    );
+
+    await handleSessionIdle(idleEvent("child-fetch"), ctx);
+    await sleep(80);
+
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.getParentID("child-fetch"), "parent-fetch");
+  });
+
+  test("S1: suppresses the OMO continuation race (child idle then parent re-triggered within settle window)", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("race-parent", "Race parent"));
+    service.setSessionInfo(createSession("race-child", "Subagent", "race-parent"));
+    service.setSessionStatus("race-child", "busy");
+    const { bot, sentMessages } = createBot();
+    const statuses: Record<string, TestStatusEntry> = { "race-child": { type: "busy" } };
+    const ctx = createContext(
+      bot,
+      join(dir, "omo-race"),
+      service,
+      { "race-parent": [createSession("race-child", "Subagent", "race-parent")] },
+      {},
+      {},
+      statuses,
+    );
+    ctx.deferredConfirmDelayMs = 20;
+    ctx.idleSettleDelayMs = 120;
+
+    await handleSessionIdle(idleEvent("race-parent"), ctx);
+    assert.deepEqual(sentMessages, []);
+
+    service.setSessionStatus("race-child", "idle");
+    statuses["race-child"] = { type: "idle" };
+    await handleSessionIdle(idleEvent("race-child"), ctx);
+
+    await sleep(50);
+    statuses["race-parent"] = { type: "busy" };
+    service.setSessionStatus("race-parent", "busy");
+
+    await sleep(160);
+
+    assert.deepEqual(sentMessages, []);
+  });
+
+  test("S2: sends the deferred parent notification only after sustained quiet", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("bg-parent", "Background task"));
     service.setSessionInfo(createSession("bg-child", "Subagent", "bg-parent"));
@@ -212,14 +251,13 @@ describe("session idle notifications", () => {
       bot,
       join(dir, "bg-defer"),
       service,
-      {
-        "bg-parent": [createSession("bg-child", "Subagent", "bg-parent")],
-      },
+      { "bg-parent": [createSession("bg-child", "Subagent", "bg-parent")] },
       {},
       {},
       statuses,
     );
     ctx.deferredConfirmDelayMs = 20;
+    ctx.idleSettleDelayMs = 60;
 
     await handleSessionIdle(idleEvent("bg-parent"), ctx);
     assert.deepEqual(sentMessages, []);
@@ -228,36 +266,405 @@ describe("session idle notifications", () => {
     service.setSessionStatus("bg-child", "idle");
     statuses["bg-child"] = { type: "idle" };
     await handleSessionIdle(idleEvent("bg-child"), ctx);
+
+    await sleep(40);
     assert.deepEqual(sentMessages, []);
 
-    await new Promise((resolve) => setTimeout(resolve, 80));
-
+    await sleep(110);
     assert.deepEqual(sentMessages, ["Agent has finished: Background task"]);
     assert.equal(service.hasDeferredIdleNotification("bg-parent"), false);
   });
 
-  test("suppresses first-seen child idle by fetching parentID before status cache writes", async () => {
+  test("S3: starts the settle window at the descendants-quiet boundary, not the original root idle", async () => {
     const service = new SessionTitleService();
-    service.setSessionInfo(createSession("parent-fetch", "Parent"));
+    service.setSessionInfo(createSession("boundary-parent", "Boundary parent"));
+    service.setSessionInfo(createSession("boundary-child", "Subagent", "boundary-parent"));
+    service.setSessionStatus("boundary-child", "busy");
     const { bot, sentMessages } = createBot();
-    const child = createSession("child-fetch", "Child", "parent-fetch");
+    const statuses: Record<string, TestStatusEntry> = { "boundary-child": { type: "busy" } };
     const ctx = createContext(
       bot,
-      join(dir, "first-seen-child"),
+      join(dir, "boundary"),
       service,
+      { "boundary-parent": [createSession("boundary-child", "Subagent", "boundary-parent")] },
       {},
-      {
-        "child-fetch": child,
-      },
+      {},
+      statuses,
     );
+    ctx.deferredConfirmDelayMs = 20;
+    ctx.idleSettleDelayMs = 80;
 
-    await handleSessionIdle(idleEvent("child-fetch"), ctx);
-
+    await handleSessionIdle(idleEvent("boundary-parent"), ctx);
+    await sleep(150);
     assert.deepEqual(sentMessages, []);
-    assert.equal(service.getParentID("child-fetch"), "parent-fetch");
+
+    service.setSessionStatus("boundary-child", "idle");
+    statuses["boundary-child"] = { type: "idle" };
+    await handleSessionIdle(idleEvent("boundary-child"), ctx);
+
+    await sleep(40);
+    assert.deepEqual(sentMessages, []);
+
+    await sleep(120);
+    assert.deepEqual(sentMessages, ["Agent has finished: Boundary parent"]);
   });
 
-  test("hydrates active checker children before sending root idle notification", async () => {
+  test("S4: delays a quick root task by the settle window then delivers it", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("solo", "Quick task"));
+    service.setSessionAgent("solo", "build");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "quick"), service);
+    ctx.idleSettleDelayMs = 60;
+
+    await handleSessionIdle(idleEvent("solo"), ctx);
+    await sleep(30);
+    assert.deepEqual(sentMessages, []);
+
+    await sleep(80);
+    assert.deepEqual(sentMessages, ["Agent has finished: Quick task (build)"]);
+  });
+
+  test("S5: a root resume during the settle window restarts the window", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("reset-root", "Resettable"));
+    service.setSessionAgent("reset-root", "build");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "reset-window"), service);
+    ctx.idleSettleDelayMs = 80;
+
+    await handleSessionIdle(idleEvent("reset-root"), ctx);
+    await sleep(30);
+    service.setSessionStatus("reset-root", "busy");
+    await sleep(5);
+    await handleSessionIdle(idleEvent("reset-root"), ctx);
+
+    await sleep(60);
+    assert.deepEqual(sentMessages, []);
+
+    await sleep(70);
+    assert.deepEqual(sentMessages, ["Agent has finished: Resettable (build)"]);
+    assert.equal(sentMessages.length, 1);
+  });
+
+  test("S6: child activity during the parent settle window re-defers until it finishes", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("late-parent", "Late parent"));
+    const { bot, sentMessages } = createBot();
+    const statuses: Record<string, TestStatusEntry> = {};
+    const childrenBySession: Record<string, Session[]> = {};
+    const ctx = createContext(
+      bot,
+      join(dir, "late-child"),
+      service,
+      childrenBySession,
+      {},
+      {},
+      statuses,
+    );
+    ctx.deferredConfirmDelayMs = 20;
+    ctx.idleSettleDelayMs = 60;
+
+    await handleSessionIdle(idleEvent("late-parent"), ctx);
+    await sleep(20);
+
+    service.setSessionInfo(createSession("late-child", "Subagent", "late-parent"));
+    service.setSessionStatus("late-child", "busy");
+    statuses["late-child"] = { type: "busy" };
+    childrenBySession["late-parent"] = [createSession("late-child", "Subagent", "late-parent")];
+
+    await sleep(70);
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.hasDeferredIdleNotification("late-parent"), true);
+
+    service.setSessionStatus("late-child", "idle");
+    statuses["late-child"] = { type: "idle" };
+    await handleSessionIdle(idleEvent("late-child"), ctx);
+
+    await sleep(150);
+    assert.deepEqual(sentMessages, ["Agent has finished: Late parent"]);
+  });
+
+  test("S7a: a plan session without a start-work instruction is not notified after settle", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("plan-still-writing", "Portfolio trading plan"));
+    service.setSessionAgent("plan-still-writing", "Prometheus - Plan Builder");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(
+      bot,
+      join(dir, "plan-still-writing"),
+      service,
+      {},
+      {},
+      { "plan-still-writing": [assistantMessage("Research subagents are still running.")] },
+    );
+    ctx.idleSettleDelayMs = 40;
+
+    await handleSessionIdle(idleEvent("plan-still-writing"), ctx);
+    await sleep(120);
+
+    assert.deepEqual(sentMessages, []);
+    assert.equal(
+      await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-still-writing")),
+      undefined,
+    );
+  });
+
+  test("S7b: a plan session with a start-work instruction sends the plan completion after settle", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("plan-session", "Remove earnings estimate"));
+    service.setSessionAgent("plan-session", "plan");
+    const { bot, sentMessages, sentOptions } = createBot();
+    const ctx = createContext(
+      bot,
+      join(dir, "plan-complete"),
+      service,
+      {},
+      {},
+      { "plan-session": [assistantMessage("Plan ready. Use /start_work 1 to execute it.")] },
+    );
+    ctx.idleSettleDelayMs = 40;
+
+    await handleSessionIdle(idleEvent("plan-session"), ctx);
+    await sleep(120);
+
+    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nRemove earnings estimate"]);
+    assert.equal(sentOptions[0], undefined);
+    assert.equal(
+      (await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-session")))?.status,
+      "consumed",
+    );
+  });
+
+  test("S8: duplicate idle events do not produce duplicate notifications", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("dup", "Dup task"));
+    service.setSessionAgent("dup", "build");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "dup"), service);
+    ctx.idleSettleDelayMs = 50;
+
+    await handleSessionIdle(idleEvent("dup"), ctx);
+    await handleSessionIdle(idleEvent("dup"), ctx);
+
+    await sleep(120);
+    assert.deepEqual(sentMessages, ["Agent has finished: Dup task (build)"]);
+
+    await handleSessionIdle(idleEvent("dup"), ctx);
+    await sleep(80);
+    assert.equal(sentMessages.length, 1);
+  });
+
+  test("S9: a descendant that becomes active during the settle window re-defers the parent", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("win-parent", "Window parent"));
+    const { bot, sentMessages } = createBot();
+    const statuses: Record<string, TestStatusEntry> = {};
+    const children: Record<string, Session[]> = {};
+    const ctx = createContext(
+      bot,
+      join(dir, "descendant-in-window"),
+      service,
+      children,
+      {},
+      {},
+      statuses,
+    );
+    ctx.deferredConfirmDelayMs = 20;
+    ctx.idleSettleDelayMs = 80;
+
+    await handleSessionIdle(idleEvent("win-parent"), ctx);
+
+    await sleep(20);
+    service.setSessionInfo(createSession("win-child", "Subagent", "win-parent"));
+    children["win-parent"] = [createSession("win-child", "Subagent", "win-parent")];
+    statuses["win-child"] = { type: "busy" };
+    await handleSessionStatus(
+      { type: "session.status", properties: { sessionID: "win-child", status: { type: "busy" } } },
+      ctx,
+    );
+    assert.equal(service.hasDeferredIdleNotification("win-parent"), true);
+
+    await sleep(100);
+    assert.deepEqual(sentMessages, []);
+
+    service.setSessionStatus("win-child", "idle");
+    statuses["win-child"] = { type: "idle" };
+    await handleSessionIdle(idleEvent("win-child"), ctx);
+
+    await sleep(160);
+    assert.deepEqual(sentMessages, ["Agent has finished: Window parent"]);
+  });
+
+  test("S10: a busy observed during the confirm status fetch is not overridden by a stale live-idle", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("stale-root", "Stale root"));
+    service.setSessionAgent("stale-root", "build");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(bot, join(dir, "stale-idle"), service);
+    ctx.idleSettleDelayMs = 40;
+    let statusCalls = 0;
+    ctx.client = {
+      session: {
+        async get() {
+          return { data: undefined };
+        },
+        async children() {
+          return { data: [] };
+        },
+        async messages() {
+          return { data: [] };
+        },
+        async status() {
+          statusCalls += 1;
+          if (statusCalls >= 2) service.setSessionStatus("stale-root", "busy");
+          return { data: { "stale-root": { type: "idle" as const } } };
+        },
+      },
+    } as unknown as EventHandlerContext["client"];
+
+    await handleSessionIdle(idleEvent("stale-root"), ctx);
+    await sleep(120);
+
+    assert.deepEqual(sentMessages, []);
+  });
+
+  test("S11: a resume during the pre-send agent resolution aborts the notification", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("gap-root", "Gap root"));
+    service.setSessionAgent("gap-root", "build");
+    const { bot, sentMessages } = createBot();
+    const statuses: Record<string, TestStatusEntry> = {};
+    const ctx = createContext(bot, join(dir, "send-gap"), service, {}, {}, {}, statuses);
+    ctx.idleSettleDelayMs = 40;
+    ctx.client = {
+      session: {
+        async get() {
+          statuses["gap-root"] = { type: "busy" };
+          return { data: undefined };
+        },
+        async children() {
+          return { data: [] };
+        },
+        async messages() {
+          return { data: [] };
+        },
+        async status() {
+          return { data: statuses };
+        },
+      },
+    } as unknown as EventHandlerContext["client"];
+
+    await handleSessionIdle(idleEvent("gap-root"), ctx);
+    await sleep(120);
+
+    assert.deepEqual(sentMessages, []);
+  });
+
+  test("S12: a plan bookkeeping failure after a successful send still records the send", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("plan-flaky", "Flaky plan"));
+    service.setSessionAgent("plan-flaky", "plan");
+    const { bot, sentMessages } = createBot();
+    const ctx = createContext(
+      bot,
+      join(dir, "plan-flaky"),
+      service,
+      {},
+      {},
+      {
+        "plan-flaky": [assistantMessage("Plan ready. Use /start_work 1.")],
+      },
+    );
+    ctx.idleSettleDelayMs = 40;
+    ctx.pendingStartWorks = {
+      async loadPending() {
+        return undefined;
+      },
+      async savePending() {
+        throw new Error("disk full");
+      },
+      async deletePending() {},
+    } as unknown as typeof ctx.pendingStartWorks;
+
+    await handleSessionIdle(idleEvent("plan-flaky"), ctx);
+    await sleep(120);
+
+    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nFlaky plan"]);
+    assert.equal(service.hasIdleNotificationSent("plan-flaky"), true);
+  });
+
+  test("S13: a descendant that becomes busy during the pre-send gap aborts the notification", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("g2-root", "Gap2 root"));
+    service.setSessionAgent("g2-root", "build");
+    service.setSessionInfo(createSession("g2-child", "Subagent", "g2-root"));
+    const { bot, sentMessages } = createBot();
+    const statuses: Record<string, TestStatusEntry> = {};
+    const children: Record<string, Session[]> = {
+      "g2-root": [createSession("g2-child", "Subagent", "g2-root")],
+    };
+    const ctx = createContext(
+      bot,
+      join(dir, "gap-descendant"),
+      service,
+      children,
+      {},
+      {},
+      statuses,
+    );
+    ctx.deferredConfirmDelayMs = 1000;
+    ctx.idleSettleDelayMs = 40;
+    ctx.client = {
+      session: {
+        async get() {
+          statuses["g2-child"] = { type: "busy" };
+          return { data: undefined };
+        },
+        async children(o: { path: { id: string } }) {
+          return { data: children[o.path.id] ?? [] };
+        },
+        async messages() {
+          return { data: [] };
+        },
+        async status() {
+          return { data: statuses };
+        },
+      },
+    } as unknown as EventHandlerContext["client"];
+
+    await handleSessionIdle(idleEvent("g2-root"), ctx);
+    await sleep(120);
+
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.hasDeferredIdleNotification("g2-root"), true);
+  });
+
+  test("S14: a finished child absent from the live status map does not permanently defer the parent", async () => {
+    const service = new SessionTitleService();
+    service.setSessionInfo(createSession("dis-root", "Disappearing child root"));
+    service.setSessionInfo(createSession("dis-child", "Subagent", "dis-root"));
+    service.setSessionStatus("dis-child", "busy");
+    const { bot, sentMessages } = createBot();
+    const statuses: Record<string, TestStatusEntry> = { "dis-child": { type: "busy" } };
+    const children: Record<string, Session[]> = {
+      "dis-root": [createSession("dis-child", "Subagent", "dis-root")],
+    };
+    const ctx = createContext(bot, join(dir, "disappearing"), service, children, {}, {}, statuses);
+    ctx.deferredConfirmDelayMs = 20;
+    ctx.idleSettleDelayMs = 40;
+
+    await handleSessionIdle(idleEvent("dis-root"), ctx);
+    assert.deepEqual(sentMessages, []);
+    assert.equal(service.hasDeferredIdleNotification("dis-root"), true);
+
+    delete statuses["dis-child"];
+
+    await sleep(200);
+    assert.deepEqual(sentMessages, ["Agent has finished: Disappearing child root"]);
+  });
+
+  test("defers when a checker grandchild is still running", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent-hydrate", "Plan builder"));
     const { bot, sentMessages } = createBot();
@@ -278,37 +685,30 @@ describe("session idle notifications", () => {
     );
 
     await handleSessionIdle(idleEvent("parent-hydrate"), ctx);
+    await sleep(80);
 
     assert.deepEqual(sentMessages, []);
     assert.equal(service.hasDeferredIdleNotification("parent-hydrate"), true);
     assert.equal(service.getParentID("momus-check"), "plan-check");
   });
 
-  test("uses live idle status for hydrated children instead of deferring forever", async () => {
+  test("sends after settle when hydrated children are all idle", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent-live-idle", "Live idle children"));
     const { bot, sentMessages } = createBot();
-    const ctx = createContext(
-      bot,
-      join(dir, "live-idle-children"),
-      service,
-      {
-        "parent-live-idle": [
-          createSession("child-live-idle", "Finished child", "parent-live-idle"),
-        ],
-      },
-      {},
-      {},
-      {},
-    );
+    const ctx = createContext(bot, join(dir, "live-idle-children"), service, {
+      "parent-live-idle": [createSession("child-live-idle", "Finished child", "parent-live-idle")],
+    });
+    ctx.idleSettleDelayMs = 40;
 
     await handleSessionIdle(idleEvent("parent-live-idle"), ctx);
+    await sleep(120);
 
     assert.deepEqual(sentMessages, ["Agent has finished: Live idle children"]);
     assert.equal(service.hasDeferredIdleNotification("parent-live-idle"), false);
   });
 
-  test("rechecks deferred parent when child status changes without a child idle event", async () => {
+  test("rechecks a deferred parent when a child status flips to idle without a child idle event", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent-poll", "Polling parent"));
     const statuses: Record<string, TestStatusEntry> = { "child-poll": { type: "busy" } };
@@ -317,62 +717,59 @@ describe("session idle notifications", () => {
       bot,
       join(dir, "poll-deferred"),
       service,
-      {
-        "parent-poll": [createSession("child-poll", "Polling child", "parent-poll")],
-      },
+      { "parent-poll": [createSession("child-poll", "Polling child", "parent-poll")] },
       {},
       {},
       statuses,
     );
     ctx.deferredConfirmDelayMs = 20;
+    ctx.idleSettleDelayMs = 40;
 
     await handleSessionIdle(idleEvent("parent-poll"), ctx);
     assert.deepEqual(sentMessages, []);
     assert.equal(service.hasDeferredIdleNotification("parent-poll"), true);
 
     statuses["child-poll"] = { type: "idle" };
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await sleep(150);
 
     assert.deepEqual(sentMessages, ["Agent has finished: Polling parent"]);
     assert.equal(service.hasDeferredIdleNotification("parent-poll"), false);
   });
 
-  test("skips stale root idle notification if parent resumes during recheck", async () => {
+  test("skips a stale root idle notification if the parent resumes (cached busy)", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent-resume", "Plan builder"));
     const { bot, sentMessages } = createBot();
     const ctx = createContext(bot, join(dir, "resume"), service);
+    ctx.idleSettleDelayMs = 40;
 
-    const parentIdle = handleSessionIdle(idleEvent("parent-resume"), ctx);
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await handleSessionIdle(idleEvent("parent-resume"), ctx);
     service.setSessionStatus("parent-resume", "busy");
-    await parentIdle;
+    await sleep(90);
 
     assert.deepEqual(sentMessages, []);
   });
 
-  test("uses live busy parent status during root idle recheck", async () => {
+  test("skips a stale root idle notification if the live status map reports busy", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent-live-busy", "Resumed parent"));
     const statuses: Record<string, TestStatusEntry> = {};
     const { bot, sentMessages } = createBot();
     const ctx = createContext(bot, join(dir, "parent-live-busy"), service, {}, {}, {}, statuses);
+    ctx.idleSettleDelayMs = 40;
 
-    const parentIdle = handleSessionIdle(idleEvent("parent-live-busy"), ctx);
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await handleSessionIdle(idleEvent("parent-live-busy"), ctx);
     statuses["parent-live-busy"] = { type: "busy" };
-    await parentIdle;
+    await sleep(90);
 
     assert.deepEqual(sentMessages, []);
     assert.equal(service.getSessionStatus("parent-live-busy"), "busy");
   });
 
-  test("clears deferred parent when live parent status resumes during confirm", async () => {
+  test("clears a deferred parent when the live status resumes during confirm", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("parent-confirm-busy", "Confirm parent"));
-    const statuses: Record<string, TestStatusEntry> = {
-      "child-confirm-busy": { type: "busy" },
-    };
+    const statuses: Record<string, TestStatusEntry> = { "child-confirm-busy": { type: "busy" } };
     const { bot, sentMessages } = createBot();
     const ctx = createContext(
       bot,
@@ -388,6 +785,7 @@ describe("session idle notifications", () => {
       statuses,
     );
     ctx.deferredConfirmDelayMs = 20;
+    ctx.idleSettleDelayMs = 40;
 
     await handleSessionIdle(idleEvent("parent-confirm-busy"), ctx);
     assert.deepEqual(sentMessages, []);
@@ -395,124 +793,56 @@ describe("session idle notifications", () => {
 
     statuses["parent-confirm-busy"] = { type: "busy" };
     statuses["child-confirm-busy"] = { type: "idle" };
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await sleep(150);
 
     assert.deepEqual(sentMessages, []);
     assert.equal(service.getSessionStatus("parent-confirm-busy"), "busy");
     assert.equal(service.hasDeferredIdleNotification("parent-confirm-busy"), false);
   });
 
-  test("sends plan completion message without start-work button when a root plan session finishes", async () => {
+  test("does not show a start-work button for a non-plan root completion", async () => {
     const service = new SessionTitleService();
-    service.setSessionInfo(createSession("plan-session", "Remove earnings estimate"));
-    service.setSessionAgent("plan-session", "plan");
+    service.setSessionInfo(createSession("build-session", "Build task"));
+    service.setSessionAgent("build-session", "build");
     const { bot, sentMessages, sentOptions } = createBot();
-    const ctx = createContext(
-      bot,
-      join(dir, "plan-complete"),
-      service,
-      {},
-      {},
-      {
-        "plan-session": [assistantMessage("Plan ready. Use /start_work 1 to execute it.")],
-      },
-    );
+    const ctx = createContext(bot, join(dir, "non-plan-complete"), service);
+    ctx.idleSettleDelayMs = 40;
 
-    await handleSessionIdle(idleEvent("plan-session"), ctx);
+    await handleSessionIdle(idleEvent("build-session"), ctx);
+    await sleep(120);
 
-    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nRemove earnings estimate"]);
+    assert.deepEqual(sentMessages, ["Agent has finished: Build task (build)"]);
     assert.equal(sentOptions[0], undefined);
-    assert.equal(
-      (await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-session")))?.status,
-      "consumed",
-    );
   });
 
-  test("skips plan completion message when latest assistant message lacks start-work instruction", async () => {
+  test("includes the agent name in the completion notification", async () => {
     const service = new SessionTitleService();
-    service.setSessionInfo(createSession("plan-still-writing", "Portfolio trading plan"));
-    service.setSessionAgent("plan-still-writing", "Prometheus - Plan Builder");
+    service.setSessionInfo(createSession("general-session", "주식 admin 메뉴 정상화 계획"));
+    service.setSessionAgent("general-session", "general");
     const { bot, sentMessages } = createBot();
-    const ctx = createContext(
-      bot,
-      join(dir, "plan-still-writing"),
-      service,
-      {},
-      {},
-      {
-        "plan-still-writing": [assistantMessage("Research subagents are still running.")],
-      },
-    );
+    const ctx = createContext(bot, join(dir, "agent-name"), service);
+    ctx.idleSettleDelayMs = 40;
 
-    await handleSessionIdle(idleEvent("plan-still-writing"), ctx);
+    await handleSessionIdle(idleEvent("general-session"), ctx);
+    await sleep(120);
 
-    assert.deepEqual(sentMessages, []);
-    assert.equal(
-      await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-still-writing")),
-      undefined,
-    );
+    assert.deepEqual(sentMessages, ["Agent has finished: 주식 admin 메뉴 정상화 계획 (general)"]);
   });
 
-  test("does not send another plan completion notice while one is already recorded", async () => {
+  test("omits the agent suffix when the agent is unknown", async () => {
     const service = new SessionTitleService();
-    service.setSessionInfo(createSession("plan-duplicate", "Duplicate plan"));
-    service.setSessionAgent("plan-duplicate", "plan");
+    service.setSessionInfo(createSession("unknown-agent-session", "Untracked task"));
     const { bot, sentMessages } = createBot();
-    const ctx = createContext(
-      bot,
-      join(dir, "plan-duplicate"),
-      service,
-      {},
-      {},
-      {
-        "plan-duplicate": [assistantMessage("Plan ready. Run /start_work 1.")],
-      },
-    );
-    await ctx.pendingStartWorks.savePending(createStartWorkShortHash("plan-duplicate"), {
-      sessionID: "plan-duplicate",
-      serverUrl: "http://localhost:4096/",
-      title: "Duplicate plan",
-      sentAt: Date.now(),
-      expiresAt: Date.now() + 10_000,
-      telegramMessageId: 99,
-      status: "consumed",
-    });
+    const ctx = createContext(bot, join(dir, "unknown-agent"), service);
+    ctx.idleSettleDelayMs = 40;
 
-    await handleSessionIdle(idleEvent("plan-duplicate"), ctx);
+    await handleSessionIdle(idleEvent("unknown-agent-session"), ctx);
+    await sleep(120);
 
-    assert.deepEqual(sentMessages, []);
+    assert.deepEqual(sentMessages, ["Agent has finished: Untracked task"]);
   });
 
-  test("sends plan completion message without start-work button when a Plan Builder session finishes", async () => {
-    const service = new SessionTitleService();
-    service.setSessionInfo(
-      createSession("plan-builder-session", "CRM SaaS 전환 및 Status 서버 구축"),
-    );
-    service.setSessionAgent("plan-builder-session", "Prometheus - Plan Builder");
-    const { bot, sentMessages, sentOptions } = createBot();
-    const ctx = createContext(
-      bot,
-      join(dir, "plan-builder-complete"),
-      service,
-      {},
-      {},
-      {
-        "plan-builder-session": [assistantMessage("Final plan is ready. Use /start-work.")],
-      },
-    );
-
-    await handleSessionIdle(idleEvent("plan-builder-session"), ctx);
-
-    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nCRM SaaS 전환 및 Status 서버 구축"]);
-    assert.equal(sentOptions[0], undefined);
-    assert.equal(
-      (await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-builder-session")))
-        ?.status,
-      "consumed",
-    );
-  });
-
-  test("uses registry Plan Builder agent when local cache has stale raw agent", async () => {
+  test("uses the registry Plan Builder agent when the local cache holds a stale raw agent", async () => {
     const service = new SessionTitleService();
     service.setSessionInfo(createSession("registry-plan-session", "Registry-backed plan"));
     service.setSessionAgent("registry-plan-session", "build");
@@ -523,10 +853,9 @@ describe("session idle notifications", () => {
       service,
       {},
       {},
-      {
-        "registry-plan-session": [assistantMessage("Ready for execution: /start_work 1")],
-      },
+      { "registry-plan-session": [assistantMessage("Ready for execution: /start_work 1")] },
     );
+    ctx.idleSettleDelayMs = 40;
     ctx.sessionRegistry = {
       async upsertSession() {},
       async updateSession() {},
@@ -545,44 +874,9 @@ describe("session idle notifications", () => {
     };
 
     await handleSessionIdle(idleEvent("registry-plan-session"), ctx);
+    await sleep(120);
 
     assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nRegistry-backed plan"]);
-  });
-
-  test("does not show start-work button for non-plan root completion", async () => {
-    const service = new SessionTitleService();
-    service.setSessionInfo(createSession("build-session", "Build task"));
-    service.setSessionAgent("build-session", "build");
-    const { bot, sentMessages, sentOptions } = createBot();
-    const ctx = createContext(bot, join(dir, "non-plan-complete"), service);
-
-    await handleSessionIdle(idleEvent("build-session"), ctx);
-
-    assert.deepEqual(sentMessages, ["Agent has finished: Build task (build)"]);
-    assert.equal(sentOptions[0], undefined);
-  });
-
-  test("includes the agent name in the completion notification", async () => {
-    const service = new SessionTitleService();
-    service.setSessionInfo(createSession("general-session", "주식 admin 메뉴 정상화 계획"));
-    service.setSessionAgent("general-session", "general");
-    const { bot, sentMessages } = createBot();
-    const ctx = createContext(bot, join(dir, "agent-name"), service);
-
-    await handleSessionIdle(idleEvent("general-session"), ctx);
-
-    assert.deepEqual(sentMessages, ["Agent has finished: 주식 admin 메뉴 정상화 계획 (general)"]);
-  });
-
-  test("omits the agent suffix when the agent is unknown", async () => {
-    const service = new SessionTitleService();
-    service.setSessionInfo(createSession("unknown-agent-session", "Untracked task"));
-    const { bot, sentMessages } = createBot();
-    const ctx = createContext(bot, join(dir, "unknown-agent"), service);
-
-    await handleSessionIdle(idleEvent("unknown-agent-session"), ctx);
-
-    assert.deepEqual(sentMessages, ["Agent has finished: Untracked task"]);
   });
 });
 

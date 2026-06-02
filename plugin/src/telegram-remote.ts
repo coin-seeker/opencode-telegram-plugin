@@ -298,6 +298,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       sessionTitleService,
       stateStore,
       config,
+      idleSettleDelayMs: config.idleSettleDelayMs,
       logger,
       claimsDir,
       pluginDir,

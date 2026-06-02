@@ -2304,7 +2304,7 @@ ${body}
 }
 
 // src/lib/plan-readiness.ts
-import { access, readFile as readFile5, readdir as readdir6, stat as stat2 } from "fs/promises";
+import { access, readdir as readdir6, readFile as readFile5, stat as stat2 } from "fs/promises";
 import { basename, isAbsolute, join as join6, relative, resolve } from "path";
 function asRecord2(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
@@ -2415,6 +2415,13 @@ function findBoulderWorkForSession(state, sessionId) {
 }
 function isActiveBoulderWork(work) {
   return work.status !== "completed" && work.status !== "abandoned";
+}
+function boulderHasActiveWork(read) {
+  if (!read.exists) return false;
+  if (!read.state) return true;
+  const works = boulderWorks(read.state);
+  if (works.length === 0) return false;
+  return works.some(isActiveBoulderWork);
 }
 function resolveTrackedPath(baseDirectory, trackedPath) {
   return isAbsolute(trackedPath) ? resolve(trackedPath) : resolve(baseDirectory, trackedPath);
@@ -2535,12 +2542,12 @@ async function checkPlanReadiness(args) {
     };
   }
   const boulder = await readBoulderState(boulderPath);
-  const projectBoulderActive = boulder.exists;
-  if (boulder.exists && sessionId === void 0) {
+  const projectBoulderActive = boulderHasActiveWork(boulder);
+  if (projectBoulderActive && sessionId === void 0) {
     return {
       ready: false,
       reason: "boulder-active",
-      detail: `${boulderPath} exists`,
+      detail: `${boulderPath} has an active work`,
       boulderActive: true
     };
   }
@@ -2557,7 +2564,11 @@ async function checkPlanReadiness(args) {
   }
   const explicitPlanPath = resolvePlanPathHint(projectRoot, args.planPath);
   if (explicitPlanPath) {
-    return readPlanProgress(explicitPlanPath, planNameFromPath(explicitPlanPath), projectBoulderActive);
+    return readPlanProgress(
+      explicitPlanPath,
+      planNameFromPath(explicitPlanPath),
+      projectBoulderActive
+    );
   }
   const stats = await getPlanFiles(plansDir);
   if (stats === void 0) {
@@ -2619,7 +2630,7 @@ function readinessMessage(reason) {
     case "all-plans-complete":
       return "plan \uC758 \uBAA8\uB4E0 task \uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC0C8 plan \uC791\uC131 \uD544\uC694";
     case "boulder-active":
-      return ".omo/boulder.json \uC774 \uC774\uBBF8 \uC874\uC7AC\uD569\uB2C8\uB2E4. \uAE30\uC874 \uC791\uC5C5\uC774 \uC9C4\uD589 \uC911\uC774\uAC70\uB098 archive \uAC00 \uD544\uC694\uD569\uB2C8\uB2E4";
+      return ".omo/boulder.json \uC5D0 \uC9C4\uD589 \uC911\uC778 \uC791\uC5C5\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uAE30\uC874 \uC791\uC5C5\uC744 \uC644\uB8CC\uD558\uAC70\uB098 archive \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694";
     case "no-session-plan":
       return "\uD574\uB2F9 \uC138\uC158\uACFC \uC5F0\uACB0\uB41C plan \uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
   }

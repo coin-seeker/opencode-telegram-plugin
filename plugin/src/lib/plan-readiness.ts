@@ -1,4 +1,4 @@
-import { access, readFile, readdir, stat } from "node:fs/promises";
+import { access, readdir, readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { OpencodeClient } from "../events/types.js";
 
@@ -131,11 +131,7 @@ async function readBoulderState(boulderPath: string): Promise<BoulderReadResult>
   try {
     text = await readFile(boulderPath, "utf8");
   } catch (err) {
-    if (
-      err instanceof Error &&
-      "code" in err &&
-      (err as NodeJS.ErrnoException).code === "ENOENT"
-    ) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
       return { exists: false };
     }
     return { exists: true };
@@ -194,10 +190,19 @@ function isActiveBoulderWork(work: BoulderWorkState): boolean {
   return work.status !== "completed" && work.status !== "abandoned";
 }
 
+// boulder.json is a persistent ledger that is never deleted on completion, so
+// its mere existence must not block start-work; only a non-terminal work does.
+function boulderHasActiveWork(read: BoulderReadResult): boolean {
+  if (!read.exists) return false;
+  // Unparseable ledger: fail closed and treat as active to avoid duplicate runs.
+  if (!read.state) return true;
+  const works = boulderWorks(read.state);
+  if (works.length === 0) return false;
+  return works.some(isActiveBoulderWork);
+}
+
 function resolveTrackedPath(baseDirectory: string, trackedPath: string): string {
-  return isAbsolute(trackedPath)
-    ? resolve(trackedPath)
-    : resolve(baseDirectory, trackedPath);
+  return isAbsolute(trackedPath) ? resolve(trackedPath) : resolve(baseDirectory, trackedPath);
 }
 
 async function resolveBoulderPlanPath(
@@ -365,12 +370,12 @@ export async function checkPlanReadiness(args: {
   }
 
   const boulder = await readBoulderState(boulderPath);
-  const projectBoulderActive = boulder.exists;
-  if (boulder.exists && sessionId === undefined) {
+  const projectBoulderActive = boulderHasActiveWork(boulder);
+  if (projectBoulderActive && sessionId === undefined) {
     return {
       ready: false,
       reason: "boulder-active",
-      detail: `${boulderPath} exists`,
+      detail: `${boulderPath} has an active work`,
       boulderActive: true,
     };
   }
@@ -388,7 +393,11 @@ export async function checkPlanReadiness(args: {
 
   const explicitPlanPath = resolvePlanPathHint(projectRoot, args.planPath);
   if (explicitPlanPath) {
-    return readPlanProgress(explicitPlanPath, planNameFromPath(explicitPlanPath), projectBoulderActive);
+    return readPlanProgress(
+      explicitPlanPath,
+      planNameFromPath(explicitPlanPath),
+      projectBoulderActive,
+    );
   }
 
   // Step 3: .omo/plans/*.md files?

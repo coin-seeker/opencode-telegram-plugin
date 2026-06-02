@@ -29,14 +29,66 @@ describe("checkPlanReadiness", () => {
     }
   });
 
-  test("boulder-active: returns boulder-active when boulder.json exists", async () => {
+  test("boulder-active: blocks when the ledger holds a non-terminal work", async () => {
     const root = join(dir, "boulder");
-    await mkdir(join(root, ".omo"), { recursive: true });
-    await writeFile(join(root, ".omo", "boulder.json"), "{}");
+    const plansDir = join(root, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "plan.md"), "- [ ] open\n");
+    await writeFile(
+      join(root, ".omo", "boulder.json"),
+      JSON.stringify({
+        active_work_id: "w1",
+        works: {
+          w1: {
+            active_plan: ".omo/plans/plan.md",
+            plan_name: "plan",
+            status: "active",
+            session_ids: ["ses_active"],
+          },
+        },
+      }),
+    );
     const result = await checkPlanReadiness({ projectRoot: root });
     assert.equal(result.ready, false);
     if (!result.ready) {
       assert.equal(result.reason, "boulder-active");
+    }
+  });
+
+  test("empty boulder ledger does not block start-work", async () => {
+    const root = join(dir, "boulder-empty");
+    const plansDir = join(root, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "plan.md"), "- [ ] open\n");
+    await writeFile(join(root, ".omo", "boulder.json"), "{}");
+    const result = await checkPlanReadiness({ projectRoot: root });
+    assert.equal(result.ready, true);
+  });
+
+  test("fully-completed boulder ledger does not block a fresh start-work", async () => {
+    const root = join(dir, "boulder-completed");
+    const plansDir = join(root, ".omo", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "fresh.md"), "- [x] done\n- [ ] open\n");
+    await writeFile(
+      join(root, ".omo", "boulder.json"),
+      JSON.stringify({
+        active_work_id: "old-work",
+        works: {
+          "old-work": {
+            active_plan: ".omo/plans/old.md",
+            plan_name: "old",
+            status: "completed",
+            session_ids: ["ses_old"],
+          },
+        },
+      }),
+    );
+    const result = await checkPlanReadiness({ projectRoot: root });
+    assert.equal(result.ready, true);
+    if (result.ready) {
+      assert.equal(result.planName, "fresh");
+      assert.equal(result.boulderActive, undefined);
     }
   });
 

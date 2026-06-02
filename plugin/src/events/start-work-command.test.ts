@@ -211,9 +211,24 @@ async function createReadyProject(baseDir: string, label: string): Promise<strin
 
 async function createBoulderProject(baseDir: string): Promise<string> {
   const projectRoot = await createProjectRoot(baseDir, "boulder");
-  const omoDir = join(projectRoot, ".omo");
-  await mkdir(omoDir, { recursive: true });
-  await writeFile(join(omoDir, "boulder.json"), "{}\n", "utf8");
+  const plansDir = join(projectRoot, ".omo", "plans");
+  await mkdir(plansDir, { recursive: true });
+  await writeFile(join(plansDir, "plan.md"), "- [ ] open\n", "utf8");
+  await writeFile(
+    join(projectRoot, ".omo", "boulder.json"),
+    JSON.stringify({
+      active_work_id: "w1",
+      works: {
+        w1: {
+          active_plan: ".omo/plans/plan.md",
+          plan_name: "plan",
+          status: "active",
+          session_ids: ["ses_active"],
+        },
+      },
+    }),
+    "utf8",
+  );
   return projectRoot;
 }
 
@@ -331,7 +346,7 @@ describe("start-work-command dispatcher", () => {
 
     assert.equal(
       harness.sendCalls[0]?.text,
-      ".omo/boulder.json 이 이미 존재합니다. 기존 작업이 진행 중이거나 archive 가 필요합니다",
+      ".omo/boulder.json 에 진행 중인 작업이 있습니다. 기존 작업을 완료하거나 archive 후 다시 시도하세요",
     );
     assert.equal(harness.commands.length, 0);
   });

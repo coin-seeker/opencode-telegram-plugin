@@ -18,6 +18,9 @@ export interface PendingQuestionState {
   requestID: string;
   sessionID: string;
   serverUrl?: string;
+  ownerInstanceID?: string;
+  ownerPID?: number;
+  submittedAt?: number;
   questions: QuestionInfo[];
   sentAt: number;
   expiresAt: number;
@@ -47,6 +50,9 @@ export interface PendingQuestionStore {
     chatId: number,
     userId: number,
   ): Promise<{ shortHash: string; data: PendingQuestionState } | undefined>;
+  listSubmittedForOwner(
+    ownerInstanceID: string,
+  ): Promise<Array<{ shortHash: string; data: PendingQuestionState }>>;
 }
 
 function hasCode(err: Error, code: string): boolean {
@@ -61,6 +67,12 @@ function parsePending(text: string): PendingQuestionState {
   const parsed = JSON.parse(text) as PendingQuestionState;
   if (typeof parsed.requestID !== "string") throw new Error("Invalid pending question: requestID");
   if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending question: sessionID");
+  if (parsed.ownerInstanceID !== undefined && typeof parsed.ownerInstanceID !== "string")
+    throw new Error("Invalid pending question: ownerInstanceID");
+  if (parsed.ownerPID !== undefined && typeof parsed.ownerPID !== "number")
+    throw new Error("Invalid pending question: ownerPID");
+  if (parsed.submittedAt !== undefined && typeof parsed.submittedAt !== "number")
+    throw new Error("Invalid pending question: submittedAt");
   if (!Array.isArray(parsed.questions)) throw new Error("Invalid pending question: questions");
   if (!Array.isArray(parsed.telegramMessageIds))
     throw new Error("Invalid pending question: telegramMessageIds");
@@ -151,6 +163,17 @@ export function createPendingQuestionStore(
           return { shortHash, data };
       }
       return undefined;
+    },
+    async listSubmittedForOwner(ownerInstanceID) {
+      const submitted: Array<{ shortHash: string; data: PendingQuestionState }> = [];
+      for (const fileName of await listPendingFiles(dir)) {
+        const shortHash = shortHashFromFileName(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data?.ownerInstanceID === ownerInstanceID && data.submittedAt !== undefined) {
+          submitted.push({ shortHash, data });
+        }
+      }
+      return submitted;
     },
   };
 }

@@ -22,6 +22,8 @@ export interface EventHandlerContext {
   logger: Logger;
   claimsDir: string;
   pluginDir: string;
+  processInstanceID: string;
+  processID: number;
   serverUrl: URL;
   directory: string;
   tokenHash: string;

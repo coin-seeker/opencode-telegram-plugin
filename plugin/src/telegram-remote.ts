@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,7 @@ import {
   createStartWorkCommandDispatcher,
   createStartWorkDispatcher,
   createStatusDispatcher,
+  drainSubmittedQuestionReplies,
   handlePermissionAsked,
   handlePermissionReplied,
   handlePermissionUpdated,
@@ -120,6 +121,7 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const stateStore = createStateStore();
     const initialState = await stateStore.read();
     const tokenHash = createHash("sha256").update(config.botToken).digest("hex").slice(0, 16);
+    const processInstanceID = randomUUID();
     const configDir = join(homedir(), ".config/opencode/telegram-remote");
     const snapshotStore = createSnapshotStore({ configDir, tokenHash, logger });
     const sessionRegistry = createSessionRegistryStore({ configDir, tokenHash, logger });
@@ -269,8 +271,12 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     }, 30_000);
     if (typeof electionTimer.unref === "function") electionTimer.unref();
 
+    let questionReplyDrainTimer: ReturnType<typeof setInterval> | undefined;
+    let questionReplyDrainRunning = false;
+
     const cleanup = async (): Promise<void> => {
       clearInterval(electionTimer);
+      if (questionReplyDrainTimer) clearInterval(questionReplyDrainTimer);
       try {
         await bot.stop();
       } catch {
@@ -302,6 +308,8 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       logger,
       claimsDir,
       pluginDir,
+      processInstanceID,
+      processID: process.pid,
       serverUrl: input.serverUrl,
       directory: input.directory,
       tokenHash,
@@ -348,6 +356,24 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
       }),
     );
     bot.setHelpDispatcher(createHelpDispatcher({ logger }));
+
+    const drainQuestionReplies = async (): Promise<void> => {
+      if (questionReplyDrainRunning) return;
+      questionReplyDrainRunning = true;
+      try {
+        const count = await drainSubmittedQuestionReplies(ctx);
+        if (count > 0) logger.info("submitted question replies drained", { count });
+      } catch (err) {
+        logger.warn("submitted question reply drain failed", { error: String(err) });
+      } finally {
+        questionReplyDrainRunning = false;
+      }
+    };
+    questionReplyDrainTimer = setInterval(() => {
+      void drainQuestionReplies();
+    }, 1_000);
+    if (typeof questionReplyDrainTimer.unref === "function") questionReplyDrainTimer.unref();
+    void drainQuestionReplies();
 
     if (leadership.isLeader) {
       startLeaderPolling();

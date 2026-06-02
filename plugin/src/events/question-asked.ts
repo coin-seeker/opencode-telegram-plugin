@@ -112,6 +112,55 @@ function answerSummary(questions: QuestionInfo[], answers: QuestionAnswer[]): st
     .join("\n");
 }
 
+async function sendQuestionReply(
+  ctx: EventHandlerContext,
+  pending: PendingQuestionState,
+  shortHash: string,
+  answers: QuestionAnswer[],
+): Promise<void> {
+  const messageId = pending.telegramMessageIds[0];
+  try {
+    await ctx.replyToQuestion(pending.requestID, answers, pending.serverUrl);
+    await ctx.bot.editMessageRemoveKeyboard(
+      messageId,
+      `✅ Answered:\n${answerSummary(pending.questions, answers)}`,
+    );
+    ctx.logger.info("question reply sent", {
+      requestID: pending.requestID,
+      sessionID: pending.sessionID,
+    });
+  } catch (err) {
+    await ctx.bot.editMessageRemoveKeyboard(messageId, "⚠️ Failed to send answer to opencode");
+    ctx.logger.error("failed to send question reply", {
+      error: String(err),
+      requestID: pending.requestID,
+    });
+  } finally {
+    await ctx.pendingQuestions.deletePending(shortHash);
+  }
+}
+
+async function handOffQuestionReply(
+  ctx: EventHandlerContext,
+  pending: PendingQuestionState,
+  shortHash: string,
+  answers: QuestionAnswer[],
+): Promise<void> {
+  pending.answersInProgress = answers;
+  pending.awaitingCustomFor = undefined;
+  pending.submittedAt = Date.now();
+  await ctx.pendingQuestions.savePending(shortHash, pending);
+  await ctx.bot.editMessageRemoveKeyboard(
+    pending.telegramMessageIds[0],
+    "⏳ Sending answer to the OpenCode window that asked this question...",
+  );
+  ctx.logger.info("question reply handed off to owner process", {
+    requestID: pending.requestID,
+    sessionID: pending.sessionID,
+    ownerPID: pending.ownerPID,
+  });
+}
+
 async function editPromptForQuestion(
   ctx: EventHandlerContext,
   pending: PendingQuestionState,
@@ -145,26 +194,22 @@ async function completeIfReady(
   }
 
   const answers = pending.answersInProgress.map((answer) => answer ?? []);
-  const messageId = pending.telegramMessageIds[0];
-  try {
-    await ctx.replyToQuestion(pending.requestID, answers, pending.serverUrl);
-    await ctx.bot.editMessageRemoveKeyboard(
-      messageId,
-      `✅ Answered:\n${answerSummary(pending.questions, answers)}`,
-    );
-    ctx.logger.info("question reply sent", {
-      requestID: pending.requestID,
-      sessionID: pending.sessionID,
-    });
-  } catch (err) {
-    await ctx.bot.editMessageRemoveKeyboard(messageId, "⚠️ Failed to send answer to opencode");
-    ctx.logger.error("failed to send question reply", {
-      error: String(err),
-      requestID: pending.requestID,
-    });
-  } finally {
-    await ctx.pendingQuestions.deletePending(shortHash);
+  if (pending.ownerInstanceID && pending.ownerInstanceID !== ctx.processInstanceID) {
+    await handOffQuestionReply(ctx, pending, shortHash, answers);
+    return;
   }
+  await sendQuestionReply(ctx, pending, shortHash, answers);
+}
+
+export async function drainSubmittedQuestionReplies(ctx: EventHandlerContext): Promise<number> {
+  const submittedQuestions = await ctx.pendingQuestions.listSubmittedForOwner(
+    ctx.processInstanceID,
+  );
+  for (const { shortHash, data } of submittedQuestions) {
+    const answers = data.answersInProgress.map((answer) => answer ?? []);
+    await sendQuestionReply(ctx, data, shortHash, answers);
+  }
+  return submittedQuestions.length;
 }
 
 export async function handleQuestionAsked(
@@ -185,6 +230,8 @@ export async function handleQuestionAsked(
     requestID: request.id,
     sessionID: request.sessionID,
     serverUrl: ctx.serverUrl.href,
+    ownerInstanceID: ctx.processInstanceID,
+    ownerPID: ctx.processID,
     questions: request.questions,
     sentAt,
     expiresAt: sentAt + QUESTION_EXPIRY_MS,
@@ -237,6 +284,13 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       if (pending.expiresAt < Date.now()) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
         await ctx.pendingQuestions.deletePending(shortHash);
+        return;
+      }
+      if (pending.submittedAt !== undefined) {
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "This answer is already being sent to opencode.",
+        );
         return;
       }
       pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
@@ -296,6 +350,7 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
     async handleTextReply(text, chatId, userId, replyToMessageId) {
       const match = await ctx.pendingQuestions.findAwaitingCustom(chatId, userId);
       if (!match) return;
+      if (match.data.submittedAt !== undefined) return;
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
       if (match.data.expiresAt < Date.now()) {

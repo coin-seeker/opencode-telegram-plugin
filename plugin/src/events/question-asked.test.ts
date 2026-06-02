@@ -11,7 +11,11 @@ import { createPendingQuestionStore, createQuestionShortHash } from "../lib/pend
 import { createPendingStartWorkStore } from "../lib/pending-start-work.js";
 import type { SessionRegistryStore } from "../lib/session-registry.js";
 import { SessionTitleService } from "../services/session-title-service.js";
-import { createQuestionDispatcher, handleQuestionAsked } from "./question-asked.js";
+import {
+  createQuestionDispatcher,
+  drainSubmittedQuestionReplies,
+  handleQuestionAsked,
+} from "./question-asked.js";
 import { handleQuestionReplied } from "./question-replied.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
 
@@ -107,6 +111,7 @@ function createContext(
   requestID: string,
   dir: string,
   replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }>,
+  processInstanceID = "owner-instance",
 ): EventHandlerContext {
   return {
     client: {} as EventHandlerContext["client"],
@@ -117,6 +122,8 @@ function createContext(
     logger: createLogger(),
     claimsDir: join(dir, `claims-${requestID}`),
     pluginDir: dir,
+    processInstanceID,
+    processID: processInstanceID === "owner-instance" ? 100 : 200,
     serverUrl: new URL("http://localhost:4096"),
     directory: dir,
     tokenHash: "tok",
@@ -264,6 +271,57 @@ describe("question asked flow", () => {
     const shortHash = createQuestionShortHash("que_source", "ses_test", "http://localhost:5099/");
     const pending = await ctx.pendingQuestions.loadPending(shortHash);
     assert.equal(pending?.serverUrl, "http://localhost:5099/");
+  });
+
+  test("hands off same-server replies to the process that asked the question", async () => {
+    const ownerBot = createBot();
+    const leaderBot = createBot();
+    const ownerReplies: Array<{
+      requestID: string;
+      answers: QuestionAnswer[];
+      serverUrl?: string;
+    }> = [];
+    const leaderReplies: Array<{
+      requestID: string;
+      answers: QuestionAnswer[];
+      serverUrl?: string;
+    }> = [];
+    const ownerCtx = createContext(
+      ownerBot.bot,
+      "que_handoff",
+      dir,
+      ownerReplies,
+      "owner-instance",
+    );
+    const leaderCtx = createContext(
+      leaderBot.bot,
+      "que_handoff",
+      dir,
+      leaderReplies,
+      "leader-instance",
+    );
+
+    await handleQuestionAsked(singleQuestionEvent("que_handoff"), ownerCtx);
+    const shortHash = createQuestionShortHash("que_handoff", "ses_test", "http://localhost:4096/");
+    const dispatcher = createQuestionDispatcher(leaderCtx);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
+
+    assert.deepEqual(leaderReplies, []);
+    const pending = await ownerCtx.pendingQuestions.loadPending(shortHash);
+    assert.ok(pending?.submittedAt);
+    assert.deepEqual(pending.answersInProgress, [["A"]]);
+    assert.match(leaderBot.editedMessages.at(-1)?.text ?? "", /already being sent|Sending answer/);
+
+    const drained = await drainSubmittedQuestionReplies(ownerCtx);
+
+    assert.equal(drained, 1);
+    assert.deepEqual(ownerReplies, [
+      { requestID: "que_handoff", answers: [["A"]], serverUrl: "http://localhost:4096/" },
+    ]);
+    assert.equal(await ownerCtx.pendingQuestions.loadPending(shortHash), undefined);
+    assert.match(ownerBot.editedMessages.at(-1)?.text ?? "", /Answered/);
   });
 
   test("toggles multiple selections and waits for Done before replying", async () => {

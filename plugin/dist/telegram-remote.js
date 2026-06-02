@@ -4,7 +4,7 @@
  */
 
 // src/telegram-remote.ts
-import { createHash as createHash5 } from "crypto";
+import { createHash as createHash5, randomUUID } from "crypto";
 import { homedir as homedir3, tmpdir as tmpdir5 } from "os";
 import { dirname as dirname6, join as join10 } from "path";
 import { fileURLToPath } from "url";
@@ -333,6 +333,34 @@ function parseIdleSettleDelayMs(value, logger) {
     throw new Error("Invalid TELEGRAM_IDLE_SETTLE_DELAY_MS");
   }
   return parsed;
+}
+
+// src/events/help-command.ts
+var HELP_TEXT = `<b>OpenCode Telegram Plugin \u2014 \uBA85\uB839 \uB3C4\uC6C0\uB9D0</b>
+
+<b>/sessions</b>
+\uD65C\uC131 root \uC138\uC158 \uBAA9\uB85D\uC744 \uBC88\uD638\uC640 \uD568\uAED8 \uD45C\uC2DC (\uCD5C\uADFC\uD65C\uB3D9\uC21C top 20).
+
+<b>/status &lt;\uBC88\uD638&gt;</b>
+\uD574\uB2F9 \uC138\uC158\uC758 \uC5D0\uC774\uC804\uD2B8/\uC0C1\uD0DC/\uB9C8\uC9C0\uB9C9 \uBA54\uC2DC\uC9C0 \uC2A4\uB2C8\uD3AB/\uD50C\uB79C \uC9C4\uD589\uB3C4/boulder \uC0C1\uD0DC \uD45C\uC2DC.
+
+<b>/start_work &lt;\uBC88\uD638&gt;</b>
+\uD574\uB2F9 \uC138\uC158\uC5D0 opencode <code>/start-work</code> \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1.
+\uC548\uC804 \uAC8C\uC774\uD2B8: raw plan agent \uB610\uB294 Prometheus Plan Builder \uB77C\uBCA8 AND status=idle AND .omo/plans \uC5D0 \uBBF8\uC644\uB8CC plan \uC874\uC7AC AND .omo/boulder.json \uBD80\uC7AC.
+\uC870\uAC74 \uBBF8\uCDA9\uC871\uC2DC \uAD6C\uCCB4\uC801 \uC0AC\uC720 \uC548\uB0B4.
+(Telegram \uBD07 \uBA85\uB839\uC740 <code>/start_work</code>, \uB0B4\uBD80 \uD2B8\uB9AC\uAC70 \uB300\uC0C1\uC740 opencode \uC758 <code>/start-work</code>)
+
+<b>/help</b>
+\uC774 \uB3C4\uC6C0\uB9D0 \uD45C\uC2DC.
+
+<b>\uC81C\uC57D</b>
+\uBC88\uD638\uB294 <code>/sessions</code> \uB9C8\uC9C0\uB9C9 \uD638\uCD9C\uC758 \uC2A4\uB0C5\uC0F7\uC5D0 \uC885\uC18D (TTL 1\uC2DC\uAC04).
+leader \uD504\uB85C\uC138\uC2A4\uAC00 \uAD00\uCC30\uD55C \uC138\uC158\uB9CC \uD45C\uC2DC \u2014 \uB2E4\uB978 OpenCode \uD504\uB85C\uC138\uC2A4\uC758 \uC138\uC158\uC740 \uBCF4\uC774\uC9C0 \uC54A\uC744 \uC218 \uC788\uC74C.`;
+function createHelpDispatcher(deps) {
+  return async ({ chatId, bot }) => {
+    await bot.sendMessage(HELP_TEXT, { parse_mode: "HTML" });
+    deps.logger.info("help shown", { chatId });
+  };
 }
 
 // src/lib/claim.ts
@@ -763,6 +791,12 @@ function parsePending2(text) {
   const parsed = JSON.parse(text);
   if (typeof parsed.requestID !== "string") throw new Error("Invalid pending question: requestID");
   if (typeof parsed.sessionID !== "string") throw new Error("Invalid pending question: sessionID");
+  if (parsed.ownerInstanceID !== void 0 && typeof parsed.ownerInstanceID !== "string")
+    throw new Error("Invalid pending question: ownerInstanceID");
+  if (parsed.ownerPID !== void 0 && typeof parsed.ownerPID !== "number")
+    throw new Error("Invalid pending question: ownerPID");
+  if (parsed.submittedAt !== void 0 && typeof parsed.submittedAt !== "number")
+    throw new Error("Invalid pending question: submittedAt");
   if (!Array.isArray(parsed.questions)) throw new Error("Invalid pending question: questions");
   if (!Array.isArray(parsed.telegramMessageIds))
     throw new Error("Invalid pending question: telegramMessageIds");
@@ -840,6 +874,17 @@ function createPendingQuestionStore(opts) {
           return { shortHash, data };
       }
       return void 0;
+    },
+    async listSubmittedForOwner(ownerInstanceID) {
+      const submitted = [];
+      for (const fileName of await listPendingFiles2(dir)) {
+        const shortHash = shortHashFromFileName2(fileName);
+        const data = await this.loadPending(shortHash);
+        if (data?.ownerInstanceID === ownerInstanceID && data.submittedAt !== void 0) {
+          submitted.push({ shortHash, data });
+        }
+      }
+      return submitted;
     }
   };
 }
@@ -920,28 +965,7 @@ function answerSummary(questions, answers) {
     (answer, index) => `${index + 1}. ${questions[index]?.header ?? "Question"}: ${answer.join(", ") || "(empty)"}`
   ).join("\n");
 }
-async function editPromptForQuestion(ctx, pending, shortHash, questionIndex) {
-  const messageId = pending.telegramMessageIds[0];
-  const question = pending.questions[questionIndex];
-  const inlineKeyboard = questionInlineKeyboard(
-    shortHash,
-    questionIndex,
-    question,
-    selectedAnswers(pending, questionIndex)
-  );
-  await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), {
-    reply_markup: { inline_keyboard: inlineKeyboard }
-  });
-}
-async function completeIfReady(ctx, pending, shortHash) {
-  const nextIndex = pending.answersInProgress.indexOf(null);
-  if (nextIndex >= 0) {
-    pending.currentQuestionIndex = nextIndex;
-    await ctx.pendingQuestions.savePending(shortHash, pending);
-    await editPromptForQuestion(ctx, pending, shortHash, nextIndex);
-    return;
-  }
-  const answers = pending.answersInProgress.map((answer) => answer ?? []);
+async function sendQuestionReply(ctx, pending, shortHash, answers) {
   const messageId = pending.telegramMessageIds[0];
   try {
     await ctx.replyToQuestion(pending.requestID, answers, pending.serverUrl);
@@ -964,6 +988,59 @@ ${answerSummary(pending.questions, answers)}`
     await ctx.pendingQuestions.deletePending(shortHash);
   }
 }
+async function handOffQuestionReply(ctx, pending, shortHash, answers) {
+  pending.answersInProgress = answers;
+  pending.awaitingCustomFor = void 0;
+  pending.submittedAt = Date.now();
+  await ctx.pendingQuestions.savePending(shortHash, pending);
+  await ctx.bot.editMessageRemoveKeyboard(
+    pending.telegramMessageIds[0],
+    "\u23F3 Sending answer to the OpenCode window that asked this question..."
+  );
+  ctx.logger.info("question reply handed off to owner process", {
+    requestID: pending.requestID,
+    sessionID: pending.sessionID,
+    ownerPID: pending.ownerPID
+  });
+}
+async function editPromptForQuestion(ctx, pending, shortHash, questionIndex) {
+  const messageId = pending.telegramMessageIds[0];
+  const question = pending.questions[questionIndex];
+  const inlineKeyboard = questionInlineKeyboard(
+    shortHash,
+    questionIndex,
+    question,
+    selectedAnswers(pending, questionIndex)
+  );
+  await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), {
+    reply_markup: { inline_keyboard: inlineKeyboard }
+  });
+}
+async function completeIfReady(ctx, pending, shortHash) {
+  const nextIndex = pending.answersInProgress.indexOf(null);
+  if (nextIndex >= 0) {
+    pending.currentQuestionIndex = nextIndex;
+    await ctx.pendingQuestions.savePending(shortHash, pending);
+    await editPromptForQuestion(ctx, pending, shortHash, nextIndex);
+    return;
+  }
+  const answers = pending.answersInProgress.map((answer) => answer ?? []);
+  if (pending.ownerInstanceID && pending.ownerInstanceID !== ctx.processInstanceID) {
+    await handOffQuestionReply(ctx, pending, shortHash, answers);
+    return;
+  }
+  await sendQuestionReply(ctx, pending, shortHash, answers);
+}
+async function drainSubmittedQuestionReplies(ctx) {
+  const submittedQuestions = await ctx.pendingQuestions.listSubmittedForOwner(
+    ctx.processInstanceID
+  );
+  for (const { shortHash, data } of submittedQuestions) {
+    const answers = data.answersInProgress.map((answer) => answer ?? []);
+    await sendQuestionReply(ctx, data, shortHash, answers);
+  }
+  return submittedQuestions.length;
+}
 async function handleQuestionAsked(event, ctx) {
   const request = event.properties;
   if (request.questions.length === 0) return;
@@ -977,6 +1054,8 @@ async function handleQuestionAsked(event, ctx) {
     requestID: request.id,
     sessionID: request.sessionID,
     serverUrl: ctx.serverUrl.href,
+    ownerInstanceID: ctx.processInstanceID,
+    ownerPID: ctx.processID,
     questions: request.questions,
     sentAt,
     expiresAt: sentAt + QUESTION_EXPIRY_MS,
@@ -1024,6 +1103,13 @@ function createQuestionDispatcher(ctx) {
       if (pending.expiresAt < Date.now()) {
         await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
         await ctx.pendingQuestions.deletePending(shortHash);
+        return;
+      }
+      if (pending.submittedAt !== void 0) {
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "This answer is already being sent to opencode."
+        );
         return;
       }
       pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
@@ -1078,6 +1164,7 @@ function createQuestionDispatcher(ctx) {
     async handleTextReply(text, chatId, userId, replyToMessageId) {
       const match = await ctx.pendingQuestions.findAwaitingCustom(chatId, userId);
       if (!match) return;
+      if (match.data.submittedAt !== void 0) return;
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
       if (match.data.expiresAt < Date.now()) {
@@ -2511,11 +2598,180 @@ async function recheckSessionIdle(client, sessionId) {
   return (sessionStatus?.type ?? "idle") === "idle";
 }
 
+// src/events/start-work-command.ts
+function agentFromSession3(session) {
+  return session.agent;
+}
+function resolveProjectRoot(session) {
+  return session.directory;
+}
+function selectPlanSessionAgent2(candidates) {
+  return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== void 0);
+}
+function readinessMessage(reason) {
+  switch (reason) {
+    case "no-omo-dir":
+      return ".omo/ \uB514\uB809\uD1A0\uB9AC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. plan \uC791\uC131\uC774 \uC120\uD589\uB418\uC5B4\uC57C \uD569\uB2C8\uB2E4";
+    case "no-plans":
+      return ".omo/plans/ \uC5D0 plan \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
+    case "plan-empty":
+      return "plan \uD30C\uC77C\uC5D0 \uCCB4\uD06C\uBC15\uC2A4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4 (\uD5E4\uB354\uB9CC \uC874\uC7AC)";
+    case "all-plans-complete":
+      return "plan \uC758 \uBAA8\uB4E0 task \uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC0C8 plan \uC791\uC131 \uD544\uC694";
+    case "boulder-active":
+      return ".omo/boulder.json \uC774 \uC774\uBBF8 \uC874\uC7AC\uD569\uB2C8\uB2E4. \uAE30\uC874 \uC791\uC5C5\uC774 \uC9C4\uD589 \uC911\uC774\uAC70\uB098 archive \uAC00 \uD544\uC694\uD569\uB2C8\uB2E4";
+    case "no-session-plan":
+      return "\uD574\uB2F9 \uC138\uC158\uACFC \uC5F0\uACB0\uB41C plan \uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
+  }
+}
+function isSessionNotFoundError(err) {
+  const httpError = err;
+  return httpError.status === 404 || httpError.statusCode === 404 || httpError.response?.status === 404 || err.message.includes("404");
+}
+async function sendHtml(bot, text) {
+  await bot.sendMessage(text, { parse_mode: "HTML" });
+}
+async function sendPlain(bot, text) {
+  await bot.sendMessage(text);
+}
+function pendingMessageIds(pending) {
+  return [.../* @__PURE__ */ new Set([...pending.telegramMessageIds ?? [pending.telegramMessageId]])];
+}
+async function consumeInlineStartWorkButtons(bot, pendingStartWorks, sessionId, logger) {
+  if (!pendingStartWorks) return;
+  const shortHash = createStartWorkShortHash(sessionId);
+  const pending = await pendingStartWorks.loadPending(shortHash);
+  if (!pending) return;
+  if (pending.expiresAt < Date.now()) {
+    await pendingStartWorks.deletePending(shortHash);
+    return;
+  }
+  await pendingStartWorks.savePending(shortHash, {
+    ...pending,
+    status: "consumed",
+    handledAt: Date.now()
+  });
+  for (const messageId of pendingMessageIds(pending)) {
+    try {
+      await bot.editMessageRemoveKeyboard(
+        messageId,
+        "This /start-work request was already handled. Use /start_work <number> from /sessions."
+      );
+    } catch (err) {
+      logger.error("failed to clear start-work keyboard after command dispatch", {
+        sessionId,
+        messageId,
+        error: String(err)
+      });
+    }
+  }
+}
+function createStartWorkCommandDispatcher(deps) {
+  return async ({ chatId, bot, args }) => {
+    const rawIndex = args[0]?.trim();
+    if (!rawIndex) {
+      await sendPlain(bot, "\uC0AC\uC6A9\uBC95: /start_work <\uBC88\uD638>. \uBA3C\uC800 /sessions \uB85C \uBAA9\uB85D \uD655\uC778");
+      return;
+    }
+    const index = Number(rawIndex);
+    if (Number.isNaN(index)) {
+      await sendPlain(bot, `\uC798\uBABB\uB41C \uC785\uB825: ${rawIndex}\uC740 \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4`);
+      return;
+    }
+    const snapshot = await deps.snapshotStore.loadSnapshot(chatId);
+    if (snapshot === null) {
+      await sendPlain(bot, "\uC138\uC158 \uBAA9\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uBA3C\uC800 /sessions \uC2E4\uD589");
+      return;
+    }
+    const entry = snapshot.find((candidate) => candidate.index === index);
+    if (!entry) {
+      await sendPlain(bot, `${index}\uBC88 \uC138\uC158 \uC5C6\uC74C (\uBAA9\uB85D \uD06C\uAE30: ${snapshot.length})`);
+      return;
+    }
+    const sessionId = entry.sessionId;
+    const rawSourceServerUrl = entry.serverUrl ?? deps.sessionTitleService.getServerUrl(sessionId);
+    const sourceServerUrl = normalizeOpenCodeServerUrl(rawSourceServerUrl);
+    if (rawSourceServerUrl && !sourceServerUrl) {
+      await sendPlain(bot, "\uC138\uC158 \uC11C\uBC84 \uC815\uBCF4\uAC00 \uC720\uD6A8\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
+      deps.logger.error("start-work invalid server url", { sessionId });
+      return;
+    }
+    const useRemoteServer = isDifferentServerUrl(sourceServerUrl, deps.serverUrl);
+    let session;
+    try {
+      if (sourceServerUrl && useRemoteServer) {
+        const result = await getRemoteSession(sourceServerUrl, sessionId, deps.opencodeFetch);
+        if (!result.data || result.response.status === 404) {
+          await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+          return;
+        }
+        session = result.data;
+      } else {
+        const result = await deps.client.session.get({ path: { id: sessionId } });
+        if (!result.data) {
+          await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+          return;
+        }
+        session = result.data;
+      }
+    } catch (err) {
+      if (err instanceof Error && isSessionNotFoundError(err)) {
+        await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
+        return;
+      }
+      await sendPlain(bot, "\uC138\uC158 \uD655\uC778 \uC2E4\uD328. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
+      deps.logger.error("start-work session lookup failed", { sessionId, error: String(err) });
+      return;
+    }
+    const agent = selectPlanSessionAgent2([
+      deps.sessionTitleService.getSessionAgent(sessionId),
+      entry.agent,
+      agentFromSession3(session)
+    ]);
+    if (!isPlanSessionAgent(agent)) {
+      await sendPlain(
+        bot,
+        `${index}\uBC88 \uC138\uC158\uC758 \uC5D0\uC774\uC804\uD2B8\uB294 plan builder \uAC00 \uC544\uB2D9\uB2C8\uB2E4 (\uD604\uC7AC: ${agent ?? "unknown"}). /start_work \uB294 plan \uC138\uC158\uC5D0\uC11C\uB9CC \uAC00\uB2A5\uD569\uB2C8\uB2E4`
+      );
+      return;
+    }
+    let idle;
+    try {
+      idle = sourceServerUrl && useRemoteServer ? ((await getRemoteStatusMap(sourceServerUrl, deps.opencodeFetch))[sessionId]?.type ?? "idle") === "idle" : await recheckSessionIdle(deps.client, sessionId);
+    } catch (err) {
+      await sendPlain(bot, "\uC138\uC158 \uC0C1\uD0DC \uD655\uC778 \uC2E4\uD328. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
+      deps.logger.error("start-work idle recheck failed", { sessionId, error: String(err) });
+      return;
+    }
+    if (!idle) {
+      await sendPlain(bot, `${index}\uBC88 \uC138\uC158\uC774 idle \uC0C1\uD0DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4. \uC791\uC5C5 \uC644\uB8CC\uB97C \uAE30\uB2E4\uB9AC\uC138\uC694`);
+      return;
+    }
+    const readiness = await checkPlanReadiness({ projectRoot: resolveProjectRoot(session) });
+    if (!readiness.ready) {
+      await sendPlain(bot, readinessMessage(readiness.reason));
+      return;
+    }
+    try {
+      await deps.runSessionCommand(sessionId, "start-work", sourceServerUrl);
+      await consumeInlineStartWorkButtons(bot, deps.pendingStartWorks, sessionId, deps.logger);
+      await sendHtml(
+        bot,
+        `${index}\uBC88 \uC138\uC158\uC5D0 opencode /start-work \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1 \uC644\uB8CC. (${escapeHtml(entry.title)})`
+      );
+      deps.logger.info("start-work dispatched", { chatId, sessionId, index });
+    } catch (err) {
+      await sendHtml(bot, "opencode /start-work \uC804\uC1A1 \uC2E4\uD328");
+      deps.logger.error("start-work dispatch failed", { sessionId, error: String(err) });
+    }
+  };
+}
+
 // src/events/status-command.ts
 var SNIPPET_MAX_CHARS = 80;
 var MESSAGES_LIMIT = 10;
 var EMPTY_MESSAGE = "\uBA54\uC2DC\uC9C0 \uC5C6\uC74C";
-function resolveProjectRoot(session) {
+function resolveProjectRoot2(session) {
   if (!session.directory) throw new Error("session directory missing");
   return session.directory;
 }
@@ -2676,7 +2932,7 @@ function createStatusDispatcher(deps) {
       });
       return;
     }
-    const projectRoot = resolveProjectRoot(session);
+    const projectRoot = resolveProjectRoot2(session);
     const rawTitle = session.title ?? entry.title;
     const rawAgent = entry.agent ?? session.agent;
     const planReady = await checkPlanReadiness({
@@ -2708,203 +2964,6 @@ function createStatusDispatcher(deps) {
       sessionId: entry.sessionId,
       snapshotIndex: n
     });
-  };
-}
-
-// src/events/start-work-command.ts
-function agentFromSession3(session) {
-  return session.agent;
-}
-function resolveProjectRoot2(session) {
-  return session.directory;
-}
-function selectPlanSessionAgent2(candidates) {
-  return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== void 0);
-}
-function readinessMessage(reason) {
-  switch (reason) {
-    case "no-omo-dir":
-      return ".omo/ \uB514\uB809\uD1A0\uB9AC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. plan \uC791\uC131\uC774 \uC120\uD589\uB418\uC5B4\uC57C \uD569\uB2C8\uB2E4";
-    case "no-plans":
-      return ".omo/plans/ \uC5D0 plan \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
-    case "plan-empty":
-      return "plan \uD30C\uC77C\uC5D0 \uCCB4\uD06C\uBC15\uC2A4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4 (\uD5E4\uB354\uB9CC \uC874\uC7AC)";
-    case "all-plans-complete":
-      return "plan \uC758 \uBAA8\uB4E0 task \uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC0C8 plan \uC791\uC131 \uD544\uC694";
-    case "boulder-active":
-      return ".omo/boulder.json \uC774 \uC774\uBBF8 \uC874\uC7AC\uD569\uB2C8\uB2E4. \uAE30\uC874 \uC791\uC5C5\uC774 \uC9C4\uD589 \uC911\uC774\uAC70\uB098 archive \uAC00 \uD544\uC694\uD569\uB2C8\uB2E4";
-    case "no-session-plan":
-      return "\uD574\uB2F9 \uC138\uC158\uACFC \uC5F0\uACB0\uB41C plan \uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
-  }
-}
-function isSessionNotFoundError(err) {
-  const httpError = err;
-  return httpError.status === 404 || httpError.statusCode === 404 || httpError.response?.status === 404 || err.message.includes("404");
-}
-async function sendHtml(bot, text) {
-  await bot.sendMessage(text, { parse_mode: "HTML" });
-}
-async function sendPlain(bot, text) {
-  await bot.sendMessage(text);
-}
-function pendingMessageIds(pending) {
-  return [.../* @__PURE__ */ new Set([...pending.telegramMessageIds ?? [pending.telegramMessageId]])];
-}
-async function consumeInlineStartWorkButtons(bot, pendingStartWorks, sessionId, logger) {
-  if (!pendingStartWorks) return;
-  const shortHash = createStartWorkShortHash(sessionId);
-  const pending = await pendingStartWorks.loadPending(shortHash);
-  if (!pending) return;
-  if (pending.expiresAt < Date.now()) {
-    await pendingStartWorks.deletePending(shortHash);
-    return;
-  }
-  await pendingStartWorks.savePending(shortHash, {
-    ...pending,
-    status: "consumed",
-    handledAt: Date.now()
-  });
-  for (const messageId of pendingMessageIds(pending)) {
-    try {
-      await bot.editMessageRemoveKeyboard(
-        messageId,
-        "This /start-work request was already handled. Use /start_work <number> from /sessions."
-      );
-    } catch (err) {
-      logger.error("failed to clear start-work keyboard after command dispatch", {
-        sessionId,
-        messageId,
-        error: String(err)
-      });
-    }
-  }
-}
-function createStartWorkCommandDispatcher(deps) {
-  return async ({ chatId, bot, args }) => {
-    const rawIndex = args[0]?.trim();
-    if (!rawIndex) {
-      await sendPlain(bot, "\uC0AC\uC6A9\uBC95: /start_work <\uBC88\uD638>. \uBA3C\uC800 /sessions \uB85C \uBAA9\uB85D \uD655\uC778");
-      return;
-    }
-    const index = Number(rawIndex);
-    if (Number.isNaN(index)) {
-      await sendPlain(bot, `\uC798\uBABB\uB41C \uC785\uB825: ${rawIndex}\uC740 \uC22B\uC790\uC5EC\uC57C \uD569\uB2C8\uB2E4`);
-      return;
-    }
-    const snapshot = await deps.snapshotStore.loadSnapshot(chatId);
-    if (snapshot === null) {
-      await sendPlain(bot, "\uC138\uC158 \uBAA9\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uBA3C\uC800 /sessions \uC2E4\uD589");
-      return;
-    }
-    const entry = snapshot.find((candidate) => candidate.index === index);
-    if (!entry) {
-      await sendPlain(bot, `${index}\uBC88 \uC138\uC158 \uC5C6\uC74C (\uBAA9\uB85D \uD06C\uAE30: ${snapshot.length})`);
-      return;
-    }
-    const sessionId = entry.sessionId;
-    const rawSourceServerUrl = entry.serverUrl ?? deps.sessionTitleService.getServerUrl(sessionId);
-    const sourceServerUrl = normalizeOpenCodeServerUrl(rawSourceServerUrl);
-    if (rawSourceServerUrl && !sourceServerUrl) {
-      await sendPlain(bot, "\uC138\uC158 \uC11C\uBC84 \uC815\uBCF4\uAC00 \uC720\uD6A8\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
-      deps.logger.error("start-work invalid server url", { sessionId });
-      return;
-    }
-    const useRemoteServer = isDifferentServerUrl(sourceServerUrl, deps.serverUrl);
-    let session;
-    try {
-      if (sourceServerUrl && useRemoteServer) {
-        const result = await getRemoteSession(sourceServerUrl, sessionId, deps.opencodeFetch);
-        if (!result.data || result.response.status === 404) {
-          await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
-          return;
-        }
-        session = result.data;
-      } else {
-        const result = await deps.client.session.get({ path: { id: sessionId } });
-        if (!result.data) {
-          await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
-          return;
-        }
-        session = result.data;
-      }
-    } catch (err) {
-      if (err instanceof Error && isSessionNotFoundError(err)) {
-        await sendPlain(bot, "\uC138\uC158\uC774 \uB354 \uC774\uC0C1 \uC874\uC7AC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4");
-        return;
-      }
-      await sendPlain(bot, "\uC138\uC158 \uD655\uC778 \uC2E4\uD328. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
-      deps.logger.error("start-work session lookup failed", { sessionId, error: String(err) });
-      return;
-    }
-    const agent = selectPlanSessionAgent2([
-      deps.sessionTitleService.getSessionAgent(sessionId),
-      entry.agent,
-      agentFromSession3(session)
-    ]);
-    if (!isPlanSessionAgent(agent)) {
-      await sendPlain(
-        bot,
-        `${index}\uBC88 \uC138\uC158\uC758 \uC5D0\uC774\uC804\uD2B8\uB294 plan builder \uAC00 \uC544\uB2D9\uB2C8\uB2E4 (\uD604\uC7AC: ${agent ?? "unknown"}). /start_work \uB294 plan \uC138\uC158\uC5D0\uC11C\uB9CC \uAC00\uB2A5\uD569\uB2C8\uB2E4`
-      );
-      return;
-    }
-    let idle;
-    try {
-      idle = sourceServerUrl && useRemoteServer ? ((await getRemoteStatusMap(sourceServerUrl, deps.opencodeFetch))[sessionId]?.type ?? "idle") === "idle" : await recheckSessionIdle(deps.client, sessionId);
-    } catch (err) {
-      await sendPlain(bot, "\uC138\uC158 \uC0C1\uD0DC \uD655\uC778 \uC2E4\uD328. /sessions \uC7AC\uC2E4\uD589 \uD544\uC694");
-      deps.logger.error("start-work idle recheck failed", { sessionId, error: String(err) });
-      return;
-    }
-    if (!idle) {
-      await sendPlain(bot, `${index}\uBC88 \uC138\uC158\uC774 idle \uC0C1\uD0DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4. \uC791\uC5C5 \uC644\uB8CC\uB97C \uAE30\uB2E4\uB9AC\uC138\uC694`);
-      return;
-    }
-    const readiness = await checkPlanReadiness({ projectRoot: resolveProjectRoot2(session) });
-    if (!readiness.ready) {
-      await sendPlain(bot, readinessMessage(readiness.reason));
-      return;
-    }
-    try {
-      await deps.runSessionCommand(sessionId, "start-work", sourceServerUrl);
-      await consumeInlineStartWorkButtons(bot, deps.pendingStartWorks, sessionId, deps.logger);
-      await sendHtml(
-        bot,
-        `${index}\uBC88 \uC138\uC158\uC5D0 opencode /start-work \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1 \uC644\uB8CC. (${escapeHtml(entry.title)})`
-      );
-      deps.logger.info("start-work dispatched", { chatId, sessionId, index });
-    } catch (err) {
-      await sendHtml(bot, "opencode /start-work \uC804\uC1A1 \uC2E4\uD328");
-      deps.logger.error("start-work dispatch failed", { sessionId, error: String(err) });
-    }
-  };
-}
-
-// src/events/help-command.ts
-var HELP_TEXT = `<b>OpenCode Telegram Plugin \u2014 \uBA85\uB839 \uB3C4\uC6C0\uB9D0</b>
-
-<b>/sessions</b>
-\uD65C\uC131 root \uC138\uC158 \uBAA9\uB85D\uC744 \uBC88\uD638\uC640 \uD568\uAED8 \uD45C\uC2DC (\uCD5C\uADFC\uD65C\uB3D9\uC21C top 20).
-
-<b>/status &lt;\uBC88\uD638&gt;</b>
-\uD574\uB2F9 \uC138\uC158\uC758 \uC5D0\uC774\uC804\uD2B8/\uC0C1\uD0DC/\uB9C8\uC9C0\uB9C9 \uBA54\uC2DC\uC9C0 \uC2A4\uB2C8\uD3AB/\uD50C\uB79C \uC9C4\uD589\uB3C4/boulder \uC0C1\uD0DC \uD45C\uC2DC.
-
-<b>/start_work &lt;\uBC88\uD638&gt;</b>
-\uD574\uB2F9 \uC138\uC158\uC5D0 opencode <code>/start-work</code> \uC2AC\uB798\uC2DC \uCEE4\uB9E8\uB4DC \uC804\uC1A1.
-\uC548\uC804 \uAC8C\uC774\uD2B8: raw plan agent \uB610\uB294 Prometheus Plan Builder \uB77C\uBCA8 AND status=idle AND .omo/plans \uC5D0 \uBBF8\uC644\uB8CC plan \uC874\uC7AC AND .omo/boulder.json \uBD80\uC7AC.
-\uC870\uAC74 \uBBF8\uCDA9\uC871\uC2DC \uAD6C\uCCB4\uC801 \uC0AC\uC720 \uC548\uB0B4.
-(Telegram \uBD07 \uBA85\uB839\uC740 <code>/start_work</code>, \uB0B4\uBD80 \uD2B8\uB9AC\uAC70 \uB300\uC0C1\uC740 opencode \uC758 <code>/start-work</code>)
-
-<b>/help</b>
-\uC774 \uB3C4\uC6C0\uB9D0 \uD45C\uC2DC.
-
-<b>\uC81C\uC57D</b>
-\uBC88\uD638\uB294 <code>/sessions</code> \uB9C8\uC9C0\uB9C9 \uD638\uCD9C\uC758 \uC2A4\uB0C5\uC0F7\uC5D0 \uC885\uC18D (TTL 1\uC2DC\uAC04).
-leader \uD504\uB85C\uC138\uC2A4\uAC00 \uAD00\uCC30\uD55C \uC138\uC158\uB9CC \uD45C\uC2DC \u2014 \uB2E4\uB978 OpenCode \uD504\uB85C\uC138\uC2A4\uC758 \uC138\uC158\uC740 \uBCF4\uC774\uC9C0 \uC54A\uC744 \uC218 \uC788\uC74C.`;
-function createHelpDispatcher(deps) {
-  return async ({ chatId, bot }) => {
-    await bot.sendMessage(HELP_TEXT, { parse_mode: "HTML" });
-    deps.logger.info("help shown", { chatId });
   };
 }
 
@@ -3540,6 +3599,7 @@ var TelegramRemote = async (input) => {
     const stateStore = createStateStore();
     const initialState = await stateStore.read();
     const tokenHash = createHash5("sha256").update(config.botToken).digest("hex").slice(0, 16);
+    const processInstanceID = randomUUID();
     const configDir = join10(homedir3(), ".config/opencode/telegram-remote");
     const snapshotStore = createSnapshotStore({ configDir, tokenHash, logger });
     const sessionRegistry = createSessionRegistryStore({ configDir, tokenHash, logger });
@@ -3670,8 +3730,11 @@ var TelegramRemote = async (input) => {
       void runElection();
     }, 3e4);
     if (typeof electionTimer.unref === "function") electionTimer.unref();
+    let questionReplyDrainTimer;
+    let questionReplyDrainRunning = false;
     const cleanup = async () => {
       clearInterval(electionTimer);
+      if (questionReplyDrainTimer) clearInterval(questionReplyDrainTimer);
       try {
         await bot.stop();
       } catch {
@@ -3700,6 +3763,8 @@ var TelegramRemote = async (input) => {
       logger,
       claimsDir,
       pluginDir,
+      processInstanceID,
+      processID: process.pid,
       serverUrl: input.serverUrl,
       directory: input.directory,
       tokenHash,
@@ -3745,6 +3810,23 @@ var TelegramRemote = async (input) => {
       })
     );
     bot.setHelpDispatcher(createHelpDispatcher({ logger }));
+    const drainQuestionReplies = async () => {
+      if (questionReplyDrainRunning) return;
+      questionReplyDrainRunning = true;
+      try {
+        const count = await drainSubmittedQuestionReplies(ctx);
+        if (count > 0) logger.info("submitted question replies drained", { count });
+      } catch (err) {
+        logger.warn("submitted question reply drain failed", { error: String(err) });
+      } finally {
+        questionReplyDrainRunning = false;
+      }
+    };
+    questionReplyDrainTimer = setInterval(() => {
+      void drainQuestionReplies();
+    }, 1e3);
+    if (typeof questionReplyDrainTimer.unref === "function") questionReplyDrainTimer.unref();
+    void drainQuestionReplies();
     if (leadership.isLeader) {
       startLeaderPolling();
     }

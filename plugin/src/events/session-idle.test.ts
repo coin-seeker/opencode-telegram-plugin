@@ -146,6 +146,8 @@ function createContext(
     logger: createLogger(),
     claimsDir: join(dir, "claims"),
     pluginDir: dir,
+    processInstanceID: "test-instance",
+    processID: 100,
     serverUrl: new URL("http://localhost:4096"),
     directory: dir,
     tokenHash: "tok",

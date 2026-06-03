@@ -29,7 +29,7 @@ describe("checkPlanReadiness", () => {
     }
   });
 
-  test("boulder-active: blocks when the ledger holds a non-terminal work", async () => {
+  test("boulder-active: no longer blocks; stays ready with boulderActive flag", async () => {
     const root = join(dir, "boulder");
     const plansDir = join(root, ".omo", "plans");
     await mkdir(plansDir, { recursive: true });
@@ -49,9 +49,9 @@ describe("checkPlanReadiness", () => {
       }),
     );
     const result = await checkPlanReadiness({ projectRoot: root });
-    assert.equal(result.ready, false);
-    if (!result.ready) {
-      assert.equal(result.reason, "boulder-active");
+    assert.equal(result.ready, true);
+    if (result.ready) {
+      assert.equal(result.boulderActive, true);
     }
   });
 

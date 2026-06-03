@@ -338,17 +338,15 @@ describe("start-work-command dispatcher", () => {
     assert.equal(harness.statusCalls.count, 1);
   });
 
-  test("plan-readiness boulder-active returns Korean safety message", async () => {
+  test("active boulder no longer blocks: start-work is dispatched", async () => {
     const projectRoot = await createBoulderProject(dir);
     const harness = makeHarness({ projectRoot, serviceAgent: "plan" });
 
     await harness.run(["1"]);
 
-    assert.equal(
-      harness.sendCalls[0]?.text,
-      ".omo/boulder.json 에 진행 중인 작업이 있습니다. 기존 작업을 완료하거나 archive 후 다시 시도하세요",
-    );
-    assert.equal(harness.commands.length, 0);
+    assert.deepEqual(harness.commands, [
+      { sessionId: "ses_plan", command: "start-work", serverUrl: undefined },
+    ]);
   });
 
   test("plan-readiness no-plans returns Korean safety message", async () => {

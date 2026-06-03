@@ -58,8 +58,6 @@ function readinessMessage(reason: PlanReadinessFailureReason): string {
       return "plan 파일에 체크박스가 없습니다 (헤더만 존재)";
     case "all-plans-complete":
       return "plan 의 모든 task 가 완료되었습니다. 새 plan 작성 필요";
-    case "boulder-active":
-      return ".omo/boulder.json 에 진행 중인 작업이 있습니다. 기존 작업을 완료하거나 archive 후 다시 시도하세요";
     case "no-session-plan":
       return "해당 세션과 연결된 plan 이 없습니다";
   }

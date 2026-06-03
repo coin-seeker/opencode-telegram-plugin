@@ -104,8 +104,6 @@ function planReadinessKorean(result: PlanReadinessResult): string {
       if (match) return `${match[1]}/${match[2]} 완료`;
       return "완료";
     }
-    case "boulder-active":
-      return "boulder 활성";
     case "no-session-plan":
       return "세션 연결 plan 없음";
   }
@@ -119,8 +117,7 @@ function planLine(result: PlanReadinessResult): string {
 }
 
 function boulderLine(result: PlanReadinessResult): string {
-  const active = result.boulderActive === true || (!result.ready && result.reason === "boulder-active");
-  return active ? "<b>Boulder</b>: 활성" : "<b>Boulder</b>: 없음";
+  return result.boulderActive === true ? "<b>Boulder</b>: 활성" : "<b>Boulder</b>: 없음";
 }
 
 export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispatcher {

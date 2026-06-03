@@ -2543,14 +2543,6 @@ async function checkPlanReadiness(args) {
   }
   const boulder = await readBoulderState(boulderPath);
   const projectBoulderActive = boulderHasActiveWork(boulder);
-  if (projectBoulderActive && sessionId === void 0) {
-    return {
-      ready: false,
-      reason: "boulder-active",
-      detail: `${boulderPath} has an active work`,
-      boulderActive: true
-    };
-  }
   if (boulder.state && sessionId !== void 0) {
     const work = findBoulderWorkForSession(boulder.state, sessionId);
     if (work) {
@@ -2629,8 +2621,6 @@ function readinessMessage(reason) {
       return "plan \uD30C\uC77C\uC5D0 \uCCB4\uD06C\uBC15\uC2A4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4 (\uD5E4\uB354\uB9CC \uC874\uC7AC)";
     case "all-plans-complete":
       return "plan \uC758 \uBAA8\uB4E0 task \uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4. \uC0C8 plan \uC791\uC131 \uD544\uC694";
-    case "boulder-active":
-      return ".omo/boulder.json \uC5D0 \uC9C4\uD589 \uC911\uC778 \uC791\uC5C5\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uAE30\uC874 \uC791\uC5C5\uC744 \uC644\uB8CC\uD558\uAC70\uB098 archive \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD558\uC138\uC694";
     case "no-session-plan":
       return "\uD574\uB2F9 \uC138\uC158\uACFC \uC5F0\uACB0\uB41C plan \uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
   }
@@ -2830,8 +2820,6 @@ function planReadinessKorean(result) {
       if (match) return `${match[1]}/${match[2]} \uC644\uB8CC`;
       return "\uC644\uB8CC";
     }
-    case "boulder-active":
-      return "boulder \uD65C\uC131";
     case "no-session-plan":
       return "\uC138\uC158 \uC5F0\uACB0 plan \uC5C6\uC74C";
   }
@@ -2843,8 +2831,7 @@ function planLine(result) {
   return `<b>\uD50C\uB79C \uC0C1\uD0DC</b>: ${planReadinessKorean(result)}`;
 }
 function boulderLine(result) {
-  const active = result.boulderActive === true || !result.ready && result.reason === "boulder-active";
-  return active ? "<b>Boulder</b>: \uD65C\uC131" : "<b>Boulder</b>: \uC5C6\uC74C";
+  return result.boulderActive === true ? "<b>Boulder</b>: \uD65C\uC131" : "<b>Boulder</b>: \uC5C6\uC74C";
 }
 function createStatusDispatcher(deps) {
   return async ({ chatId, bot, args }) => {

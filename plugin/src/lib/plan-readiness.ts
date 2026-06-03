@@ -18,7 +18,6 @@ export type PlanReadinessResult =
         | "no-plans"
         | "all-plans-complete"
         | "plan-empty"
-        | "boulder-active"
         | "no-session-plan";
       detail: string;
       boulderActive?: boolean;
@@ -370,15 +369,9 @@ export async function checkPlanReadiness(args: {
   }
 
   const boulder = await readBoulderState(boulderPath);
+  // An active boulder no longer blocks readiness; it is surfaced via the
+  // boulderActive flag for display only, so start-work proceeds regardless.
   const projectBoulderActive = boulderHasActiveWork(boulder);
-  if (projectBoulderActive && sessionId === undefined) {
-    return {
-      ready: false,
-      reason: "boulder-active",
-      detail: `${boulderPath} has an active work`,
-      boulderActive: true,
-    };
-  }
   if (boulder.state && sessionId !== undefined) {
     const work = findBoulderWorkForSession(boulder.state, sessionId);
     if (work) {

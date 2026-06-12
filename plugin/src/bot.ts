@@ -211,8 +211,9 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
         logger.warn("setMyCommands failed", { error: String(err) });
       }
       try {
+        // Keep pending updates: button taps and replies sent while no leader was polling
+        // (leader handover, OpenCode restart) must still be delivered to the next leader.
         await bot.start({
-          drop_pending_updates: true,
           onStart: () => {
             logger.info("polling started");
           },

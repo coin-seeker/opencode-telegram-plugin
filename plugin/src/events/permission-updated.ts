@@ -9,7 +9,9 @@ import {
 } from "../lib/pending-permissions.js";
 import type { EventHandlerContext } from "./types.js";
 
-const PERMISSION_EXPIRY_MS = 5 * 60_000;
+// No answer deadline: late Telegram replies are always forwarded and OpenCode decides whether the
+// permission is still answerable. `expiresAt` only bounds file retention (sweepExpired).
+const PERMISSION_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const CALLBACK_RE = /^p:([^:]+):(o|a|r)$/;
 
 interface NormalizedPermissionRequest {
@@ -174,7 +176,7 @@ async function handleNormalizedPermission(
       patterns: permission.patterns,
       always: permission.always,
       sentAt,
-      expiresAt: sentAt + PERMISSION_EXPIRY_MS,
+      expiresAt: sentAt + PERMISSION_RETENTION_MS,
       telegramMessageId: message.message_id,
       endpoint: permission.endpoint,
     };
@@ -275,12 +277,10 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
       if (!reply) return;
       const pending = await ctx.pendingPermissions.loadPending(shortHash);
       if (!pending) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
-        return;
-      }
-      if (pending.expiresAt < Date.now()) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
-        await ctx.pendingPermissions.deletePending(shortHash);
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "This permission request is no longer pending (already answered or the session ended).",
+        );
         return;
       }
       try {

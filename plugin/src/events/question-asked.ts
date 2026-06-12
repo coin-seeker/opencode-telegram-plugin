@@ -5,7 +5,12 @@ import { createQuestionShortHash, type PendingQuestionState } from "../lib/pendi
 import { pendingQuestionText } from "../lib/question-format.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
 
-const QUESTION_EXPIRY_MS = 5 * 60_000;
+// Pending question files are kept until OpenCode confirms the outcome (reply success,
+// question.replied event, or a failed delivery). There is NO answer deadline: the user can reply
+// from Telegram whenever they want, and OpenCode is the source of truth for whether the question
+// is still answerable. `expiresAt` is only a retention horizon for garbage-collecting files
+// orphaned by dead OpenCode processes (see sweepExpired callers).
+const QUESTION_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const CALLBACK_RE = /^q:([^:]+):(\d+):(\d+|c|d)$/;
 
 function isQuestionOption(value: Record<string, unknown>): boolean {
@@ -140,6 +145,23 @@ async function sendQuestionReply(
   }
 }
 
+export async function discardCustomAnswerPrompt(
+  ctx: EventHandlerContext,
+  pending: PendingQuestionState,
+): Promise<void> {
+  const promptMessageId = pending.awaitingCustomFor?.promptMessageId;
+  pending.awaitingCustomFor = undefined;
+  if (promptMessageId === undefined) return;
+  try {
+    await ctx.bot.deleteMessage(promptMessageId);
+  } catch (err) {
+    ctx.logger.warn("failed to delete custom answer prompt", {
+      promptMessageId,
+      error: String(err),
+    });
+  }
+}
+
 async function handOffQuestionReply(
   ctx: EventHandlerContext,
   pending: PendingQuestionState,
@@ -234,7 +256,7 @@ export async function handleQuestionAsked(
     ownerPID: ctx.processID,
     questions: request.questions,
     sentAt,
-    expiresAt: sentAt + QUESTION_EXPIRY_MS,
+    expiresAt: sentAt + QUESTION_RETENTION_MS,
     telegramMessageIds: [],
     currentQuestionIndex: 0,
     answersInProgress: request.questions.map(() => null),
@@ -278,12 +300,10 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       const selection = match[3];
       const pending = await ctx.pendingQuestions.loadPending(shortHash);
       if (!pending) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
-        return;
-      }
-      if (pending.expiresAt < Date.now()) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
-        await ctx.pendingQuestions.deletePending(shortHash);
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "This question is no longer pending (already answered or the session ended).",
+        );
         return;
       }
       if (pending.submittedAt !== undefined) {
@@ -293,11 +313,11 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
         );
         return;
       }
-      pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = pending.questions[questionIndex];
       if (!question) return;
 
       if (selection === "c") {
+        await discardCustomAnswerPrompt(ctx, pending);
         if (question.multiple === true) {
           await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), {
             reply_markup: { inline_keyboard: [] },
@@ -326,7 +346,7 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       if (selection === "d") {
         if (question.multiple !== true) return;
         pending.answersInProgress[questionIndex] = selectedAnswers(pending, questionIndex);
-        pending.awaitingCustomFor = undefined;
+        await discardCustomAnswerPrompt(ctx, pending);
         await completeIfReady(ctx, pending, shortHash);
         return;
       }
@@ -338,13 +358,13 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
         pending.answersInProgress[questionIndex] = current.includes(option.label)
           ? current.filter((answer) => answer !== option.label)
           : [...current, option.label];
-        pending.awaitingCustomFor = undefined;
+        await discardCustomAnswerPrompt(ctx, pending);
         await ctx.pendingQuestions.savePending(shortHash, pending);
         await editPromptForQuestion(ctx, pending, shortHash, questionIndex);
         return;
       }
       pending.answersInProgress[questionIndex] = [option.label];
-      pending.awaitingCustomFor = undefined;
+      await discardCustomAnswerPrompt(ctx, pending);
       await completeIfReady(ctx, pending, shortHash);
     },
     async handleTextReply(text, chatId, userId, replyToMessageId) {
@@ -353,12 +373,6 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       if (match.data.submittedAt !== undefined) return;
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
-      if (match.data.expiresAt < Date.now()) {
-        await ctx.bot.sendMessage("This question has expired.");
-        await ctx.pendingQuestions.deletePending(match.shortHash);
-        return;
-      }
-      match.data.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = match.data.questions[awaiting.questionIndex];
       if (question?.multiple === true) {
         const current = selectedAnswers(match.data, awaiting.questionIndex);

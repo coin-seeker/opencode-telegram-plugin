@@ -547,7 +547,7 @@ describe("permission updated flow", () => {
     assert.deepEqual(editedMessages, []);
   });
 
-  test("late permission callbacks expire without replying to opencode", async () => {
+  test("late permission callbacks past the old deadline still reply to opencode", async () => {
     const { bot, editedMessages } = createBot();
     const replies: Array<{
       requestID: string;
@@ -581,9 +581,17 @@ describe("permission updated flow", () => {
     const dispatcher = createPermissionDispatcher(ctx);
     await dispatcher.handleCallbackQuery(`p:${shortHash}:a`, 10);
 
-    assert.deepEqual(replies, []);
+    assert.deepEqual(replies, [
+      {
+        requestID: "per_expired",
+        sessionID: "ses_test",
+        reply: "always",
+        endpoint: "request",
+        serverUrl: "http://localhost:4096/",
+      },
+    ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /expired/i);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Always allowed/);
   });
 
   test("failed permission prompt send can be retried immediately", async () => {

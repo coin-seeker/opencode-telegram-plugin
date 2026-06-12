@@ -37,6 +37,7 @@ function createLogger() {
 function createBot() {
   const sentMessages: Array<{ text: string; options?: unknown }> = [];
   const editedMessages: Array<{ messageId: number; text: string; options?: unknown }> = [];
+  const deletedMessageIds: number[] = [];
   let nextMessageId = 10;
   const bot: TelegramBotManager = {
     async start() {},
@@ -65,7 +66,9 @@ function createBot() {
       sentMessages.push({ text, options: placeholder });
       return { message_id: nextMessageId++ };
     },
-    async deleteMessage() {},
+    async deleteMessage(messageId) {
+      deletedMessageIds.push(messageId);
+    },
     async getActiveChatId() {
       return 1;
     },
@@ -77,7 +80,7 @@ function createBot() {
     setStartWorkCommandDispatcher() {},
     setHelpDispatcher() {},
   };
-  return { bot, sentMessages, editedMessages };
+  return { bot, sentMessages, editedMessages, deletedMessageIds };
 }
 
 function createFailingPromptBot() {
@@ -436,8 +439,8 @@ describe("question asked flow", () => {
     assert.doesNotMatch(editedMessages.at(-1)?.text ?? "", /expired/i);
   });
 
-  test("refreshes the expiry window when the user taps Custom answer", async () => {
-    const { bot } = createBot();
+  test("deletes a stale custom answer prompt when the user answers with a button instead", async () => {
+    const { bot, deletedMessageIds, editedMessages } = createBot();
     const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
     const ctx = createContext(bot, "que_custom_window", dir, replies);
 
@@ -449,19 +452,52 @@ describe("question asked flow", () => {
     );
     const dispatcher = createQuestionDispatcher(ctx);
 
-    const pending = await ctx.pendingQuestions.loadPending(shortHash);
-    assert.ok(pending);
-    pending.expiresAt = Date.now() + 1000;
-    await ctx.pendingQuestions.savePending(shortHash, pending);
-
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:c`, 10, 1, 1);
+    const pending = await ctx.pendingQuestions.loadPending(shortHash);
+    const promptMessageId = pending?.awaitingCustomFor?.promptMessageId;
+    assert.ok(promptMessageId);
 
-    const refreshed = await ctx.pendingQuestions.loadPending(shortHash);
-    assert.ok(refreshed);
-    assert.ok(refreshed.expiresAt >= Date.now() + 4 * 60_000);
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
+
+    assert.deepEqual(deletedMessageIds, [promptMessageId]);
+    assert.deepEqual(replies, [
+      { requestID: "que_custom_window", answers: [["A"]], serverUrl: "http://localhost:4096/" },
+    ]);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
   });
 
-  test("late tap on a past-deadline question expires without replying to opencode", async () => {
+  test("deletes the pending custom answer prompt when answered in opencode", async () => {
+    const { bot, deletedMessageIds } = createBot();
+    const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
+    const ctx = createContext(bot, "que_external_custom", dir, replies);
+
+    await handleQuestionAsked(singleQuestionEvent("que_external_custom"), ctx);
+    const shortHash = createQuestionShortHash(
+      "que_external_custom",
+      "ses_test",
+      "http://localhost:4096/",
+    );
+    const dispatcher = createQuestionDispatcher(ctx);
+
+    await dispatcher.handleCallbackQuery(`q:${shortHash}:0:c`, 10, 1, 1);
+    const pending = await ctx.pendingQuestions.loadPending(shortHash);
+    const promptMessageId = pending?.awaitingCustomFor?.promptMessageId;
+    assert.ok(promptMessageId);
+
+    await handleQuestionReplied(
+      {
+        id: "event-replied-custom",
+        type: "question.replied",
+        properties: { sessionID: "ses_test", requestID: "que_external_custom", answers: [["A"]] },
+      },
+      ctx,
+    );
+
+    assert.deepEqual(deletedMessageIds, [promptMessageId]);
+    assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
+  });
+
+  test("late tap on a question past the old deadline still replies to opencode", async () => {
     const { bot, editedMessages } = createBot();
     const replies: Array<{ requestID: string; answers: QuestionAnswer[]; serverUrl?: string }> = [];
     const ctx = createContext(bot, "que_stale", dir, replies);
@@ -477,9 +513,11 @@ describe("question asked flow", () => {
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:0`, 10, 1, 1);
 
-    assert.deepEqual(replies, []);
+    assert.deepEqual(replies, [
+      { requestID: "que_stale", answers: [["A"]], serverUrl: "http://localhost:4096/" },
+    ]);
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /expired/i);
+    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
   });
 
   test("failed question prompt send can be retried immediately", async () => {

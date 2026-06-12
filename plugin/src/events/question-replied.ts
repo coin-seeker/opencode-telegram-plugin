@@ -1,4 +1,5 @@
 import type { EventQuestionReplied } from "@opencode-ai/sdk/v2";
+import { discardCustomAnswerPrompt } from "./question-asked.js";
 import type { EventHandlerContext } from "./types.js";
 
 export function isEventQuestionReplied(event: {
@@ -30,6 +31,7 @@ export async function handleQuestionReplied(
   }
   const messageId = found.data.telegramMessageIds[0];
   try {
+    await discardCustomAnswerPrompt(ctx, found.data);
     await ctx.bot.editMessageRemoveKeyboard(messageId, "✅ Already answered in opencode.");
   } catch (err) {
     ctx.logger.error("failed to edit externally answered question", {

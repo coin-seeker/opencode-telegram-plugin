@@ -130,6 +130,17 @@ export const TelegramRemote: Plugin = async (input: PluginInput) => {
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
     const pendingStartWorks = createPendingStartWorkStore({ tokenHash });
+    void Promise.allSettled([
+      pendingQuestions.sweepExpired(),
+      pendingPermissions.sweepExpired(),
+      pendingStartWorks.sweepExpired(),
+    ]).then((results) => {
+      for (const result of results) {
+        if (result.status === "rejected") {
+          logger.warn("pending store sweep failed", { error: String(result.reason) });
+        }
+      }
+    });
     const lockResult = await acquireLock({ lockPath });
     const leadership: { isLeader: boolean; handle?: LockHandle } = { isLeader: false };
     if (lockResult.acquired) {

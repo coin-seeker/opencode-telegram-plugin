@@ -172,7 +172,6 @@ This chat is now active for OpenCode notifications.`
       }
       try {
         await bot.start({
-          drop_pending_updates: true,
           onStart: () => {
             logger.info("polling started");
           }
@@ -531,7 +530,7 @@ function createPermissionShortHash(requestID, sessionID, endpoint2, serverUrl) {
 }
 
 // src/events/permission-updated.ts
-var PERMISSION_EXPIRY_MS = 5 * 6e4;
+var PERMISSION_RETENTION_MS = 7 * 24 * 60 * 6e4;
 var CALLBACK_RE = /^p:([^:]+):(o|a|r)$/;
 function isStringArray(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
@@ -659,7 +658,7 @@ async function handleNormalizedPermission(permission, ctx) {
       patterns: permission.patterns,
       always: permission.always,
       sentAt,
-      expiresAt: sentAt + PERMISSION_EXPIRY_MS,
+      expiresAt: sentAt + PERMISSION_RETENTION_MS,
       telegramMessageId: message.message_id,
       endpoint: permission.endpoint
     };
@@ -729,12 +728,10 @@ function createPermissionDispatcher(ctx) {
       if (!reply) return;
       const pending = await ctx.pendingPermissions.loadPending(shortHash);
       if (!pending) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
-        return;
-      }
-      if (pending.expiresAt < Date.now()) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This permission request has expired.");
-        await ctx.pendingPermissions.deletePending(shortHash);
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "This permission request is no longer pending (already answered or the session ended)."
+        );
         return;
       }
       try {
@@ -894,7 +891,7 @@ function createQuestionShortHash(requestID, sessionID, serverUrl) {
 }
 
 // src/events/question-asked.ts
-var QUESTION_EXPIRY_MS = 5 * 6e4;
+var QUESTION_RETENTION_MS = 7 * 24 * 60 * 6e4;
 var CALLBACK_RE2 = /^q:([^:]+):(\d+):(\d+|c|d)$/;
 function isQuestionOption(value) {
   return typeof value.label === "string" && typeof value.description === "string";
@@ -988,6 +985,19 @@ ${answerSummary(pending.questions, answers)}`
     await ctx.pendingQuestions.deletePending(shortHash);
   }
 }
+async function discardCustomAnswerPrompt(ctx, pending) {
+  const promptMessageId = pending.awaitingCustomFor?.promptMessageId;
+  pending.awaitingCustomFor = void 0;
+  if (promptMessageId === void 0) return;
+  try {
+    await ctx.bot.deleteMessage(promptMessageId);
+  } catch (err) {
+    ctx.logger.warn("failed to delete custom answer prompt", {
+      promptMessageId,
+      error: String(err)
+    });
+  }
+}
 async function handOffQuestionReply(ctx, pending, shortHash, answers) {
   pending.answersInProgress = answers;
   pending.awaitingCustomFor = void 0;
@@ -1058,7 +1068,7 @@ async function handleQuestionAsked(event, ctx) {
     ownerPID: ctx.processID,
     questions: request.questions,
     sentAt,
-    expiresAt: sentAt + QUESTION_EXPIRY_MS,
+    expiresAt: sentAt + QUESTION_RETENTION_MS,
     telegramMessageIds: [],
     currentQuestionIndex: 0,
     answersInProgress: request.questions.map(() => null)
@@ -1097,12 +1107,10 @@ function createQuestionDispatcher(ctx) {
       const selection = match[3];
       const pending = await ctx.pendingQuestions.loadPending(shortHash);
       if (!pending) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
-        return;
-      }
-      if (pending.expiresAt < Date.now()) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This question has expired.");
-        await ctx.pendingQuestions.deletePending(shortHash);
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          "This question is no longer pending (already answered or the session ended)."
+        );
         return;
       }
       if (pending.submittedAt !== void 0) {
@@ -1112,10 +1120,10 @@ function createQuestionDispatcher(ctx) {
         );
         return;
       }
-      pending.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = pending.questions[questionIndex];
       if (!question) return;
       if (selection === "c") {
+        await discardCustomAnswerPrompt(ctx, pending);
         if (question.multiple === true) {
           await ctx.bot.editMessageText(messageId, questionPromptText(pending, questionIndex), {
             reply_markup: { inline_keyboard: [] }
@@ -1143,7 +1151,7 @@ function createQuestionDispatcher(ctx) {
       if (selection === "d") {
         if (question.multiple !== true) return;
         pending.answersInProgress[questionIndex] = selectedAnswers(pending, questionIndex);
-        pending.awaitingCustomFor = void 0;
+        await discardCustomAnswerPrompt(ctx, pending);
         await completeIfReady(ctx, pending, shortHash);
         return;
       }
@@ -1152,13 +1160,13 @@ function createQuestionDispatcher(ctx) {
       if (question.multiple === true) {
         const current = selectedAnswers(pending, questionIndex);
         pending.answersInProgress[questionIndex] = current.includes(option.label) ? current.filter((answer) => answer !== option.label) : [...current, option.label];
-        pending.awaitingCustomFor = void 0;
+        await discardCustomAnswerPrompt(ctx, pending);
         await ctx.pendingQuestions.savePending(shortHash, pending);
         await editPromptForQuestion(ctx, pending, shortHash, questionIndex);
         return;
       }
       pending.answersInProgress[questionIndex] = [option.label];
-      pending.awaitingCustomFor = void 0;
+      await discardCustomAnswerPrompt(ctx, pending);
       await completeIfReady(ctx, pending, shortHash);
     },
     async handleTextReply(text, chatId, userId, replyToMessageId) {
@@ -1167,12 +1175,6 @@ function createQuestionDispatcher(ctx) {
       if (match.data.submittedAt !== void 0) return;
       const awaiting = match.data.awaitingCustomFor;
       if (!awaiting || awaiting.promptMessageId !== replyToMessageId) return;
-      if (match.data.expiresAt < Date.now()) {
-        await ctx.bot.sendMessage("This question has expired.");
-        await ctx.pendingQuestions.deletePending(match.shortHash);
-        return;
-      }
-      match.data.expiresAt = Date.now() + QUESTION_EXPIRY_MS;
       const question = match.data.questions[awaiting.questionIndex];
       if (question?.multiple === true) {
         const current = selectedAnswers(match.data, awaiting.questionIndex);
@@ -1214,6 +1216,7 @@ async function handleQuestionReplied(event, ctx) {
   }
   const messageId = found.data.telegramMessageIds[0];
   try {
+    await discardCustomAnswerPrompt(ctx, found.data);
     await ctx.bot.editMessageRemoveKeyboard(messageId, "\u2705 Already answered in opencode.");
   } catch (err) {
     ctx.logger.error("failed to edit externally answered question", {
@@ -3606,6 +3609,17 @@ var TelegramRemote = async (input) => {
     const pendingQuestions = createPendingQuestionStore({ tokenHash });
     const pendingPermissions = createPendingPermissionStore({ tokenHash });
     const pendingStartWorks = createPendingStartWorkStore({ tokenHash });
+    void Promise.allSettled([
+      pendingQuestions.sweepExpired(),
+      pendingPermissions.sweepExpired(),
+      pendingStartWorks.sweepExpired()
+    ]).then((results) => {
+      for (const result of results) {
+        if (result.status === "rejected") {
+          logger.warn("pending store sweep failed", { error: String(result.reason) });
+        }
+      }
+    });
     const lockResult = await acquireLock({ lockPath });
     const leadership = { isLeader: false };
     if (lockResult.acquired) {

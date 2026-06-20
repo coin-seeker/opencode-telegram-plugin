@@ -14,8 +14,8 @@ Conventions for working in this repository.
 - `npx biome check --write <files>` — format/lint
 
 ## Release
-- Bump `plugin/package.json`, and sync the version pins in `README.md`, `plugin/README.md`, and `docs/installation.md`.
-- `cd plugin && npm publish` (runs typecheck + tests via `prepublishOnly`, build via `prepack`).
+- Bump the version in `plugin/package.json` only. The docs (`README.md`, `plugin/README.md`, `docs/installation.md`) reference the package with the `@latest` npm tag, so they carry NO per-release version pins and never need syncing.
+- `cd plugin && npm publish` (runs typecheck + tests via `prepublishOnly`, build via `prepack`). Publishing moves the `latest` dist-tag to the new version, which is what every `@latest` install resolves on the next OpenCode start.
 
 ## Git
 - **Push over SSH.** `origin` must be `git@github.com:coin-seeker/opencode-telegram-plugin.git`.

@@ -1,6 +1,6 @@
 # OpenCode Telegram Plugin Installation
 
-Use this guide to install `@coinseeker/opencode-telegram-plugin@1.2.4` as an OpenCode npm package plugin.
+Use this guide to install `@coinseeker/opencode-telegram-plugin@latest` as an OpenCode npm package plugin.
 
 ## For AI Coding Agents
 
@@ -21,7 +21,7 @@ Copy this prompt into an AI coding agent if you want it to install the plugin:
 ```text
 Install OpenCode Telegram Plugin from npm.
 
-Package: @coinseeker/opencode-telegram-plugin@1.2.4
+Package: @coinseeker/opencode-telegram-plugin@latest
 
 Before modifying files, ask me for:
 - TELEGRAM_BOT_TOKEN
@@ -31,7 +31,7 @@ Before modifying files, ask me for:
 Then:
 1. Create ~/.config/opencode/telegram-remote/.env with the provided Telegram values.
 2. chmod 600 ~/.config/opencode/telegram-remote/.env.
-3. Add "@coinseeker/opencode-telegram-plugin@1.2.4" to ~/.config/opencode/opencode.json under the singular "plugin" array, preserving existing plugins.
+3. Add "@coinseeker/opencode-telegram-plugin@latest" to ~/.config/opencode/opencode.json under the singular "plugin" array, preserving existing plugins.
 4. Do not commit .env or any secrets.
 5. Show me the final non-secret config path and ask me to restart OpenCode.
 ```
@@ -63,7 +63,7 @@ Open `~/.config/opencode/opencode.json` and append the pinned npm package name:
 ```json
 {
   "plugin": [
-    "@coinseeker/opencode-telegram-plugin@1.2.4"
+    "@coinseeker/opencode-telegram-plugin@latest"
   ]
 }
 ```
@@ -84,17 +84,17 @@ For OpenCode permission prompts, use the Telegram inline buttons to **Allow once
 
 ## Updating an Existing npm Install
 
-Open `~/.config/opencode/opencode.json` and replace the old pinned package entry with the current version:
+OpenCode installs the `@latest` entry once and **caches it** under `~/.cache/opencode/packages/`. A plain restart will not pull a newer release, because OpenCode reuses the cached copy instead of re-querying npm. To move an existing install to the newest published release, do one of the following:
 
-```json
-{
-  "plugin": [
-    "@coinseeker/opencode-telegram-plugin@1.2.4"
-  ]
-}
-```
+- **Refresh the `@latest` cache** — delete the cached package directory, then restart OpenCode:
 
-If the `plugin` array has other entries, keep them unchanged. Restart OpenCode after saving because npm package plugins are resolved only when OpenCode starts.
+  ```bash
+  rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/@coinseeker/opencode-telegram-plugin@latest"
+  ```
+
+- **Or pin an exact version** in `opencode.json` (find the newest with `npm view @coinseeker/opencode-telegram-plugin version`). A new version spec is a different cache key, so OpenCode installs it fresh on the next restart.
+
+Keep any other `plugin` array entries unchanged. Restart OpenCode after saving because npm package plugins are resolved only when OpenCode starts.
 
 ## Local Clone Development
 
@@ -184,7 +184,7 @@ node -e "const os=require('os'); console.log(os.tmpdir() + '/opencoder-telegram.
 
 ### Plugin Does Not Load
 
-- Confirm the npm package name is exactly `@coinseeker/opencode-telegram-plugin@1.2.4`.
+- Confirm the npm package name is exactly `@coinseeker/opencode-telegram-plugin@latest`.
 - Confirm the key is `plugin`, not `plugins`.
 - Restart OpenCode.
 

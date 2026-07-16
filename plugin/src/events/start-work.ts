@@ -1,4 +1,5 @@
 import type { TelegramStartWorkDispatcher } from "../bot.js";
+import { field, notice } from "../lib/message-format.js";
 import { createStartWorkShortHash, type PendingStartWorkState } from "../lib/pending-start-work.js";
 import type { EventHandlerContext } from "./types.js";
 
@@ -15,7 +16,12 @@ export function startWorkKeyboard(
 }
 
 export function planCompleteMessage(title: string | null): string {
-  return title ? `plan 작성이 끝났어요.\n\n${title}` : "plan 작성이 끝났어요.";
+  return notice(
+    "📝",
+    "플랜 작성 완료",
+    ...(title ? [field("세션", title)] : []),
+    "/sessions 확인 후 /start_work N 으로 실행할 수 있어요.",
+  );
 }
 
 export function createPendingStartWork(
@@ -47,13 +53,19 @@ async function expirePending(
   pending: PendingStartWorkState,
   messageId: number,
 ): Promise<void> {
-  await ctx.bot.editMessageRemoveKeyboard(messageId, "⏱ /start-work request expired");
+  await ctx.bot.editMessageRemoveKeyboard(
+    messageId,
+    notice("⏱", "만료된 요청", "이 /start-work 요청은 만료되었어요."),
+  );
   await ctx.pendingStartWorks.deletePending(shortHash);
   ctx.logger.info("pending start-work expired", { sessionID: pending.sessionID });
 }
 
-const START_WORK_BUTTON_DISABLED_MESSAGE =
-  "This /start-work button is no longer used. Use /sessions and /start_work <number> instead.";
+const START_WORK_BUTTON_DISABLED_MESSAGE = notice(
+  "ℹ️",
+  "버튼 사용 중지",
+  "이 버튼은 더 이상 사용되지 않아요. /sessions 확인 후 /start_work N 을 사용해 주세요.",
+);
 
 function messageIdsFor(pending: PendingStartWorkState, currentMessageId: number): number[] {
   return [
@@ -103,7 +115,10 @@ export function createStartWorkDispatcher(ctx: EventHandlerContext): TelegramSta
       const shortHash = match[1];
       const pending = await ctx.pendingStartWorks.loadPending(shortHash);
       if (!pending) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This /start-work request has expired.");
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          notice("⏱", "만료된 요청", "이 /start-work 요청은 만료되었어요."),
+        );
         return;
       }
       if (pending.status === "consumed") {

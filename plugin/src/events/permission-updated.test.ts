@@ -231,7 +231,7 @@ describe("permission updated flow", () => {
       "request",
       "http://localhost:4096/",
     );
-    assert.match(sentMessages[0]?.text ?? "", /Permission requested/);
+    assert.match(sentMessages[0]?.text ?? "", /권한 요청/);
     assert.match(sentMessages[0]?.text ?? "", /\.env/);
     assert.match(JSON.stringify(sentMessages[0]?.options), /Allow once/);
     const pending = await ctx.pendingPermissions.loadPending(shortHash);
@@ -253,7 +253,7 @@ describe("permission updated flow", () => {
       },
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Allowed once/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /권한 허용 \(1회\)/);
   });
 
   test("sends legacy permission prompt and rejects from Telegram", async () => {
@@ -288,7 +288,7 @@ describe("permission updated flow", () => {
       },
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Rejected/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /권한 거부/);
   });
 
   test("keeps same request id permissions separate across sessions", async () => {
@@ -427,7 +427,7 @@ describe("permission updated flow", () => {
         directory: join(dir, "legacy-upgrade"),
       },
     ]);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Allowed once/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /권한 허용 \(1회\)/);
   });
 
   test("detects v1 and v2 permission.replied events", () => {
@@ -492,7 +492,10 @@ describe("permission updated flow", () => {
 
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
     assert.equal(editedMessages.at(-1)?.messageId, 42);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Allowed once in opencode/);
+    assert.match(
+      editedMessages.at(-1)?.text ?? "",
+      /권한 허용 \(1회\)[\s\S]*OpenCode에서 직접 처리/,
+    );
   });
 
   test("clears pending permission when replied outside Telegram (v1 permissionID)", async () => {
@@ -529,7 +532,7 @@ describe("permission updated flow", () => {
 
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
     assert.equal(editedMessages.at(-1)?.messageId, 55);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Rejected in opencode/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /권한 거부[\s\S]*OpenCode에서 직접 처리/);
   });
 
   test("permission.replied for unknown requestID is a no-op", async () => {
@@ -591,7 +594,7 @@ describe("permission updated flow", () => {
       },
     ]);
     assert.equal(await ctx.pendingPermissions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Always allowed/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /권한 항상 허용/);
   });
 
   test("failed permission prompt send can be retried immediately", async () => {

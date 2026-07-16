@@ -168,10 +168,10 @@ The plugin reacts to these OpenCode events:
 
 | Event | When it fires | Telegram behavior |
 |-------|---------------|-------------------|
-| `session.status` / `session.idle` | Root session finishes and no child/subagent is running | Sends `Agent has finished: [Session Title] ([agent])`, where `[agent]` is the session's agent name (e.g. `build`) when known |
+| `session.status` / `session.idle` | Root session finishes and no child/subagent is running | Sends a `✅ 작업 완료` notice with the session title and agent name (e.g. `build`) when known |
 | Child/subagent idle | A subagent finishes | Suppressed; no Telegram completion message |
 | Parent idle while background subagent is running | Parent appears idle before background work completes | Defers the parent completion message |
-| `permission.updated` | OpenCode is waiting on a permission decision | Sends `Permission needed: [Session Title]` |
+| `permission.updated` | OpenCode is waiting on a permission decision | Sends a `🔐 권한 요청` notice with the session title and permission details |
 | `permission.asked` | OpenCode is waiting on a permission decision | Sends approve/reject inline buttons |
 | `question.asked` | OpenCode asks an interactive question | Sends Telegram inline buttons and optional custom answer flow |
 | `question.replied` | The question was answered elsewhere | Cleans up pending Telegram question state |
@@ -250,7 +250,7 @@ You can get your chat ID by messaging the bot once, or using [@userinfobot](http
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather | `123456:ABC-DEF...` |
 | `TELEGRAM_ALLOWED_USER_IDS` | Yes | Comma-separated numeric user IDs | `123456789,987654321` |
 | `TELEGRAM_CHAT_ID` | No | Pre-configured chat ID (skips discovery) | `123456789` |
-| `TELEGRAM_IDLE_SETTLE_DELAY_MS` | No | Quiet period (ms) the root session must stay continuously idle before a completion notification is sent. Suppresses false "Agent has finished" pings when a harness (e.g. oh-my-opencode) re-triggers the session after background subagents, todo-continuation, or context compaction. Set to `0` to disable. Default `12000`. | `12000` |
+| `TELEGRAM_IDLE_SETTLE_DELAY_MS` | No | Quiet period (ms) the root session must stay continuously idle before a completion notification is sent. Suppresses false completion pings when a harness (e.g. oh-my-opencode) re-triggers the session after background subagents, todo-continuation, or context compaction. Set to `0` to disable. Default `12000`. | `12000` |
 
 ### OpenCode Plugin Configuration
 

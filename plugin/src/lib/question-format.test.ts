@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 import { pendingQuestionText, questionText } from "./question-format.js";
 
 describe("question text formatting", () => {
-  test("renders option descriptions as quote-style text", () => {
+  test("renders the shared notice layout with an option list", () => {
     const text = questionText({
       header: "Strategy",
       question: "Choose one",
@@ -15,7 +15,20 @@ describe("question text formatting", () => {
 
     assert.equal(
       text,
-      "❓ Strategy\n\nChoose one\n\nOptions:\n\n1. Split\n설명: List frequently, detail overnight.\n\n2. Hybrid\n설명: Fast polling plus reconciliation.",
+      "❓ <b>Strategy</b>\n\nChoose one\n\n<b>선택지</b>\n1. <b>Split</b> — List frequently, detail overnight.\n2. <b>Hybrid</b> — Fast polling plus reconciliation.",
+    );
+  });
+
+  test("escapes HTML in user-provided question content", () => {
+    const text = questionText({
+      header: "Use <script>?",
+      question: "Allow a < b & c?",
+      options: [{ label: "<b>yes</b>", description: "" }],
+    });
+
+    assert.equal(
+      text,
+      "❓ <b>Use &lt;script&gt;?</b>\n\nAllow a &lt; b &amp; c?\n\n<b>선택지</b>\n1. <b>&lt;b&gt;yes&lt;/b&gt;</b>",
     );
   });
 
@@ -28,9 +41,9 @@ describe("question text formatting", () => {
       1,
     );
 
-    assert.match(text, /^❓ Question 2\/2 · Second/);
+    assert.match(text, /^❓ <b>Second<\/b> \(2\/2\)/);
     assert.doesNotMatch(text, /All questions:/);
     assert.doesNotMatch(text, /First\?/);
-    assert.match(text, /Options:\n\n1\. B\n설명: Beta/);
+    assert.match(text, /<b>선택지<\/b>\n1\. <b>B<\/b> — Beta/);
   });
 });

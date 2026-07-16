@@ -120,9 +120,7 @@ async function addRemoteServerRecords(
   }
 }
 
-export function createSessionsDispatcher(
-  deps: SessionsDispatcherDeps,
-): SessionsDispatcher {
+export function createSessionsDispatcher(deps: SessionsDispatcherDeps): SessionsDispatcher {
   return async ({ chatId, bot }) => {
     let sessions: SessionsRecord[];
     try {
@@ -157,7 +155,10 @@ export function createSessionsDispatcher(
         try {
           await addRemoteServerRecords(combined, serverUrl, deps);
         } catch (err) {
-          deps.logger.error("sessions remote server refresh failed", { serverUrl, error: String(err) });
+          deps.logger.error("sessions remote server refresh failed", {
+            serverUrl,
+            error: String(err),
+          });
         }
       }
       for (const session of (listResult.data ?? []).filter(isRootSession)) {
@@ -213,7 +214,7 @@ export function createSessionsDispatcher(
       body = body.slice(0, MAX_BODY_CHARS) + "…";
     }
 
-    const text = `<b>최근 세션 (top ${entries.length})</b>\n${body}\n\n<i>/status N 또는 /start_work N 으로 조작</i>`;
+    const text = `📋 <b>최근 세션 (top ${entries.length})</b>\n\n${body}\n\n<i>/status N 또는 /start_work N 으로 조작</i>`;
     await bot.sendMessage(text, { parse_mode: "HTML" });
     deps.logger.info("sessions listed", { chatId, count: entries.length });
   };

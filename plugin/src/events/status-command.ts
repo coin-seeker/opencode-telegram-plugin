@@ -241,16 +241,16 @@ export function createStatusDispatcher(deps: StatusDispatcherDeps): StatusDispat
     const agent = rawAgent ? escapeHtml(rawAgent) : "?";
 
     const text = [
-      `<b>세션 #${n}</b>: ${title}`,
-      `에이전트: ${agent}`,
-      `상태: ${escapeHtml(sessionStatus)}`,
+      `📊 <b>세션 #${n}</b>: ${title}`,
+      ``,
+      `<b>에이전트</b>: ${agent}`,
+      `<b>상태</b>: ${escapeHtml(sessionStatus)}`,
       ``,
       `<b>마지막 메시지</b>`,
       `유저: ${userSnippet}`,
       `에이전트: ${assistantSnippet}`,
       ``,
       planLine(planReady),
-      ``,
       boulderLine(planReady),
     ].join("\n");
 

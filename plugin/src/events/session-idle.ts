@@ -2,6 +2,7 @@ import type { EventSessionIdle, EventSessionStatus } from "@opencode-ai/sdk";
 import { DEFAULT_IDLE_SETTLE_DELAY_MS } from "../config.js";
 import { shouldSuppressIdle } from "../lib/abort-tracker.js";
 import { claimOnce } from "../lib/claim.js";
+import { field, notice } from "../lib/message-format.js";
 import {
   normalizeMessages,
   normalizeStatusMap,
@@ -21,8 +22,12 @@ const deferredConfirmTimers = new Map<string, NodeJS.Timeout>();
 const idleSettleTimers = new Map<string, NodeJS.Timeout>();
 
 export function agentFinishedMessage(title: string | null, agent: string | undefined): string {
-  const base = title ? `Agent has finished: ${title}` : "Agent has finished.";
-  return agent ? `${base} (${agent})` : base;
+  return notice(
+    "✅",
+    "작업 완료",
+    ...(title ? [field("세션", title)] : []),
+    ...(agent ? [field("에이전트", agent)] : []),
+  );
 }
 
 function selectPlanSessionAgent(candidates: Array<string | undefined>): string | undefined {

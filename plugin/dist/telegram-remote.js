@@ -12,29 +12,56 @@ import { fileURLToPath } from "url";
 // src/bot.ts
 import { Bot, GrammyError } from "grammy";
 
+// src/lib/html-escape.ts
+function escapeHtml(input) {
+  return input.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function truncateForTelegram(input, maxChars, ellipsis = "\u2026") {
+  const single = input.replace(/\s+/g, " ").trim();
+  if (single.length <= maxChars) return single;
+  if (maxChars <= 0) return "";
+  if (ellipsis.length >= maxChars) return ellipsis.slice(0, maxChars);
+  return single.slice(0, maxChars - ellipsis.length) + ellipsis;
+}
+function stripCodeFences(input) {
+  return input.replace(/```[^\r\n`]*\r?\n([\s\S]*?)```/g, "$1").replace(/```([\s\S]*?)```/g, "$1").replace(/`([^`]*)`/g, "$1").replace(/\s+/g, " ").trim();
+}
+
+// src/lib/message-format.ts
+function notice(emoji, title, ...bodyLines) {
+  const header = `${emoji} <b>${escapeHtml(title)}</b>`;
+  const body = bodyLines.filter((line) => line !== "").join("\n");
+  return body ? `${header}
+
+${body}` : header;
+}
+function field(label, value) {
+  return `<b>${escapeHtml(label)}</b>: ${escapeHtml(value)}`;
+}
+
 // src/lib/question-format.ts
-function optionDescriptionText(question) {
-  const options = question.options.map((option, index) => {
+function optionLines(question) {
+  if (question.options.length === 0) return "";
+  const lines = question.options.map((option, index) => {
     const description = option.description.trim();
-    return description ? `${index + 1}. ${option.label}
-\uC124\uBA85: ${description}` : `${index + 1}. ${option.label}`;
+    const label = `${index + 1}. <b>${escapeHtml(option.label)}</b>`;
+    return description ? `${label} \u2014 ${escapeHtml(description)}` : label;
   });
-  return options.length > 0 ? `
+  return `
 
-Options:
-
-${options.join("\n\n")}` : "";
+<b>\uC120\uD0DD\uC9C0</b>
+${lines.join("\n")}`;
 }
 function questionText(question, progress) {
-  const title = question.header || "Question";
-  const header = progress ? `\u2753 ${progress} \xB7 ${title}` : `\u2753 ${title}`;
+  const title = escapeHtml(question.header || "\uC9C8\uBB38");
+  const header = progress ? `\u2753 <b>${title}</b> (${progress})` : `\u2753 <b>${title}</b>`;
   return `${header}
 
-${question.question}${optionDescriptionText(question)}`;
+${escapeHtml(question.question)}${optionLines(question)}`;
 }
 function pendingQuestionText(questions, questionIndex) {
   const question = questions[questionIndex];
-  const progress = questions.length > 1 ? `Question ${questionIndex + 1}/${questions.length}` : void 0;
+  const progress = questions.length > 1 ? `${questionIndex + 1}/${questions.length}` : void 0;
   return questionText(question, progress);
 }
 
@@ -66,11 +93,13 @@ function createTelegramBot(opts) {
         await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
         logger.info("chat_id discovered", { chatId: newChatId });
         await ctx.reply(
-          `\u2705 Chat connected!
-
-Your chat_id: ${newChatId}
-
-This chat is now active for OpenCode notifications.`
+          notice(
+            "\u{1F517}",
+            "\uCC44\uD305 \uC5F0\uACB0 \uC644\uB8CC",
+            `<b>chat_id</b>: <code>${newChatId}</code>`,
+            "\uC774\uC81C OpenCode \uC54C\uB9BC\uC744 \uC774 \uCC44\uD305\uC73C\uB85C \uBC1B\uC544\uC694."
+          ),
+          { parse_mode: "HTML" }
         );
       }
     }
@@ -195,7 +224,7 @@ This chat is now active for OpenCode notifications.`
     },
     async sendMessage(text, options) {
       const chatId = await requireChatId("sendMessage");
-      const result = await bot.api.sendMessage(chatId, text, options);
+      const result = await bot.api.sendMessage(chatId, text, { parse_mode: "HTML", ...options });
       return { message_id: result.message_id };
     },
     async sendQuestionWithKeyboard(question, callbackData) {
@@ -215,12 +244,11 @@ This chat is now active for OpenCode notifications.`
       });
     },
     async editMessage(messageId, text) {
-      const chatId = await requireChatId("editMessage");
-      await bot.api.editMessageText(chatId, messageId, text);
+      await this.editMessageText(messageId, text);
     },
     async editMessageText(messageId, text, options) {
       const chatId = await requireChatId("editMessageText");
-      await bot.api.editMessageText(chatId, messageId, text, options);
+      await bot.api.editMessageText(chatId, messageId, text, { parse_mode: "HTML", ...options });
     },
     async editMessageRemoveKeyboard(messageId, finalText) {
       await this.editMessageText(messageId, finalText, { reply_markup: { inline_keyboard: [] } });
@@ -335,7 +363,7 @@ function parseIdleSettleDelayMs(value, logger) {
 }
 
 // src/events/help-command.ts
-var HELP_TEXT = `<b>OpenCode Telegram Plugin \u2014 \uBA85\uB839 \uB3C4\uC6C0\uB9D0</b>
+var HELP_TEXT = `\u{1F4D6} <b>OpenCode Telegram Plugin \u2014 \uBA85\uB839 \uB3C4\uC6C0\uB9D0</b>
 
 <b>/sessions</b>
 \uD65C\uC131 root \uC138\uC158 \uBAA9\uB85D\uC744 \uBC88\uD638\uC640 \uD568\uAED8 \uD45C\uC2DC (\uCD5C\uADFC\uD65C\uB3D9\uC21C top 20).
@@ -576,17 +604,17 @@ function normalizeAsked(permission) {
   };
 }
 function permissionMessage(permission, sessionTitle) {
-  const titleLine = sessionTitle ? `\u{1F4CB} ${sessionTitle}` : `Session: ${permission.sessionID}`;
-  const patterns = permission.patterns.length > 0 ? `
-Patterns: ${permission.patterns.join(", ")}` : "";
-  const always = permission.always.length > 0 ? `
-Always options: ${permission.always.join(", ")}` : "";
-  return `\u2753 Permission requested
-
-${titleLine}
-
-Permission: ${permission.permission}
-Detail: ${permission.title}${patterns}${always}`;
+  return notice(
+    "\u{1F510}",
+    "\uAD8C\uD55C \uC694\uCCAD",
+    field("\uC138\uC158", sessionTitle ?? permission.sessionID),
+    field("\uAD8C\uD55C", permission.permission),
+    field("\uB0B4\uC6A9", permission.title),
+    ...permission.patterns.length > 0 ? [field("\uD328\uD134", permission.patterns.join(", "))] : []
+  );
+}
+function permissionBodyLines(permission, title) {
+  return [field("\uAD8C\uD55C", permission), field("\uB0B4\uC6A9", title)];
 }
 function permissionKeyboard(shortHash) {
   return [
@@ -601,10 +629,9 @@ function replyFromSelection(selection) {
   if (selection === "r") return "reject";
   return void 0;
 }
-function replyLabel(reply) {
-  if (reply === "once") return "Allowed once";
-  if (reply === "always") return "Always allowed";
-  return "Rejected";
+function replyNotice(reply, permission, title) {
+  const heading = reply === "once" ? ["\u2705", "\uAD8C\uD55C \uD5C8\uC6A9 (1\uD68C)"] : reply === "always" ? ["\u267B\uFE0F", "\uAD8C\uD55C \uD56D\uC0C1 \uD5C8\uC6A9"] : ["\u26D4", "\uAD8C\uD55C \uAC70\uBD80"];
+  return notice(heading[0], heading[1], ...permissionBodyLines(permission, title));
 }
 async function upgradeLegacyPendingPermission(permission, ctx) {
   const found = await ctx.pendingPermissions.findByRequestID(
@@ -682,11 +709,11 @@ function isEventPermissionReplied(event) {
   const hasId = typeof props.permissionID === "string" || typeof props.requestID === "string";
   return hasId;
 }
-function externalReplyLabel(value) {
-  if (value === "once") return "Allowed once in opencode";
-  if (value === "always") return "Always allowed in opencode";
-  if (value === "reject") return "Rejected in opencode";
-  return "Already answered in opencode";
+function externalReplyTitle(value) {
+  if (value === "once") return "\uAD8C\uD55C \uD5C8\uC6A9 (1\uD68C)";
+  if (value === "always") return "\uAD8C\uD55C \uD56D\uC0C1 \uD5C8\uC6A9";
+  if (value === "reject") return "\uAD8C\uD55C \uAC70\uBD80";
+  return "\uAD8C\uD55C \uCC98\uB9AC \uC644\uB8CC";
 }
 async function handlePermissionReplied(event, ctx) {
   const requestID = event.properties.requestID ?? event.properties.permissionID;
@@ -697,13 +724,16 @@ async function handlePermissionReplied(event, ctx) {
     ctx.serverUrl.href
   );
   if (!found) return;
-  const label = externalReplyLabel(event.properties.reply ?? event.properties.response);
+  const title = externalReplyTitle(event.properties.reply ?? event.properties.response);
   try {
     await ctx.bot.editMessageRemoveKeyboard(
       found.data.telegramMessageId,
-      `\u2705 ${label}
-
-${found.data.permission}: ${found.data.title}`
+      notice(
+        "\u2705",
+        title,
+        ...permissionBodyLines(found.data.permission, found.data.title),
+        "OpenCode\uC5D0\uC11C \uC9C1\uC811 \uCC98\uB9AC\uD588\uC5B4\uC694."
+      )
     );
     ctx.logger.info("permission externally replied - cleared pending", {
       requestID,
@@ -730,7 +760,7 @@ function createPermissionDispatcher(ctx) {
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          "This permission request is no longer pending (already answered or the session ended)."
+          notice("\u2139\uFE0F", "\uB9CC\uB8CC\uB41C \uC694\uCCAD", "\uC774\uBBF8 \uCC98\uB9AC\uB418\uC5C8\uAC70\uB098 \uC138\uC158\uC774 \uC885\uB8CC\uB41C \uAD8C\uD55C \uC694\uCCAD\uC774\uC5D0\uC694.")
         );
         return;
       }
@@ -745,9 +775,7 @@ function createPermissionDispatcher(ctx) {
         );
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          `\u2705 Permission ${replyLabel(reply)}
-
-${pending.permission}: ${pending.title}`
+          replyNotice(reply, pending.permission, pending.title)
         );
         ctx.logger.info("permission reply sent", {
           requestID: pending.requestID,
@@ -757,7 +785,7 @@ ${pending.permission}: ${pending.title}`
       } catch (err) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          "\u26A0\uFE0F Failed to send permission reply to opencode"
+          notice("\u26A0\uFE0F", "\uAD8C\uD55C \uC751\uB2F5 \uC804\uC1A1 \uC2E4\uD328", "OpenCode\uC5D0 \uC751\uB2F5\uC744 \uC804\uB2EC\uD558\uC9C0 \uBABB\uD588\uC5B4\uC694.")
         );
         ctx.logger.error("failed to send permission reply", {
           error: String(err),
@@ -957,32 +985,33 @@ function questionInlineKeyboard(shortHash, questionIndex, question, selected) {
 function questionPromptText(pending, questionIndex) {
   return pendingQuestionText(pending.questions, questionIndex);
 }
-function answerSummary(questions, answers) {
+function answerSummaryLines(questions, answers) {
   return answers.map(
-    (answer, index) => `${index + 1}. ${questions[index]?.header ?? "Question"}: ${answer.join(", ") || "(empty)"}`
-  ).join("\n");
+    (answer, index) => field(questions[index]?.header ?? `\uC9C8\uBB38 ${index + 1}`, answer.join(", ") || "(\uC5C6\uC74C)")
+  );
 }
 async function sendQuestionReply(ctx, pending, shortHash, answers) {
   const messageId = pending.telegramMessageIds[0];
+  await ctx.pendingQuestions.deletePending(shortHash);
   try {
     await ctx.replyToQuestion(pending.requestID, answers, pending.serverUrl);
     await ctx.bot.editMessageRemoveKeyboard(
       messageId,
-      `\u2705 Answered:
-${answerSummary(pending.questions, answers)}`
+      notice("\u2705", "\uB2F5\uBCC0 \uC644\uB8CC", ...answerSummaryLines(pending.questions, answers))
     );
     ctx.logger.info("question reply sent", {
       requestID: pending.requestID,
       sessionID: pending.sessionID
     });
   } catch (err) {
-    await ctx.bot.editMessageRemoveKeyboard(messageId, "\u26A0\uFE0F Failed to send answer to opencode");
+    await ctx.bot.editMessageRemoveKeyboard(
+      messageId,
+      notice("\u26A0\uFE0F", "\uB2F5\uBCC0 \uC804\uC1A1 \uC2E4\uD328", "OpenCode\uC5D0 \uB2F5\uBCC0\uC744 \uC804\uB2EC\uD558\uC9C0 \uBABB\uD588\uC5B4\uC694. \uB85C\uADF8\uB97C \uD655\uC778\uD574 \uC8FC\uC138\uC694.")
+    );
     ctx.logger.error("failed to send question reply", {
       error: String(err),
       requestID: pending.requestID
     });
-  } finally {
-    await ctx.pendingQuestions.deletePending(shortHash);
   }
 }
 async function discardCustomAnswerPrompt(ctx, pending) {
@@ -1005,7 +1034,7 @@ async function handOffQuestionReply(ctx, pending, shortHash, answers) {
   await ctx.pendingQuestions.savePending(shortHash, pending);
   await ctx.bot.editMessageRemoveKeyboard(
     pending.telegramMessageIds[0],
-    "\u23F3 Sending answer to the OpenCode window that asked this question..."
+    notice("\u23F3", "\uB2F5\uBCC0 \uC804\uC1A1 \uC911", "\uC9C8\uBB38\uC744 \uBC1B\uC740 OpenCode \uCC3D\uC73C\uB85C \uB2F5\uBCC0\uC744 \uC804\uB2EC\uD558\uACE0 \uC788\uC5B4\uC694.")
   );
   ctx.logger.info("question reply handed off to owner process", {
     requestID: pending.requestID,
@@ -1054,6 +1083,18 @@ async function drainSubmittedQuestionReplies(ctx) {
 async function handleQuestionAsked(event, ctx) {
   const request = event.properties;
   if (request.questions.length === 0) return;
+  const existing = await ctx.pendingQuestions.findByRequestID(
+    request.id,
+    request.sessionID,
+    ctx.serverUrl.href
+  );
+  if (existing) {
+    ctx.logger.info("question prompt already pending - skipping duplicate", {
+      requestID: request.id,
+      sessionID: request.sessionID
+    });
+    return;
+  }
   const claimKey = `question:${ctx.serverUrl.href}:${request.sessionID}:${request.id}`;
   const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: claimKey, ttlMs: 5e3 });
   if (!claimed) return;
@@ -1109,14 +1150,14 @@ function createQuestionDispatcher(ctx) {
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          "This question is no longer pending (already answered or the session ended)."
+          notice("\u2139\uFE0F", "\uB9CC\uB8CC\uB41C \uC9C8\uBB38", "\uC774\uBBF8 \uB2F5\uBCC0\uB418\uC5C8\uAC70\uB098 \uC138\uC158\uC774 \uC885\uB8CC\uB41C \uC9C8\uBB38\uC774\uC5D0\uC694.")
         );
         return;
       }
       if (pending.submittedAt !== void 0) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          "This answer is already being sent to opencode."
+          notice("\u23F3", "\uB2F5\uBCC0 \uC804\uC1A1 \uC911", "\uC774\uBBF8 \uB2F5\uBCC0\uC774 \uC804\uC1A1\uB418\uACE0 \uC788\uC5B4\uC694.")
         );
         return;
       }
@@ -1131,12 +1172,12 @@ function createQuestionDispatcher(ctx) {
         } else {
           await ctx.bot.editMessageRemoveKeyboard(
             messageId,
-            "\u270F\uFE0F Reply to the next message with your custom answer."
+            notice("\u270F\uFE0F", "\uCEE4\uC2A4\uD140 \uB2F5\uBCC0", "\uB2E4\uC74C \uBA54\uC2DC\uC9C0\uC5D0 \uB2F5\uC7A5(Reply)\uC73C\uB85C \uB2F5\uBCC0\uC744 \uC785\uB825\uD574 \uC8FC\uC138\uC694.")
           );
         }
         const prompt = await ctx.bot.replyWithForceReply(
-          "Type your custom answer",
-          "Type your answer"
+          notice("\u270F\uFE0F", "\uCEE4\uC2A4\uD140 \uB2F5\uBCC0 \uC785\uB825"),
+          "\uB2F5\uBCC0 \uC785\uB825"
         );
         pending.awaitingCustomFor = {
           shortHash,
@@ -1180,20 +1221,23 @@ function createQuestionDispatcher(ctx) {
         const current = selectedAnswers(match.data, awaiting.questionIndex);
         match.data.answersInProgress[awaiting.questionIndex] = current.includes(text) ? current : [...current, text];
         match.data.awaitingCustomFor = void 0;
-        await ctx.bot.sendMessage("\u2705 Custom answer added. Tap Done when finished.");
+        await ctx.bot.sendMessage(
+          notice("\u2705", "\uCEE4\uC2A4\uD140 \uB2F5\uBCC0 \uCD94\uAC00", "\uC120\uD0DD\uC744 \uB9C8\uCE58\uBA74 Done\uC744 \uB20C\uB7EC \uC81C\uCD9C\uD574 \uC8FC\uC138\uC694.")
+        );
         await ctx.pendingQuestions.savePending(match.shortHash, match.data);
         await editPromptForQuestion(ctx, match.data, match.shortHash, awaiting.questionIndex);
         return;
       }
       match.data.answersInProgress[awaiting.questionIndex] = [text];
       match.data.awaitingCustomFor = void 0;
-      await ctx.bot.sendMessage("\u2705 Custom answer sent.");
+      await ctx.bot.sendMessage(notice("\u2705", "\uCEE4\uC2A4\uD140 \uB2F5\uBCC0 \uC811\uC218"));
       await completeIfReady(ctx, match.data, match.shortHash);
     }
   };
 }
 
 // src/events/question-replied.ts
+var DEFAULT_RETRY_DELAYS_MS = [0, 500, 1500, 3e3, 5e3];
 function isEventQuestionReplied(event) {
   if (event.type !== "question.replied") return false;
   const props = event.properties;
@@ -1201,28 +1245,66 @@ function isEventQuestionReplied(event) {
     props && typeof props.requestID === "string" && typeof props.sessionID === "string"
   );
 }
-async function handleQuestionReplied(event, ctx) {
-  const found = await ctx.pendingQuestions.findByRequestID(
-    event.properties.requestID,
-    event.properties.sessionID,
-    ctx.serverUrl.href
+function sleep(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
+}
+function answeredInOpencodeText(pending) {
+  const header = pending.questions[0]?.header;
+  return notice(
+    "\u2705",
+    "\uB2F5\uBCC0 \uC644\uB8CC",
+    ...header ? [field("\uC9C8\uBB38", header)] : [],
+    "OpenCode\uC5D0\uC11C \uC9C1\uC811 \uB2F5\uBCC0\uD588\uC5B4\uC694."
+  );
+}
+async function findPendingWithRetry(ctx, requestID, sessionID, retryDelaysMs) {
+  for (const delayMs of retryDelaysMs) {
+    if (delayMs > 0) await sleep(delayMs);
+    const found = await ctx.pendingQuestions.findByRequestID(
+      requestID,
+      sessionID,
+      ctx.serverUrl.href
+    );
+    if (found) return found;
+  }
+  return void 0;
+}
+async function handleQuestionReplied(event, ctx, opts = {}) {
+  const { requestID, sessionID } = event.properties;
+  const claimed = await claimOnce({
+    claimsDir: ctx.claimsDir,
+    key: `question.replied:${ctx.serverUrl.href}:${sessionID}:${requestID}`,
+    ttlMs: 3e4
+  });
+  if (!claimed) return;
+  const found = await findPendingWithRetry(
+    ctx,
+    requestID,
+    sessionID,
+    opts.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS
   );
   if (!found) {
-    ctx.logger.info("question.replied no pending match", {
-      requestID: event.properties.requestID,
-      sessionID: event.properties.sessionID
-    });
+    ctx.logger.info("question.replied no pending match", { requestID, sessionID });
     return;
   }
   const messageId = found.data.telegramMessageIds[0];
+  const finalText = answeredInOpencodeText(found.data);
   try {
     await discardCustomAnswerPrompt(ctx, found.data);
-    await ctx.bot.editMessageRemoveKeyboard(messageId, "\u2705 Already answered in opencode.");
+    await ctx.bot.editMessageRemoveKeyboard(messageId, finalText);
   } catch (err) {
     ctx.logger.error("failed to edit externally answered question", {
       error: String(err),
-      requestID: event.properties.requestID
+      requestID
     });
+    try {
+      await ctx.bot.sendMessage(finalText);
+    } catch (sendErr) {
+      ctx.logger.error("failed to send answered-question fallback notice", {
+        error: String(sendErr),
+        requestID
+      });
+    }
   } finally {
     await ctx.pendingQuestions.deletePending(found.shortHash);
   }
@@ -1675,9 +1757,12 @@ function createStartWorkShortHash(sessionID) {
 var CALLBACK_RE3 = /^sw:([^:]+)$/;
 var START_WORK_EXPIRY_MS = 24 * 60 * 6e4;
 function planCompleteMessage(title) {
-  return title ? `plan \uC791\uC131\uC774 \uB05D\uB0AC\uC5B4\uC694.
-
-${title}` : "plan \uC791\uC131\uC774 \uB05D\uB0AC\uC5B4\uC694.";
+  return notice(
+    "\u{1F4DD}",
+    "\uD50C\uB79C \uC791\uC131 \uC644\uB8CC",
+    ...title ? [field("\uC138\uC158", title)] : [],
+    "/sessions \uD655\uC778 \uD6C4 /start_work N \uC73C\uB85C \uC2E4\uD589\uD560 \uC218 \uC788\uC5B4\uC694."
+  );
 }
 function createPendingStartWork(sessionID, title, serverUrl, telegramMessageId) {
   const sentAt = Date.now();
@@ -1696,11 +1781,18 @@ function startWorkShortHash(sessionID) {
   return createStartWorkShortHash(sessionID);
 }
 async function expirePending(ctx, shortHash, pending, messageId) {
-  await ctx.bot.editMessageRemoveKeyboard(messageId, "\u23F1 /start-work request expired");
+  await ctx.bot.editMessageRemoveKeyboard(
+    messageId,
+    notice("\u23F1", "\uB9CC\uB8CC\uB41C \uC694\uCCAD", "\uC774 /start-work \uC694\uCCAD\uC740 \uB9CC\uB8CC\uB418\uC5C8\uC5B4\uC694.")
+  );
   await ctx.pendingStartWorks.deletePending(shortHash);
   ctx.logger.info("pending start-work expired", { sessionID: pending.sessionID });
 }
-var START_WORK_BUTTON_DISABLED_MESSAGE = "This /start-work button is no longer used. Use /sessions and /start_work <number> instead.";
+var START_WORK_BUTTON_DISABLED_MESSAGE = notice(
+  "\u2139\uFE0F",
+  "\uBC84\uD2BC \uC0AC\uC6A9 \uC911\uC9C0",
+  "\uC774 \uBC84\uD2BC\uC740 \uB354 \uC774\uC0C1 \uC0AC\uC6A9\uB418\uC9C0 \uC54A\uC544\uC694. /sessions \uD655\uC778 \uD6C4 /start_work N \uC744 \uC0AC\uC6A9\uD574 \uC8FC\uC138\uC694."
+);
 function messageIdsFor(pending, currentMessageId) {
   return [
     .../* @__PURE__ */ new Set([...pending.telegramMessageIds ?? [pending.telegramMessageId], currentMessageId])
@@ -1736,7 +1828,10 @@ function createStartWorkDispatcher(ctx) {
       const shortHash = match[1];
       const pending = await ctx.pendingStartWorks.loadPending(shortHash);
       if (!pending) {
-        await ctx.bot.editMessageRemoveKeyboard(messageId, "This /start-work request has expired.");
+        await ctx.bot.editMessageRemoveKeyboard(
+          messageId,
+          notice("\u23F1", "\uB9CC\uB8CC\uB41C \uC694\uCCAD", "\uC774 /start-work \uC694\uCCAD\uC740 \uB9CC\uB8CC\uB418\uC5C8\uC5B4\uC694.")
+        );
         return;
       }
       if (pending.status === "consumed") {
@@ -1762,8 +1857,12 @@ var START_WORK_COMMAND_RE = /(?:^|[\s`"'(])\/?start[_-]work(?:$|[\s`"').,!?])/i;
 var deferredConfirmTimers = /* @__PURE__ */ new Map();
 var idleSettleTimers = /* @__PURE__ */ new Map();
 function agentFinishedMessage(title, agent) {
-  const base = title ? `Agent has finished: ${title}` : "Agent has finished.";
-  return agent ? `${base} (${agent})` : base;
+  return notice(
+    "\u2705",
+    "\uC791\uC5C5 \uC644\uB8CC",
+    ...title ? [field("\uC138\uC158", title)] : [],
+    ...agent ? [field("\uC5D0\uC774\uC804\uD2B8", agent)] : []
+  );
 }
 function selectPlanSessionAgent(candidates) {
   return candidates.find(isPlanSessionAgent) ?? candidates.find((agent) => agent !== void 0);
@@ -2148,21 +2247,6 @@ async function handleSessionUpdated(event, ctx) {
   );
 }
 
-// src/lib/html-escape.ts
-function escapeHtml(input) {
-  return input.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-function truncateForTelegram(input, maxChars, ellipsis = "\u2026") {
-  const single = input.replace(/\s+/g, " ").trim();
-  if (single.length <= maxChars) return single;
-  if (maxChars <= 0) return "";
-  if (ellipsis.length >= maxChars) return ellipsis.slice(0, maxChars);
-  return single.slice(0, maxChars - ellipsis.length) + ellipsis;
-}
-function stripCodeFences(input) {
-  return input.replace(/```[^\r\n`]*\r?\n([\s\S]*?)```/g, "$1").replace(/```([\s\S]*?)```/g, "$1").replace(/`([^`]*)`/g, "$1").replace(/\s+/g, " ").trim();
-}
-
 // src/events/sessions-command.ts
 var MAX_BODY_CHARS = 3900;
 var MAX_TITLE_CHARS = 55;
@@ -2250,7 +2334,10 @@ function createSessionsDispatcher(deps) {
         try {
           await addRemoteServerRecords(combined, serverUrl, deps);
         } catch (err) {
-          deps.logger.error("sessions remote server refresh failed", { serverUrl, error: String(err) });
+          deps.logger.error("sessions remote server refresh failed", {
+            serverUrl,
+            error: String(err)
+          });
         }
       }
       for (const session of (listResult.data ?? []).filter(isRootSession)) {
@@ -2297,7 +2384,8 @@ function createSessionsDispatcher(deps) {
     if (body.length > MAX_BODY_CHARS) {
       body = body.slice(0, MAX_BODY_CHARS) + "\u2026";
     }
-    const text = `<b>\uCD5C\uADFC \uC138\uC158 (top ${entries.length})</b>
+    const text = `\u{1F4CB} <b>\uCD5C\uADFC \uC138\uC158 (top ${entries.length})</b>
+
 ${body}
 
 <i>/status N \uB610\uB294 /start_work N \uC73C\uB85C \uC870\uC791</i>`;
@@ -2947,16 +3035,16 @@ function createStatusDispatcher(deps) {
     const title = escapeHtml(rawTitle ?? "");
     const agent = rawAgent ? escapeHtml(rawAgent) : "?";
     const text = [
-      `<b>\uC138\uC158 #${n}</b>: ${title}`,
-      `\uC5D0\uC774\uC804\uD2B8: ${agent}`,
-      `\uC0C1\uD0DC: ${escapeHtml(sessionStatus)}`,
+      `\u{1F4CA} <b>\uC138\uC158 #${n}</b>: ${title}`,
+      ``,
+      `<b>\uC5D0\uC774\uC804\uD2B8</b>: ${agent}`,
+      `<b>\uC0C1\uD0DC</b>: ${escapeHtml(sessionStatus)}`,
       ``,
       `<b>\uB9C8\uC9C0\uB9C9 \uBA54\uC2DC\uC9C0</b>`,
       `\uC720\uC800: ${userSnippet}`,
       `\uC5D0\uC774\uC804\uD2B8: ${assistantSnippet}`,
       ``,
       planLine(planReady),
-      ``,
       boulderLine(planReady)
     ].join("\n");
     await bot.sendMessage(text, { parse_mode: "HTML" });

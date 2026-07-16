@@ -60,10 +60,7 @@ interface MockClientShape {
     response?: { status: number };
   }>;
   status: () => Promise<{ data: { [k: string]: { type: "idle" | "busy" | "retry" } } }>;
-  messages: (args: {
-    path: { id: string };
-    query: { limit: number };
-  }) => Promise<{
+  messages: (args: { path: { id: string }; query: { limit: number } }) => Promise<{
     data: Array<{
       info: { role: "user" | "assistant" } & Record<string, unknown>;
       parts: Array<{ type: string; text?: string }>;
@@ -270,8 +267,8 @@ describe("status-command dispatcher", () => {
     assert.equal(sendCalls.length, 1);
     const text = sendCalls[0]?.text ?? "";
     assert.match(text, /<b>세션 #3<\/b>: Happy Title/);
-    assert.match(text, /에이전트: plan/);
-    assert.match(text, /상태: busy/);
+    assert.match(text, /<b>에이전트<\/b>: plan/);
+    assert.match(text, /<b>상태<\/b>: busy/);
     assert.match(text, /유저: hello world/);
     assert.match(text, /에이전트: all good/);
     assert.match(text, /<b>플랜 진행도<\/b>: 1\/3 \(plan-1\)/);
@@ -284,8 +281,8 @@ describe("status-command dispatcher", () => {
     assert.equal(log?.data?.chatId, 7);
     assert.equal(log?.data?.sessionId, "ses_happy");
     assert.equal(log?.data?.snapshotIndex, 3);
-    assert.equal(Object.prototype.hasOwnProperty.call(log?.data ?? {}, "text"), false);
-    assert.equal(Object.prototype.hasOwnProperty.call(log?.data ?? {}, "body"), false);
+    assert.equal(Object.hasOwn(log?.data ?? {}, "text"), false);
+    assert.equal(Object.hasOwn(log?.data ?? {}, "body"), false);
   });
 
   test("session-linked boulder works show distinct plan progress per status index", async () => {
@@ -365,7 +362,9 @@ describe("status-command dispatcher", () => {
 
     const sendCalls: SendCall[] = [];
     const dispatcher = createStatusDispatcher({
-      snapshotStore: makeSnapshotStore([makeEntry({ index: 1, sessionId: "ses_build", agent: "build" })]),
+      snapshotStore: makeSnapshotStore([
+        makeEntry({ index: 1, sessionId: "ses_build", agent: "build" }),
+      ]),
       sessionTitleService,
       client: makeClient({
         async get() {
@@ -405,7 +404,11 @@ describe("status-command dispatcher", () => {
       client: makeClient({
         async get() {
           return {
-            data: { directory: projectRoot, title: "CRM SaaS 전환 및 Status 서버 구축", id: "ses_prometheus" },
+            data: {
+              directory: projectRoot,
+              title: "CRM SaaS 전환 및 Status 서버 구축",
+              id: "ses_prometheus",
+            },
           };
         },
       }),
@@ -415,7 +418,7 @@ describe("status-command dispatcher", () => {
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
 
     const text = sendCalls[0]?.text ?? "";
-    assert.match(text, /에이전트: Prometheus - Plan Builder/);
+    assert.match(text, /<b>에이전트<\/b>: Prometheus - Plan Builder/);
     assert.match(text, /<b>플랜 진행도<\/b>: 1\/2 \(latest\)/);
   });
 
@@ -467,7 +470,7 @@ describe("status-command dispatcher", () => {
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
 
     const text = sendCalls[0]?.text ?? "";
-    assert.match(text, /상태: idle/);
+    assert.match(text, /<b>상태<\/b>: idle/);
     assert.ok(!text.includes("unknown"));
   });
 
@@ -570,14 +573,17 @@ describe("status-command dispatcher", () => {
     await dispatcher({ chatId: 1, userId: 1, bot: makeBot(sendCalls), args: ["1"] });
 
     assert.equal(localGetCalled, false);
-    assert.deepEqual(requested.sort(), [
-      "http://127.0.0.1:8888/session/ses_remote",
-      "http://127.0.0.1:8888/session/ses_remote/message?limit=10",
-      "http://127.0.0.1:8888/session/status",
-    ].sort());
+    assert.deepEqual(
+      requested.sort(),
+      [
+        "http://127.0.0.1:8888/session/ses_remote",
+        "http://127.0.0.1:8888/session/ses_remote/message?limit=10",
+        "http://127.0.0.1:8888/session/status",
+      ].sort(),
+    );
     const text = sendCalls[0]?.text ?? "";
     assert.match(text, /<b>세션 #1<\/b>: Remote Title/);
-    assert.match(text, /상태: busy/);
+    assert.match(text, /<b>상태<\/b>: busy/);
     assert.match(text, /유저: remote user/);
     assert.match(text, /에이전트: remote assistant/);
   });

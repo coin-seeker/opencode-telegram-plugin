@@ -41,7 +41,7 @@ describe("start-work telegram dispatcher", () => {
     ]);
     assert.equal(
       planCompleteMessage("Remove earnings estimate"),
-      "plan 작성이 끝났어요.\n\nRemove earnings estimate",
+      "📝 <b>플랜 작성 완료</b>\n\n<b>세션</b>: Remove earnings estimate\n/sessions 확인 후 /start_work N 으로 실행할 수 있어요.",
     );
   });
 
@@ -84,7 +84,7 @@ describe("start-work telegram dispatcher", () => {
       edited.map((entry) => entry.messageId),
       [10, 11],
     );
-    assert.match(edited[0]?.text ?? "", /no longer used/i);
+    assert.match(edited[0]?.text ?? "", /버튼 사용 중지/);
     assert.equal((await pendingStartWorks.loadPending(shortHash))?.status, "consumed");
   });
 
@@ -121,7 +121,7 @@ describe("start-work telegram dispatcher", () => {
     await dispatcher.handleCallbackQuery(`sw:${shortHash}`, 10);
 
     assert.deepEqual(commands, []);
-    assert.match(edited[0]?.text ?? "", /no longer used/i);
+    assert.match(edited[0]?.text ?? "", /버튼 사용 중지/);
   });
 
   test("does not run start-work without pending plan completion state", async () => {
@@ -148,6 +148,6 @@ describe("start-work telegram dispatcher", () => {
     await dispatcher.handleCallbackQuery("sw:missing", 10);
 
     assert.deepEqual(commands, []);
-    assert.match(edited[0] ?? "", /expired/);
+    assert.match(edited[0] ?? "", /만료된 요청/);
   });
 });

@@ -21,6 +21,7 @@ import {
   hasStartWorkCommandInstruction,
   resetSessionIdleTimersForTest,
 } from "./session-idle.js";
+import { planCompleteMessage } from "./start-work.js";
 import type { EventHandlerContext } from "./types.js";
 
 type TestMessageEnvelope = {
@@ -273,7 +274,7 @@ describe("session idle notifications", () => {
     assert.deepEqual(sentMessages, []);
 
     await sleep(110);
-    assert.deepEqual(sentMessages, ["Agent has finished: Background task"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Background task", undefined)]);
     assert.equal(service.hasDeferredIdleNotification("bg-parent"), false);
   });
 
@@ -308,7 +309,7 @@ describe("session idle notifications", () => {
     assert.deepEqual(sentMessages, []);
 
     await sleep(120);
-    assert.deepEqual(sentMessages, ["Agent has finished: Boundary parent"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Boundary parent", undefined)]);
   });
 
   test("S4: delays a quick root task by the settle window then delivers it", async () => {
@@ -324,7 +325,7 @@ describe("session idle notifications", () => {
     assert.deepEqual(sentMessages, []);
 
     await sleep(80);
-    assert.deepEqual(sentMessages, ["Agent has finished: Quick task (build)"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Quick task", "build")]);
   });
 
   test("S5: a root resume during the settle window restarts the window", async () => {
@@ -345,7 +346,7 @@ describe("session idle notifications", () => {
     assert.deepEqual(sentMessages, []);
 
     await sleep(70);
-    assert.deepEqual(sentMessages, ["Agent has finished: Resettable (build)"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Resettable", "build")]);
     assert.equal(sentMessages.length, 1);
   });
 
@@ -384,7 +385,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("late-child"), ctx);
 
     await sleep(150);
-    assert.deepEqual(sentMessages, ["Agent has finished: Late parent"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Late parent", undefined)]);
   });
 
   test("S7a: a plan session without a start-work instruction is not notified after settle", async () => {
@@ -430,7 +431,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("plan-session"), ctx);
     await sleep(120);
 
-    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nRemove earnings estimate"]);
+    assert.deepEqual(sentMessages, [planCompleteMessage("Remove earnings estimate")]);
     assert.equal(sentOptions[0], undefined);
     assert.equal(
       (await ctx.pendingStartWorks.loadPending(createStartWorkShortHash("plan-session")))?.status,
@@ -450,7 +451,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("dup"), ctx);
 
     await sleep(120);
-    assert.deepEqual(sentMessages, ["Agent has finished: Dup task (build)"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Dup task", "build")]);
 
     await handleSessionIdle(idleEvent("dup"), ctx);
     await sleep(80);
@@ -495,7 +496,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("win-child"), ctx);
 
     await sleep(160);
-    assert.deepEqual(sentMessages, ["Agent has finished: Window parent"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Window parent", undefined)]);
   });
 
   test("S10: a busy observed during the confirm status fetch is not overridden by a stale live-idle", async () => {
@@ -592,7 +593,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("plan-flaky"), ctx);
     await sleep(120);
 
-    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nFlaky plan"]);
+    assert.deepEqual(sentMessages, [planCompleteMessage("Flaky plan")]);
     assert.equal(service.hasIdleNotificationSent("plan-flaky"), true);
   });
 
@@ -663,7 +664,7 @@ describe("session idle notifications", () => {
     delete statuses["dis-child"];
 
     await sleep(200);
-    assert.deepEqual(sentMessages, ["Agent has finished: Disappearing child root"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Disappearing child root", undefined)]);
   });
 
   test("defers when a checker grandchild is still running", async () => {
@@ -706,7 +707,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("parent-live-idle"), ctx);
     await sleep(120);
 
-    assert.deepEqual(sentMessages, ["Agent has finished: Live idle children"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Live idle children", undefined)]);
     assert.equal(service.hasDeferredIdleNotification("parent-live-idle"), false);
   });
 
@@ -734,7 +735,7 @@ describe("session idle notifications", () => {
     statuses["child-poll"] = { type: "idle" };
     await sleep(150);
 
-    assert.deepEqual(sentMessages, ["Agent has finished: Polling parent"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Polling parent", undefined)]);
     assert.equal(service.hasDeferredIdleNotification("parent-poll"), false);
   });
 
@@ -813,7 +814,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("build-session"), ctx);
     await sleep(120);
 
-    assert.deepEqual(sentMessages, ["Agent has finished: Build task (build)"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Build task", "build")]);
     assert.equal(sentOptions[0], undefined);
   });
 
@@ -828,7 +829,9 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("general-session"), ctx);
     await sleep(120);
 
-    assert.deepEqual(sentMessages, ["Agent has finished: 주식 admin 메뉴 정상화 계획 (general)"]);
+    assert.deepEqual(sentMessages, [
+      agentFinishedMessage("주식 admin 메뉴 정상화 계획", "general"),
+    ]);
   });
 
   test("omits the agent suffix when the agent is unknown", async () => {
@@ -841,7 +844,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("unknown-agent-session"), ctx);
     await sleep(120);
 
-    assert.deepEqual(sentMessages, ["Agent has finished: Untracked task"]);
+    assert.deepEqual(sentMessages, [agentFinishedMessage("Untracked task", undefined)]);
   });
 
   test("uses the registry Plan Builder agent when the local cache holds a stale raw agent", async () => {
@@ -878,7 +881,7 @@ describe("session idle notifications", () => {
     await handleSessionIdle(idleEvent("registry-plan-session"), ctx);
     await sleep(120);
 
-    assert.deepEqual(sentMessages, ["plan 작성이 끝났어요.\n\nRegistry-backed plan"]);
+    assert.deepEqual(sentMessages, [planCompleteMessage("Registry-backed plan")]);
   });
 });
 
@@ -892,22 +895,28 @@ describe("hasStartWorkCommandInstruction", () => {
 });
 
 describe("agentFinishedMessage", () => {
-  test("appends the agent name when both title and agent are known", () => {
+  test("renders the shared notice layout with session and agent fields", () => {
     assert.equal(
       agentFinishedMessage("Backend DB migration 계획", "build"),
-      "Agent has finished: Backend DB migration 계획 (build)",
+      "✅ <b>작업 완료</b>\n\n<b>세션</b>: Backend DB migration 계획\n<b>에이전트</b>: build",
     );
   });
 
-  test("keeps the plain title message when the agent is unknown", () => {
-    assert.equal(agentFinishedMessage("Build task", undefined), "Agent has finished: Build task");
+  test("escapes HTML in the session title", () => {
+    assert.equal(
+      agentFinishedMessage("a <b> title", undefined),
+      "✅ <b>작업 완료</b>\n\n<b>세션</b>: a &lt;b&gt; title",
+    );
   });
 
   test("shows the agent even when there is no title", () => {
-    assert.equal(agentFinishedMessage(null, "build"), "Agent has finished. (build)");
+    assert.equal(
+      agentFinishedMessage(null, "build"),
+      "✅ <b>작업 완료</b>\n\n<b>에이전트</b>: build",
+    );
   });
 
-  test("falls back to the bare message when nothing is known", () => {
-    assert.equal(agentFinishedMessage(null, undefined), "Agent has finished.");
+  test("falls back to the bare header when nothing is known", () => {
+    assert.equal(agentFinishedMessage(null, undefined), "✅ <b>작업 완료</b>");
   });
 });

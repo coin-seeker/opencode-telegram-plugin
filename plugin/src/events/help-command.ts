@@ -7,7 +7,7 @@ export type HelpDispatcher = (ctx: {
   bot: TelegramBotManager;
 }) => Promise<void>;
 
-const HELP_TEXT = `<b>OpenCode Telegram Plugin — 명령 도움말</b>
+const HELP_TEXT = `📖 <b>OpenCode Telegram Plugin — 명령 도움말</b>
 
 <b>/sessions</b>
 활성 root 세션 목록을 번호와 함께 표시 (최근활동순 top 20).

@@ -2,6 +2,7 @@ import type { EventPermissionUpdated, Permission } from "@opencode-ai/sdk";
 import type { EventPermissionAsked, PermissionRequest } from "@opencode-ai/sdk/v2";
 import type { TelegramPermissionDispatcher } from "../bot.js";
 import { claimOnce, releaseClaim } from "../lib/claim.js";
+import { field, notice } from "../lib/message-format.js";
 import {
   createPermissionShortHash,
   type PendingPermissionState,
@@ -84,12 +85,18 @@ function permissionMessage(
   permission: NormalizedPermissionRequest,
   sessionTitle: string | undefined,
 ): string {
-  const titleLine = sessionTitle ? `📋 ${sessionTitle}` : `Session: ${permission.sessionID}`;
-  const patterns =
-    permission.patterns.length > 0 ? `\nPatterns: ${permission.patterns.join(", ")}` : "";
-  const always =
-    permission.always.length > 0 ? `\nAlways options: ${permission.always.join(", ")}` : "";
-  return `❓ Permission requested\n\n${titleLine}\n\nPermission: ${permission.permission}\nDetail: ${permission.title}${patterns}${always}`;
+  return notice(
+    "🔐",
+    "권한 요청",
+    field("세션", sessionTitle ?? permission.sessionID),
+    field("권한", permission.permission),
+    field("내용", permission.title),
+    ...(permission.patterns.length > 0 ? [field("패턴", permission.patterns.join(", "))] : []),
+  );
+}
+
+function permissionBodyLines(permission: string, title: string): string[] {
+  return [field("권한", permission), field("내용", title)];
 }
 
 function permissionKeyboard(
@@ -109,10 +116,14 @@ function replyFromSelection(selection: string): PermissionReply | undefined {
   return undefined;
 }
 
-function replyLabel(reply: PermissionReply): string {
-  if (reply === "once") return "Allowed once";
-  if (reply === "always") return "Always allowed";
-  return "Rejected";
+function replyNotice(reply: PermissionReply, permission: string, title: string): string {
+  const heading =
+    reply === "once"
+      ? (["✅", "권한 허용 (1회)"] as const)
+      : reply === "always"
+        ? (["♻️", "권한 항상 허용"] as const)
+        : (["⛔", "권한 거부"] as const);
+  return notice(heading[0], heading[1], ...permissionBodyLines(permission, title));
 }
 
 async function upgradeLegacyPendingPermission(
@@ -228,11 +239,11 @@ export function isEventPermissionReplied(event: {
   return hasId;
 }
 
-function externalReplyLabel(value: string | undefined): string {
-  if (value === "once") return "Allowed once in opencode";
-  if (value === "always") return "Always allowed in opencode";
-  if (value === "reject") return "Rejected in opencode";
-  return "Already answered in opencode";
+function externalReplyTitle(value: string | undefined): string {
+  if (value === "once") return "권한 허용 (1회)";
+  if (value === "always") return "권한 항상 허용";
+  if (value === "reject") return "권한 거부";
+  return "권한 처리 완료";
 }
 
 export async function handlePermissionReplied(
@@ -247,11 +258,16 @@ export async function handlePermissionReplied(
     ctx.serverUrl.href,
   );
   if (!found) return;
-  const label = externalReplyLabel(event.properties.reply ?? event.properties.response);
+  const title = externalReplyTitle(event.properties.reply ?? event.properties.response);
   try {
     await ctx.bot.editMessageRemoveKeyboard(
       found.data.telegramMessageId,
-      `✅ ${label}\n\n${found.data.permission}: ${found.data.title}`,
+      notice(
+        "✅",
+        title,
+        ...permissionBodyLines(found.data.permission, found.data.title),
+        "OpenCode에서 직접 처리했어요.",
+      ),
     );
     ctx.logger.info("permission externally replied - cleared pending", {
       requestID,
@@ -279,7 +295,7 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          "This permission request is no longer pending (already answered or the session ended).",
+          notice("ℹ️", "만료된 요청", "이미 처리되었거나 세션이 종료된 권한 요청이에요."),
         );
         return;
       }
@@ -294,7 +310,7 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
         );
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          `✅ Permission ${replyLabel(reply)}\n\n${pending.permission}: ${pending.title}`,
+          replyNotice(reply, pending.permission, pending.title),
         );
         ctx.logger.info("permission reply sent", {
           requestID: pending.requestID,
@@ -304,7 +320,7 @@ export function createPermissionDispatcher(ctx: EventHandlerContext): TelegramPe
       } catch (err) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          "⚠️ Failed to send permission reply to opencode",
+          notice("⚠️", "권한 응답 전송 실패", "OpenCode에 응답을 전달하지 못했어요."),
         );
         ctx.logger.error("failed to send permission reply", {
           error: String(err),

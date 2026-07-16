@@ -6,6 +6,7 @@ import type { SessionsDispatcher } from "./events/sessions-command.js";
 import type { StartWorkCommandDispatcher } from "./events/start-work-command.js";
 import type { StatusDispatcher } from "./events/status-command.js";
 import type { Logger } from "./lib/logger.js";
+import { notice } from "./lib/message-format.js";
 import { questionText } from "./lib/question-format.js";
 import type { StateStore } from "./lib/state-store.js";
 
@@ -94,7 +95,13 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
         await stateStore.write({ chatId: newChatId, discoveredBy: process.pid });
         logger.info("chat_id discovered", { chatId: newChatId });
         await ctx.reply(
-          `✅ Chat connected!\n\nYour chat_id: ${newChatId}\n\nThis chat is now active for OpenCode notifications.`,
+          notice(
+            "🔗",
+            "채팅 연결 완료",
+            `<b>chat_id</b>: <code>${newChatId}</code>`,
+            "이제 OpenCode 알림을 이 채팅으로 받아요.",
+          ),
+          { parse_mode: "HTML" },
         );
       }
     }
@@ -237,7 +244,9 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
     },
     async sendMessage(text, options) {
       const chatId = await requireChatId("sendMessage");
-      const result = await bot.api.sendMessage(chatId, text, options);
+      // Every user-facing message uses the shared HTML notice layout; callers escape dynamic
+      // content, so HTML is the safe default and stays overridable per call.
+      const result = await bot.api.sendMessage(chatId, text, { parse_mode: "HTML", ...options });
       return { message_id: result.message_id };
     },
     async sendQuestionWithKeyboard(question, callbackData) {
@@ -257,12 +266,11 @@ export function createTelegramBot(opts: CreateBotOptions): TelegramBotManager {
       });
     },
     async editMessage(messageId: number, text: string) {
-      const chatId = await requireChatId("editMessage");
-      await bot.api.editMessageText(chatId, messageId, text);
+      await this.editMessageText(messageId, text);
     },
     async editMessageText(messageId: number, text: string, options?: EditMessageOptions) {
       const chatId = await requireChatId("editMessageText");
-      await bot.api.editMessageText(chatId, messageId, text, options);
+      await bot.api.editMessageText(chatId, messageId, text, { parse_mode: "HTML", ...options });
     },
     async editMessageRemoveKeyboard(messageId: number, finalText: string) {
       await this.editMessageText(messageId, finalText, { reply_markup: { inline_keyboard: [] } });

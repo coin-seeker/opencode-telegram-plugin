@@ -260,7 +260,7 @@ describe("question asked flow", () => {
       { requestID: "que_test", answers: [["A"], ["B"]], serverUrl: "http://localhost:4096/" },
     ]);
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /답변 완료/);
   });
 
   test("stores source server URL for cross-process question replies", async () => {
@@ -315,7 +315,7 @@ describe("question asked flow", () => {
     const pending = await ownerCtx.pendingQuestions.loadPending(shortHash);
     assert.ok(pending?.submittedAt);
     assert.deepEqual(pending.answersInProgress, [["A"]]);
-    assert.match(leaderBot.editedMessages.at(-1)?.text ?? "", /already being sent|Sending answer/);
+    assert.match(leaderBot.editedMessages.at(-1)?.text ?? "", /답변 전송 중/);
 
     const drained = await drainSubmittedQuestionReplies(ownerCtx);
 
@@ -324,7 +324,7 @@ describe("question asked flow", () => {
       { requestID: "que_handoff", answers: [["A"]], serverUrl: "http://localhost:4096/" },
     ]);
     assert.equal(await ownerCtx.pendingQuestions.loadPending(shortHash), undefined);
-    assert.match(ownerBot.editedMessages.at(-1)?.text ?? "", /Answered/);
+    assert.match(ownerBot.editedMessages.at(-1)?.text ?? "", /답변 완료/);
   });
 
   test("toggles multiple selections and waits for Done before replying", async () => {
@@ -337,10 +337,11 @@ describe("question asked flow", () => {
     const dispatcher = createQuestionDispatcher(ctx);
 
     assert.match(sentMessages[0]?.text ?? "", /Pick options\?/);
-    assert.match(sentMessages[0]?.text ?? "", /Options:\n\n1\. A/);
-    assert.match(sentMessages[0]?.text ?? "", /설명: First choice details/);
-    assert.match(sentMessages[0]?.text ?? "", /\n\n2\. B/);
-    assert.match(sentMessages[0]?.text ?? "", /설명: Second choice details/);
+    assert.match(
+      sentMessages[0]?.text ?? "",
+      /<b>선택지<\/b>\n1\. <b>A<\/b> — First choice details/,
+    );
+    assert.match(sentMessages[0]?.text ?? "", /\n2\. <b>B<\/b> — Second choice details/);
     assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
       null,
     ]);
@@ -369,7 +370,7 @@ describe("question asked flow", () => {
       { requestID: "que_multiple", answers: [["B"]], serverUrl: "http://localhost:4096/" },
     ]);
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /답변 완료/);
   });
 
   test("adds custom multiple answers without replying until Done", async () => {
@@ -386,14 +387,14 @@ describe("question asked flow", () => {
     const dispatcher = createQuestionDispatcher(ctx);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:c`, 10, 1, 1);
-    assert.match(sentMessages.at(-1)?.text ?? "", /Type your custom answer/);
+    assert.match(sentMessages.at(-1)?.text ?? "", /커스텀 답변 입력/);
 
     await dispatcher.handleTextReply("Custom", 1, 1, 11);
     assert.equal(replies.length, 0);
     assert.deepEqual((await ctx.pendingQuestions.loadPending(shortHash))?.answersInProgress, [
       ["Custom"],
     ]);
-    assert.match(sentMessages.at(-1)?.text ?? "", /Custom answer added/);
+    assert.match(sentMessages.at(-1)?.text ?? "", /커스텀 답변 추가/);
 
     await dispatcher.handleCallbackQuery(`q:${shortHash}:0:d`, 10, 1, 1);
     assert.deepEqual(replies, [
@@ -435,7 +436,7 @@ describe("question asked flow", () => {
         serverUrl: "http://localhost:4096/",
       },
     ]);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /답변 완료/);
     assert.doesNotMatch(editedMessages.at(-1)?.text ?? "", /expired/i);
   });
 
@@ -463,7 +464,7 @@ describe("question asked flow", () => {
     assert.deepEqual(replies, [
       { requestID: "que_custom_window", answers: [["A"]], serverUrl: "http://localhost:4096/" },
     ]);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /답변 완료/);
   });
 
   test("deletes the pending custom answer prompt when answered in opencode", async () => {
@@ -517,7 +518,7 @@ describe("question asked flow", () => {
       { requestID: "que_stale", answers: [["A"]], serverUrl: "http://localhost:4096/" },
     ]);
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Answered/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /답변 완료/);
   });
 
   test("failed question prompt send can be retried immediately", async () => {
@@ -617,7 +618,7 @@ describe("question asked flow", () => {
     );
 
     assert.equal(await ctx.pendingQuestions.loadPending(shortHash), undefined);
-    assert.match(editedMessages.at(-1)?.text ?? "", /Already answered in opencode/);
+    assert.match(editedMessages.at(-1)?.text ?? "", /OpenCode에서 직접 답변했어요/);
   });
 
   test("ignores opencode answer for a different session", async () => {
@@ -643,6 +644,7 @@ describe("question asked flow", () => {
         },
       },
       ctx,
+      { retryDelaysMs: [0] },
     );
 
     assert.ok(await ctx.pendingQuestions.loadPending(shortHash));

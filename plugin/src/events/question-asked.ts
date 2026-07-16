@@ -1,6 +1,7 @@
 import type { EventQuestionAsked, QuestionInfo } from "@opencode-ai/sdk/v2";
 import type { TelegramQuestionDispatcher } from "../bot.js";
 import { claimOnce, releaseClaim } from "../lib/claim.js";
+import { field, notice } from "../lib/message-format.js";
 import { createQuestionShortHash, type PendingQuestionState } from "../lib/pending-questions.js";
 import { pendingQuestionText } from "../lib/question-format.js";
 import type { EventHandlerContext, QuestionAnswer } from "./types.js";
@@ -108,13 +109,10 @@ function questionPromptText(pending: PendingQuestionState, questionIndex: number
   return pendingQuestionText(pending.questions, questionIndex);
 }
 
-function answerSummary(questions: QuestionInfo[], answers: QuestionAnswer[]): string {
-  return answers
-    .map(
-      (answer, index) =>
-        `${index + 1}. ${questions[index]?.header ?? "Question"}: ${answer.join(", ") || "(empty)"}`,
-    )
-    .join("\n");
+function answerSummaryLines(questions: QuestionInfo[], answers: QuestionAnswer[]): string[] {
+  return answers.map((answer, index) =>
+    field(questions[index]?.header ?? `질문 ${index + 1}`, answer.join(", ") || "(없음)"),
+  );
 }
 
 async function sendQuestionReply(
@@ -124,24 +122,29 @@ async function sendQuestionReply(
   answers: QuestionAnswer[],
 ): Promise<void> {
   const messageId = pending.telegramMessageIds[0];
+  // Delete BEFORE posting: OpenCode emits question.replied the instant it accepts the answer, and
+  // concurrent handleQuestionReplied handlers must not find this pending and overwrite the
+  // answered summary below with an "answered in OpenCode" notice.
+  await ctx.pendingQuestions.deletePending(shortHash);
   try {
     await ctx.replyToQuestion(pending.requestID, answers, pending.serverUrl);
     await ctx.bot.editMessageRemoveKeyboard(
       messageId,
-      `✅ Answered:\n${answerSummary(pending.questions, answers)}`,
+      notice("✅", "답변 완료", ...answerSummaryLines(pending.questions, answers)),
     );
     ctx.logger.info("question reply sent", {
       requestID: pending.requestID,
       sessionID: pending.sessionID,
     });
   } catch (err) {
-    await ctx.bot.editMessageRemoveKeyboard(messageId, "⚠️ Failed to send answer to opencode");
+    await ctx.bot.editMessageRemoveKeyboard(
+      messageId,
+      notice("⚠️", "답변 전송 실패", "OpenCode에 답변을 전달하지 못했어요. 로그를 확인해 주세요."),
+    );
     ctx.logger.error("failed to send question reply", {
       error: String(err),
       requestID: pending.requestID,
     });
-  } finally {
-    await ctx.pendingQuestions.deletePending(shortHash);
   }
 }
 
@@ -174,7 +177,7 @@ async function handOffQuestionReply(
   await ctx.pendingQuestions.savePending(shortHash, pending);
   await ctx.bot.editMessageRemoveKeyboard(
     pending.telegramMessageIds[0],
-    "⏳ Sending answer to the OpenCode window that asked this question...",
+    notice("⏳", "답변 전송 중", "질문을 받은 OpenCode 창으로 답변을 전달하고 있어요."),
   );
   ctx.logger.info("question reply handed off to owner process", {
     requestID: pending.requestID,
@@ -241,6 +244,21 @@ export async function handleQuestionAsked(
   const request = event.properties;
   if (request.questions.length === 0) return;
 
+  // Idempotency beyond the short claim TTL: a re-delivered question.asked must never send a second
+  // Telegram prompt (the first message would keep live buttons forever once pending is replaced).
+  const existing = await ctx.pendingQuestions.findByRequestID(
+    request.id,
+    request.sessionID,
+    ctx.serverUrl.href,
+  );
+  if (existing) {
+    ctx.logger.info("question prompt already pending - skipping duplicate", {
+      requestID: request.id,
+      sessionID: request.sessionID,
+    });
+    return;
+  }
+
   const claimKey = `question:${ctx.serverUrl.href}:${request.sessionID}:${request.id}`;
   const claimed = await claimOnce({ claimsDir: ctx.claimsDir, key: claimKey, ttlMs: 5_000 });
   if (!claimed) return;
@@ -302,14 +320,14 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
       if (!pending) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          "This question is no longer pending (already answered or the session ended).",
+          notice("ℹ️", "만료된 질문", "이미 답변되었거나 세션이 종료된 질문이에요."),
         );
         return;
       }
       if (pending.submittedAt !== undefined) {
         await ctx.bot.editMessageRemoveKeyboard(
           messageId,
-          "This answer is already being sent to opencode.",
+          notice("⏳", "답변 전송 중", "이미 답변이 전송되고 있어요."),
         );
         return;
       }
@@ -325,12 +343,12 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
         } else {
           await ctx.bot.editMessageRemoveKeyboard(
             messageId,
-            "✏️ Reply to the next message with your custom answer.",
+            notice("✏️", "커스텀 답변", "다음 메시지에 답장(Reply)으로 답변을 입력해 주세요."),
           );
         }
         const prompt = await ctx.bot.replyWithForceReply(
-          "Type your custom answer",
-          "Type your answer",
+          notice("✏️", "커스텀 답변 입력"),
+          "답변 입력",
         );
         pending.awaitingCustomFor = {
           shortHash,
@@ -380,14 +398,16 @@ export function createQuestionDispatcher(ctx: EventHandlerContext): TelegramQues
           ? current
           : [...current, text];
         match.data.awaitingCustomFor = undefined;
-        await ctx.bot.sendMessage("✅ Custom answer added. Tap Done when finished.");
+        await ctx.bot.sendMessage(
+          notice("✅", "커스텀 답변 추가", "선택을 마치면 Done을 눌러 제출해 주세요."),
+        );
         await ctx.pendingQuestions.savePending(match.shortHash, match.data);
         await editPromptForQuestion(ctx, match.data, match.shortHash, awaiting.questionIndex);
         return;
       }
       match.data.answersInProgress[awaiting.questionIndex] = [text];
       match.data.awaitingCustomFor = undefined;
-      await ctx.bot.sendMessage("✅ Custom answer sent.");
+      await ctx.bot.sendMessage(notice("✅", "커스텀 답변 접수"));
       await completeIfReady(ctx, match.data, match.shortHash);
     },
   };

@@ -1,6 +1,6 @@
 {
   "name": "@coinseeker/opencode-telegram-plugin",
-  "version": "1.2.5",
+  "version": "1.3.0",
   "description": "Control and monitor OpenCode from Telegram with notifications, question replies, and subagent-aware completion.",
   "type": "module",
   "main": "dist/telegram-remote.js",
